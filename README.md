@@ -123,6 +123,13 @@ are in `docs/`. See [application plugins](docs/APPLICATION-PLUGINS.md),
 [coexistence](docs/COEXISTENCE.md), and the
 [high-trust threat model](docs/THREAT-MODEL.md).
 
+## Support
+
+Use the repository's structured GitHub issue forms for reproducible bugs,
+installation problems, and feature requests. Read [SUPPORT.md](SUPPORT.md)
+before posting diagnostics. Report security vulnerabilities privately through
+GitHub Security Advisories as directed by [SECURITY.md](SECURITY.md).
+
 ## License
 
 HawkSpan code is Apache License 2.0. Separately identified media and example

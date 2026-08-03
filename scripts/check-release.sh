@@ -4,6 +4,11 @@ set -euo pipefail
 repo_root=${0:A:h:h}
 cd "$repo_root"
 
+if ! command -v rg >/dev/null 2>&1; then
+  print -u2 "missing required release verifier dependency: rg (ripgrep)"
+  exit 1
+fi
+
 node --check scripts/mcp-server.mjs
 node --check scripts/call-tool.mjs
 node --check scripts/start-local-control.mjs
@@ -35,6 +40,7 @@ node --check scripts/release-tree.mjs
 node --check scripts/check-release-tree.mjs
 node --check scripts/test-release-tree.mjs
 node --check scripts/test-first-run.mjs
+node --check scripts/test-public-release-management.mjs
 node scripts/test-mcp.mjs
 node scripts/test-configuration-flags.mjs
 node scripts/test-configuration-profiles.mjs
@@ -53,6 +59,7 @@ python3 scripts/test-application-workflows-packet-builder.py
 node scripts/test-application-workflows-packet-receiver.mjs
 node scripts/test-release-tree.mjs
 node scripts/test-first-run.mjs
+node scripts/test-public-release-management.mjs
 node scripts/test-faults.mjs
 node scripts/test-application-plugins.mjs
 node scripts/test-synthetic-plugins.mjs

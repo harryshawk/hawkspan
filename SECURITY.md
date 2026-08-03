@@ -49,5 +49,5 @@ wrap or replace `run_command` with a site-specific command policy.
 ## Reporting
 
 Do not publish exploit details in a public issue before maintainers have had a
-reasonable opportunity to respond. Use the repository's private vulnerability
-reporting channel when it is enabled.
+reasonable opportunity to respond. Use the repository's
+[private vulnerability reporting channel](https://github.com/harryshawk/hawkspan/security/advisories/new).
