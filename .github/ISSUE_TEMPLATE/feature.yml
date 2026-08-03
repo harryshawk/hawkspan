@@ -1,0 +1,34 @@
+name: Feature request
+description: Propose an improvement within HawkSpan's product boundary.
+title: "[Feature]: "
+labels:
+  - feature
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user problem or workflow limitation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the observable behavior you want HawkSpan to provide.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: Product boundary
+      options:
+        - label: This request is for two trusted Macs controlled by the same owner.
+          required: true
+        - label: This report contains no credentials or machine-specific private data.
+          required: true
+

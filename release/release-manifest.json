@@ -1,12 +1,42 @@
 {
   "schema_version": 1,
   "kind": "hawkspan-public-release-tree",
-  "release_id": "tree-sha256:89eee701a77f56e8a5564ddc07ed9599b1c772b65de53cca068a8ab6083ac33f",
+  "release_id": "tree-sha256:f822bd92184777e084a975decac955fcba643eda99440f16c8bb1d587cb18299",
   "files": [
     {
       "path": ".codex-plugin/plugin.json",
       "size": 914,
       "sha256": "cfa5c0add5b959301acd4c35023c5d82e67e154dc986b7905aeed1bde5c94958"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/bug.yml",
+      "size": 2269,
+      "sha256": "b274ee9ff523961f603c7c0913f19c706feaf4042b3053cc5e92b871bdec1085"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "size": 449,
+      "sha256": "0893d0ef9e9d40b0c85a438368f4225c8e971989898b25d07735cd0a3abc8abb"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/feature.yml",
+      "size": 936,
+      "sha256": "dcfc0196a62f69d7181f547699514cfd5d3cb376103a1e90f0697ece1d8c743a"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/installation.yml",
+      "size": 1807,
+      "sha256": "5ca4fa0713fb942bf362ef1440c3306468588d09145e921d9da0bb8445a090cc"
+    },
+    {
+      "path": ".github/workflows/release-gate.yml",
+      "size": 796,
+      "sha256": "3693fe73a2468fda88618e29560ed822ddeca0b4e3b5703bf8aa6461c0a324bd"
+    },
+    {
+      "path": ".github/workflows/traffic-snapshot.yml",
+      "size": 2291,
+      "sha256": "bbd38d23844b2ecc3a8b4eb70578feade6fd08c1bd137e4ff2bf9c870d490db5"
     },
     {
       "path": ".gitignore",
@@ -50,13 +80,18 @@
     },
     {
       "path": "README.md",
-      "size": 5279,
-      "sha256": "8feaf953691c0008542d5fee208508c9f198a1ff9dee7bf8b3afee254a6f2d88"
+      "size": 5589,
+      "sha256": "d5ad1cfbfeb84ad1ef11d7bfbc1e892e7c9822f965a54db27910e9c507055406"
     },
     {
       "path": "SECURITY.md",
-      "size": 2230,
-      "sha256": "55697adbbb2de7f40aee03d1c17aab247a968a6f2ad4d22f6b812031f72f6573"
+      "size": 2277,
+      "sha256": "5aca1b93ebe2b5dca9b6b490cafee583d23b43a336898c28da8ac7f847691678"
+    },
+    {
+      "path": "SUPPORT.md",
+      "size": 703,
+      "sha256": "4fb0acea9a6ea1bfccf6b77ec9d94ef3e7080f6b82776ef19c692a5b603efb9e"
     },
     {
       "path": "config/example.json",
@@ -1019,6 +1054,11 @@
       "sha256": "9c285d064da6e6af218bf1461a9488e847adbec34c72437cd6537090c3da4675"
     },
     {
+      "path": "release/RELEASE_NOTES.md",
+      "size": 1581,
+      "sha256": "b02120b82bd5323778d7deb06a511dfb24d3a0fbe99c921223aad29e59d67240"
+    },
+    {
       "path": "scripts/application-plugins.mjs",
       "size": 29135,
       "sha256": "42971b384507d43e03fe69c04d1f0e5b3446b550eb476c46b664f33999308e72"
@@ -1040,8 +1080,8 @@
     },
     {
       "path": "scripts/check-release.sh",
-      "size": 4762,
-      "sha256": "a09767e0ca483edd1a6b104ee6d681ea4d2598008bb3c31e1947ff3b47c3b89a"
+      "size": 4993,
+      "sha256": "c2078b00a256638936db8d9848d29084d2739395b6de9aa3a2b40792b832af6f"
     },
     {
       "path": "scripts/generate-simpletuner-review-pdf.py",
@@ -1207,6 +1247,11 @@
       "path": "scripts/test-public-history-scan.sh",
       "size": 4521,
       "sha256": "4ff60fc3fbe551abab60a9546c8e422111e460ab3e8fbea70ae067e818488765"
+    },
+    {
+      "path": "scripts/test-public-release-management.mjs",
+      "size": 2211,
+      "sha256": "ce8cdbfff93bd37e572e1a841866ea16a54f1886589e8df5ae29833211680c04"
     },
     {
       "path": "scripts/test-real-pair-acceptance.mjs",
