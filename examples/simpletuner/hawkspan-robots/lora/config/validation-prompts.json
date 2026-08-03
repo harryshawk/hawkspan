@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "trigger": "hawkspan robots",
+  "seed_policy": "same seed per prompt across checkpoints 600 and 900",
+  "prompts": [
+    {
+      "id": "cute-hero-product",
+      "prompt": "hawkspan robots, exactly two friendly companion robots posed as a polished product duo, left robot Hawk with a readable Hawk nameplate, right robot Span with a readable Span nameplate, one clearly visible glowing physical span between them, clean white and sky-blue studio, centered brand-ready composition, premium whimsical G-rated 3D render"
+    },
+    {
+      "id": "cute-creative-workflow",
+      "prompt": "hawkspan robots, exactly two robots collaborating in a tidy creative studio, left robot Hawk with a readable Hawk nameplate, right robot Span with a readable Span nameplate, one luminous physical span carrying work between them, warm expressive faces, uncluttered promotional composition, polished G-rated 3D illustration"
+    },
+    {
+      "id": "cute-redundant-links",
+      "prompt": "hawkspan robots, exactly two reliable robots, left robot Hawk with a readable Hawk nameplate and right robot Span with a readable Span nameplate, connected by two clearly distinct parallel physical spans, one sleek Thunderbolt cable and one blue Ethernet cable, both softly glowing, clean isometric product scene, polished commercial G-rated 3D render"
+    },
+    {
+      "id": "cute-campaign-span",
+      "prompt": "hawkspan robots, exactly two heroic helper robots at opposite ends of one graceful glowing physical span, left robot Hawk with a readable Hawk nameplate, right robot Span with a readable Span nameplate, joyful teamwork, fresh sunrise palette, generous negative space, clean brand-ready campaign composition, premium G-rated storybook 3D illustration"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+--- a/simpletuner/helpers/training/collate.py
++++ b/simpletuner/helpers/training/collate.py
+@@ -936,1 +936,1 @@
+-            if latent_source_backends and needs_reference_pixels:
++            if latent_source_backends and (needs_reference_pixels or StateTracker.get_args().controlnet):
+                 conditioning_pixel_values = []

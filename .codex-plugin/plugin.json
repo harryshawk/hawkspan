@@ -1,0 +1,25 @@
+{
+  "name": "hawkspan",
+  "version": "0.1.0",
+  "description": "Durable peer-agent coordination and audited remote control across trusted Macs.",
+  "author": {
+    "name": "HawkSpan Contributors"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "HawkSpan",
+    "shortDescription": "Coordinate agents and control software across trusted Macs.",
+    "longDescription": "Provides durable messages, acknowledgements, wakeups, verified artifact transfer, job tracking, and audited remote command execution over a preferred private route with fallback.",
+    "developerName": "HawkSpan Contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Show peer-link, message, artifact, and job status.",
+      "Send an acknowledged message to the peer.",
+      "Run an audited command on the peer."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

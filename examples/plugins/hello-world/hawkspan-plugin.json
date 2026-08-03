@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "hello-world",
+  "name": "Harmless Hello World",
+  "version": "1.0.0",
+  "entrypoint": "plugin.mjs",
+  "operations": [
+    {
+      "name": "greet",
+      "description": "Return a greeting without launching a process or changing files.",
+      "roles": ["controller", "worker"],
+      "access": ["local", "peer", "html"],
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 80
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    }
+  ]
+}

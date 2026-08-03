@@ -1,0 +1,222 @@
+{
+  "schema_version": 1,
+  "id": "application-workflows",
+  "name": "SimpleTuner Workflows",
+  "version": "0.4.0",
+  "entrypoint": "plugin.mjs",
+  "presets": [
+    {
+      "id": "headless-simpletuner-worker",
+      "name": "Headless SimpleTuner worker",
+      "description": "Configure this Mac as a scoped worker for reviewed SimpleTuner 4.5.x operations.",
+      "impact": "Allows only explicitly selected SimpleTuner operations; broad commands, paths, credentials, and local trainer settings remain unchanged.",
+      "settings": {
+        "role_profile": "controller-worker",
+        "node_role": "worker",
+        "features": {
+          "allowed_peer_tools": {
+            "inbound": [
+              "app_application_workflows_worker_disk_status",
+              "app_application_workflows_training_stage_sample_set",
+              "app_application_workflows_training_import_dataset_bundle",
+              "app_application_workflows_training_readiness",
+              "app_application_workflows_training_stage_runtime_job",
+              "app_application_workflows_training_local_process_status",
+              "app_application_workflows_training_runtime_run_status",
+              "app_application_workflows_training_local_queue_detail",
+              "app_application_workflows_training_validate_local_dataset",
+              "app_application_workflows_training_tail_local_log",
+              "app_application_workflows_training_checkpoint_retention_audit",
+              "app_application_workflows_training_preservation_status",
+              "app_application_workflows_training_local_trainer_start",
+              "app_application_workflows_training_local_trainer_stop",
+              "app_application_workflows_training_local_trainer_package",
+              "create_job",
+              "update_job_status",
+              "list_jobs",
+              "link_status",
+              "receive_messages",
+              "acknowledge_message",
+              "register_artifact",
+              "send_artifact",
+              "receive_artifacts"
+            ],
+            "outbound": []
+          },
+          "allow_peer_jobs": {"inbound": true, "outbound": false},
+          "allow_peer_acknowledgements": {"inbound": true, "outbound": true},
+          "allow_peer_artifact_receive": {"inbound": true, "outbound": false},
+          "allow_peer_artifact_send": {"inbound": true, "outbound": true},
+          "enable_broad_run_command": {"inbound": false, "outbound": false}
+        },
+        "enabled_operations": [
+          "worker_disk_status", "training_stage_sample_set", "training_import_dataset_bundle",
+          "training_local_process_status", "training_runtime_run_status", "training_local_queue_detail", "training_validate_local_dataset",
+              "training_tail_local_log", "training_checkpoint_retention_audit", "training_preservation_status",
+              "training_local_trainer_start", "training_local_trainer_stop", "training_local_trainer_package",
+          "training_readiness", "training_stage_runtime_job"
+        ]
+      }
+    },
+    {
+      "id": "simpletuner-controller",
+      "name": "SimpleTuner controller",
+      "description": "Configure this Mac to coordinate one reviewed headless SimpleTuner worker.",
+      "impact": "Allows only the SimpleTuner workflow tools plus bounded job coordination and artifact receipt; broad commands remain disabled.",
+      "settings": {
+        "role_profile": "controller-worker",
+        "node_role": "controller",
+        "features": {
+          "allowed_peer_tools": {
+            "inbound": ["receive_artifacts"],
+            "outbound": [
+              "app_application_workflows_worker_disk_status",
+              "app_application_workflows_training_import_dataset_bundle",
+              "app_application_workflows_training_readiness",
+              "app_application_workflows_training_stage_runtime_job",
+              "app_application_workflows_training_local_process_status",
+              "app_application_workflows_training_runtime_run_status",
+              "app_application_workflows_training_local_queue_detail",
+              "app_application_workflows_training_validate_local_dataset",
+              "app_application_workflows_training_tail_local_log",
+              "app_application_workflows_training_checkpoint_retention_audit",
+              "app_application_workflows_training_preservation_status",
+              "app_application_workflows_training_local_trainer_start",
+              "app_application_workflows_training_local_trainer_stop",
+              "app_application_workflows_training_local_trainer_package",
+              "create_job",
+              "update_job_status",
+              "list_jobs",
+              "link_status",
+              "receive_messages",
+              "acknowledge_message",
+              "register_artifact",
+              "send_artifact",
+              "receive_artifacts"
+            ]
+          },
+          "allow_peer_jobs": {"inbound": false, "outbound": true},
+          "allow_peer_acknowledgements": {"inbound": true, "outbound": true},
+          "allow_peer_artifact_receive": {"inbound": true, "outbound": true},
+          "allow_peer_artifact_send": {"inbound": false, "outbound": true},
+          "enable_broad_run_command": {"inbound": false, "outbound": false}
+        },
+        "enabled_operations": ["training_receive_return_packet"]
+      }
+    }
+  ],
+  "operations": [
+    {
+      "name": "worker_disk_status", "description": "Inspect capacity for the configured worker disk root.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-inspect"],
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
+    },
+    {
+      "name": "training_stage_sample_set", "description": "Verify and stage an exact manifest-bound captioned sample set already delivered to the worker inbox.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-stage"],
+      "inputSchema": {"type": "object", "required": ["job_id", "source_id", "dataset_id", "manifest"], "properties": {
+        "job_id": {"$ref": "#/$defs/id"}, "source_id": {"$ref": "#/$defs/id"}, "dataset_id": {"$ref": "#/$defs/id"}, "manifest": {"type": "object"}
+      }, "additionalProperties": false, "$defs": {"id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128}}},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    },
+    {
+      "name": "training_import_dataset_bundle", "description": "Import one verified HawkSpan dataset-bundle artifact into the configured worker dataset root.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-stage"],
+      "inputSchema": {"type": "object", "required": ["job_id", "artifact_id", "artifact_sha256", "dataset_id"], "properties": {
+        "job_id": {"$ref": "#/$defs/id"}, "artifact_id": {"$ref": "#/$defs/id"}, "artifact_sha256": {"$ref": "#/$defs/hash"}, "dataset_id": {"$ref": "#/$defs/id"}
+      }, "additionalProperties": false, "$defs": {"id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128}, "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    },
+    {
+      "name": "training_readiness", "description": "Verify local dataset, config, backend, policy, and validation prompt structure and compute the exact readiness revision.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-validate"],
+      "inputSchema": {"type": "object", "required": ["job_id", "dataset_id", "recipe_id", "recipe_revision"], "properties": {
+        "job_id": {"$ref": "#/$defs/id"}, "dataset_id": {"$ref": "#/$defs/id"}, "recipe_id": {"$ref": "#/$defs/id"}, "recipe_revision": {"$ref": "#/$defs/hash"}
+      }, "additionalProperties": false, "$defs": {"id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128}, "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
+    },
+    {
+      "name": "training_stage_runtime_job", "description": "Stage one immutable local SimpleTuner runtime job by cloning dataset/config files and rewriting paths under configured HawkSpan runtime roots without starting training.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-stage", "workload-validate"],
+      "inputSchema": {"type": "object", "required": ["job_id", "dataset_id", "recipe_id"], "properties": {
+        "job_id": {"$ref": "#/$defs/id"}, "dataset_id": {"$ref": "#/$defs/id"}, "recipe_id": {"$ref": "#/$defs/id"}
+      }, "additionalProperties": false, "$defs": {"id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128}}},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+    },
+    {
+      "name": "training_local_process_status", "description": "Inspect local SimpleTuner-like process lines and fresh log heartbeat without starting or stopping training.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-inspect"],
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
+    },
+    {
+      "name": "training_runtime_run_status", "description": "Read local runtime status, manifest, progress, log heartbeat, and checkpoint directories under configured HawkSpan roots.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-inspect"],
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
+    },
+    {
+      "name": "training_local_queue_detail", "description": "Read local runtime manifest and status files and derive per-job state without mutation.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-inspect"],
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
+    },
+    {
+      "name": "training_validate_local_dataset", "description": "Validate a local dataset under the configured dataset root for image files and non-empty sidecar captions.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-inspect"],
+      "inputSchema": {"type": "object", "required": ["dataset_id"], "properties": {"dataset_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128}}, "additionalProperties": false},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
+    },
+    {
+      "name": "training_tail_local_log", "description": "Read the last bounded lines from a log file under the configured HawkSpan log root.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-inspect"],
+      "inputSchema": {"type": "object", "required": ["relative_path"], "properties": {"relative_path": {"type": "string", "minLength": 1, "maxLength": 1024}, "lines": {"type": "integer", "minimum": 1, "maximum": 2000}}, "additionalProperties": false},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
+    },
+    {
+      "name": "training_checkpoint_retention_audit", "description": "Read local runtime JSON configs and output checkpoint directories to identify retention settings below the configured minimum.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-inspect"],
+      "inputSchema": {"type": "object", "properties": {"minimum": {"type": "integer", "minimum": 1}}, "additionalProperties": false},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
+    },
+    {
+      "name": "training_preservation_status", "description": "Read preserved checkpoint directories under the configured output root.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-inspect"],
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
+    },
+    {
+      "name": "training_local_trainer_start", "description": "Invoke the configured local trainer start adapter only for one exact authorized staged runtime target and revision fingerprint.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-local-trainer-start"],
+      "inputSchema": {"type": "object", "required": ["job_id", "target", "expected_revision_fingerprint"], "properties": {
+        "job_id": {"$ref": "#/$defs/id"}, "target": {"$ref": "#/$defs/id"}, "expected_revision_fingerprint": {"$ref": "#/$defs/hash"}
+      }, "additionalProperties": false, "$defs": {"id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128}, "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
+    },
+    {
+      "name": "training_local_trainer_stop", "description": "Invoke the configured local trainer stop adapter only for the exact adapter-managed started target.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-local-trainer-stop"],
+      "inputSchema": {"type": "object", "required": ["job_id", "target"], "properties": {
+        "job_id": {"$ref": "#/$defs/id"}, "target": {"$ref": "#/$defs/id"}
+      }, "additionalProperties": false, "$defs": {"id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128}}},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
+    },
+    {
+      "name": "training_local_trainer_package", "description": "Build, verify, and register one packet for an exact adapter-managed terminal target; successful runs require final-model evidence and interrupted runs require model-checkpoint evidence.",
+      "roles": ["worker"], "access": ["local", "peer"], "required_flags": ["workload-local-trainer-package"],
+      "inputSchema": {"type": "object", "required": ["job_id", "target"], "properties": {
+        "job_id": {"$ref": "#/$defs/id"}, "target": {"$ref": "#/$defs/id"}
+      }, "additionalProperties": false, "$defs": {"id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128}}},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+    },
+    {
+      "name": "training_receive_return_packet", "description": "Receive, verify, intake, and durably acknowledge one exact returned training packet on the controller.",
+      "roles": ["controller"], "access": ["local"], "required_flags": ["workload-packet-intake"],
+      "inputSchema": {"type": "object", "required": ["artifact_id", "expected_sha256", "expected_target", "expected_revision_fingerprint"], "properties": {
+        "artifact_id": {"$ref": "#/$defs/id"}, "expected_sha256": {"$ref": "#/$defs/hash"}, "expected_target": {"$ref": "#/$defs/id"}, "expected_revision_fingerprint": {"$ref": "#/$defs/hash"}, "receipt_recipient": {"type": "string", "minLength": 1, "maxLength": 256}
+      }, "additionalProperties": false, "$defs": {"id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "maxLength": 128}, "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+    }
+  ]
+}

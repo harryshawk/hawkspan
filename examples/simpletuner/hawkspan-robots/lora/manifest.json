@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "dataset_id": "hawkspan-robot-acceptance",
+  "purpose": "public reproducible acceptance and demonstration set; not a production-quality general model",
+  "trigger": "hawkspan robots",
+  "image_count": 20,
+  "caption_count": 20,
+  "caption_alternatives_per_image": 7,
+  "caption_alternative_count": 140,
+  "files": [
+    {
+      "basename": "hawkspan-robot-001",
+      "image": "dataset/hawkspan-robot-001.jpg",
+      "image_sha256": "19866f233d4435f90792342b9203e35f6506bdfdf24f921832e59b3f6a994ede",
+      "caption": "dataset/hawkspan-robot-001.txt",
+      "caption_sha256": "25ced8659d9ac409dac5d45c22f467b32603bf50234eb7c96c7863bc65d8d366",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-002",
+      "image": "dataset/hawkspan-robot-002.jpg",
+      "image_sha256": "642971b317301115185b10e3591aecbd0bb4f64ecd7262de16abe88b7bb3feb0",
+      "caption": "dataset/hawkspan-robot-002.txt",
+      "caption_sha256": "dfc7b9e553df387d207e5cbfe610096620974a10bf8ec0cd452656f5f26c3417",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-003",
+      "image": "dataset/hawkspan-robot-003.jpg",
+      "image_sha256": "7a260537afa77b0b8d83892a00f2bfb76ffecb2ba4f39f9be9ef174124a7fc1e",
+      "caption": "dataset/hawkspan-robot-003.txt",
+      "caption_sha256": "2a70b512ec1802f7b917d9290ceac72dc27b501bc48658f609e7a9242946f270",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-004",
+      "image": "dataset/hawkspan-robot-004.jpg",
+      "image_sha256": "48f253797e7bf4b5e4b8bc433a084677cdae70f0cceb236f8dc74ad42910e93d",
+      "caption": "dataset/hawkspan-robot-004.txt",
+      "caption_sha256": "1adb276b89f82f34d9ece1c93858c2ea2417adde56f0814fec624e6f7b1b2464",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-005",
+      "image": "dataset/hawkspan-robot-005.jpg",
+      "image_sha256": "32b9acdec4fe2f0ae9b519bc3af7cc2d0315f8a1513952bc38ae260d09a2fe63",
+      "caption": "dataset/hawkspan-robot-005.txt",
+      "caption_sha256": "8c8090d9763aaf7f966d86ea7a56e6ccda6dac56a662f681dd0c1bec799b35a7",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-006",
+      "image": "dataset/hawkspan-robot-006.jpg",
+      "image_sha256": "586a8bb26dec237765a5dfbd7e113f2787bc8e3bb8cd41cc2fd01361a9ce19e3",
+      "caption": "dataset/hawkspan-robot-006.txt",
+      "caption_sha256": "05838ee979b7801c4124aafaa212aae4226377cc03175b9732726a70113e2d03",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-007",
+      "image": "dataset/hawkspan-robot-007.jpg",
+      "image_sha256": "336a09ff4473a988d3d255e82030c4d825ccd7342c6394776cc7414ef7d2199a",
+      "caption": "dataset/hawkspan-robot-007.txt",
+      "caption_sha256": "620698dde7950a9235259667eda3a66c0f23c381a4761a98dcd784c3c0d45f49",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-008",
+      "image": "dataset/hawkspan-robot-008.jpg",
+      "image_sha256": "0174a09b72f64a7acef819bf0d5485d4d9a45b9895a89e51f915723a8f1de2af",
+      "caption": "dataset/hawkspan-robot-008.txt",
+      "caption_sha256": "dd48dbd6b9fb59260d4267361576ffac2b17fd00f2c2b3a2022050fe22390ad8",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-009",
+      "image": "dataset/hawkspan-robot-009.jpg",
+      "image_sha256": "d3bb0056a36da73592f0a38e8cec225351cd0358b9ab7063b8cc72b189d706fb",
+      "caption": "dataset/hawkspan-robot-009.txt",
+      "caption_sha256": "2f8e0d27c05ee9cab935eb2635e986e641c3f9243b018d9f61489446ce66541e",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-010",
+      "image": "dataset/hawkspan-robot-010.jpg",
+      "image_sha256": "0ad79188931f49ef8958417d09a9dd765766e89d8eb15b17585b5d58e2343259",
+      "caption": "dataset/hawkspan-robot-010.txt",
+      "caption_sha256": "584f5b59d706a22237bba4e0fc288347eeeb1369926db6bc0648f87939140e43",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-011",
+      "image": "dataset/hawkspan-robot-011.jpg",
+      "image_sha256": "cdb82a016d3241b48dd8859bba45fb9910441db50dcddb2f9da94d5a43a24a4d",
+      "caption": "dataset/hawkspan-robot-011.txt",
+      "caption_sha256": "f8185409a0f8c6f98c4ddc52a0370265573a9de0fcb3631febe1322d16d22645",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-012",
+      "image": "dataset/hawkspan-robot-012.jpg",
+      "image_sha256": "baa84ebaa42e0c6b049576b89f71c3964a77d1411483acff74773c6e09727b44",
+      "caption": "dataset/hawkspan-robot-012.txt",
+      "caption_sha256": "91747df6786ba6e19ae6d546bde86c72f9f3566be399ccea4ce248741e0b47b0",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-013",
+      "image": "dataset/hawkspan-robot-013.jpg",
+      "image_sha256": "003d600315703329ea8852361332b081518487fbe5c4e603e145a5726272e86d",
+      "caption": "dataset/hawkspan-robot-013.txt",
+      "caption_sha256": "36fdf4ef3cb4fb20eb38e0a4153d8cc45f00af3a7cdb9a10d112e29ea38e4f1e",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-014",
+      "image": "dataset/hawkspan-robot-014.jpg",
+      "image_sha256": "38818ddda01947daf7e74b85291aee25d4f6d4adeca066f4a04277817a9a04a3",
+      "caption": "dataset/hawkspan-robot-014.txt",
+      "caption_sha256": "b05d100bf8cd23eed5ae2f3f3d019924b30b29b4f3b5be4f8b8fff7c12b93a0c",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-015",
+      "image": "dataset/hawkspan-robot-015.jpg",
+      "image_sha256": "01ec9df572bd469499bc70b286324542b7208fe74505b9356369cb47155bb571",
+      "caption": "dataset/hawkspan-robot-015.txt",
+      "caption_sha256": "06f17216c3cca7523f0b0b2e0f15d4ba95a16a6080063c11b5a5c1309e5ec1a2",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-016",
+      "image": "dataset/hawkspan-robot-016.jpg",
+      "image_sha256": "2532e8e6e2ba23a8e586f724716d842fbe3f277a817fb82bf4a7c28de8e52b46",
+      "caption": "dataset/hawkspan-robot-016.txt",
+      "caption_sha256": "3cd2bd26e9005a81ae9bf94e7894fa10a17ff2340c89fbf830bbc5b976044b1c",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-017",
+      "image": "dataset/hawkspan-robot-017.jpg",
+      "image_sha256": "d139b4917111a7fb280f1429da5cc29858811b738d58b08241e1dc1e09b426d2",
+      "caption": "dataset/hawkspan-robot-017.txt",
+      "caption_sha256": "b785ecbe783b2466e8af846f25d96a9202fd011f417393442009f2d2559af367",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-018",
+      "image": "dataset/hawkspan-robot-018.jpg",
+      "image_sha256": "17c27d5b0259f9ab700235382ea53a46fc6912624937fe007a94db8d3c4575e0",
+      "caption": "dataset/hawkspan-robot-018.txt",
+      "caption_sha256": "1d369214abf3c6d46573a864b862b160c71f38e0a9e1ce694c3ea96fc2a890d3",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-019",
+      "image": "dataset/hawkspan-robot-019.jpg",
+      "image_sha256": "659e3bc5c0828f3bfdb23e444791dc6bb91a67c067964ec30f1f9404f8d99cc0",
+      "caption": "dataset/hawkspan-robot-019.txt",
+      "caption_sha256": "d9a44274367b41e0cdce624746ce4fb40d9fc1c08a1585e0049f00c964e720d5",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    },
+    {
+      "basename": "hawkspan-robot-020",
+      "image": "dataset/hawkspan-robot-020.jpg",
+      "image_sha256": "6b00a9e1459b725cce0c0ad7ceedb22806791b6a6ae2d005095b4b438bb86c57",
+      "caption": "dataset/hawkspan-robot-020.txt",
+      "caption_sha256": "167f458315957e56c89114a0b3a0c902710a1ed2e287c7f273fcc8413a76ec88",
+      "width": 1280,
+      "height": 1280,
+      "mime_type": "image/jpeg"
+    }
+  ]
+}

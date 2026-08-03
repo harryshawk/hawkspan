@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-draw",
+  "name": "SyntheticDraw Test Plugin",
+  "version": "1.0.0",
+  "entrypoint": "plugin.mjs",
+  "operations": [
+    {
+      "name": "draw",
+      "description": "Draw one deterministic SVG shape and register it as an artifact.",
+      "roles": ["worker"],
+      "access": ["peer"],
+      "inputSchema": {
+        "type": "object",
+        "required": ["shape", "color"],
+        "properties": {
+          "shape": {"type": "string", "enum": ["circle", "square"]},
+          "color": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"},
+          "label": {"type": "string", "maxLength": 80}
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false
+      }
+    }
+  ]
+}

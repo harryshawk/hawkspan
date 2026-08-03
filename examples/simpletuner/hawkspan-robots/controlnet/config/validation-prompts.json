@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "trigger": "hawkspan robots",
+  "seed_policy": "Use seed 20260801 for every mapped prompt at checkpoints 600 and 900.",
+  "controls_are_relative_to": "controlnet/dataset",
+  "prompts": [
+    {
+      "id": "retro-diner-duo",
+      "control_image": "conditioning/hawkspan-robot-001.png",
+      "source_target": "targets/hawkspan-robot-001.jpg",
+      "prompt": "hawkspan robots, exactly two robots outside a cheerful retro diner, left robot Hawk with a readable Hawk nameplate, right robot Span with a readable Span nameplate, one broad glowing segmented physical span visibly connecting them across the middle, colorful polished G-rated promotional 3D illustration"
+    },
+    {
+      "id": "forest-bridge-duo",
+      "control_image": "conditioning/hawkspan-robot-004.png",
+      "source_target": "targets/hawkspan-robot-004.jpg",
+      "prompt": "hawkspan robots, exactly two compact helper robots beside a woodland stream, left robot Hawk with a readable Hawk nameplate, right robot Span with a readable Span nameplate, one flexible physical span visibly linking them, warm sunbeams and friendly teamwork, premium G-rated storybook campaign art"
+    },
+    {
+      "id": "neon-street-duo",
+      "control_image": "conditioning/hawkspan-robot-011.png",
+      "source_target": "targets/hawkspan-robot-011.jpg",
+      "prompt": "hawkspan robots, exactly two boxy screen-faced robots on a rainy neon street, left robot Hawk with a readable Hawk nameplate, right robot Span with a readable Span nameplate, one bright horizontal physical span visibly joining them, vivid magenta and blue reflections, polished G-rated technology advertisement"
+    },
+    {
+      "id": "underwater-duo",
+      "control_image": "conditioning/hawkspan-robot-020.png",
+      "source_target": "targets/hawkspan-robot-020.jpg",
+      "prompt": "hawkspan robots, exactly two exploration robots above an underwater reef, left robot Hawk with a readable Hawk nameplate, right robot Span with a readable Span nameplate, one luminous segmented physical span visibly linking them, sun rays descending through clear blue water, joyful G-rated adventure poster"
+    }
+  ]
+}
