@@ -1,0 +1,40 @@
+HawkSpan
+Copyright 2026 Harry Hawk
+
+This product includes software developed for HawkSpan and is licensed under
+the MIT License.
+
+The rendered Help-page MP4 files under static/media/help are not licensed under
+the MIT License.
+
+Copyright 2026 Harry Hawk. The following four files are licensed under the
+Creative Commons Attribution-NoDerivatives 4.0 International license
+(CC BY-ND 4.0), https://creativecommons.org/licenses/by-nd/4.0/:
+
+- what-hawkspan-does.mp4
+- hawkspan-profiles.mp4
+- hawkspan-detailed-configuration.mp4
+- hawkspan-connections.mp4
+
+The following file is Copyright 2026 Harry Hawk, All Rights Reserved:
+
+- hawkspan-bottom-up-workflow.mp4
+
+Videos 1–4 contain the embedded creator credit "Designed & Rendered by Codex
+5.6 Sol w/ Remotion" but no embedded copyright or license notice. Video 5
+contains that creator credit and the embedded notice "(c) Copyright Harry Hawk
+- All Rights Reserved."
+
+All five videos use original programmatic Remotion React/CSS visuals and text.
+The only audible soundtrack, in hawkspan-bottom-up-workflow.mp4, was synthesized
+from tone generators and mastered locally. No third-party stock images, stock
+video, music, sound samples, fonts, or logos are embedded in these media files.
+
+The source images, captions, deterministic Canny conditioning images, review
+PDF, and explanatory documentation under
+examples/simpletuner/hawkspan-robots are separately licensed under Creative
+Commons Attribution 4.0 International (CC BY 4.0). The 20 source images were
+generated at the project owner's direction using GPT Image 2 and are intended
+for public redistribution. See that directory's ASSET-LICENSE.md for the
+attribution statement. Configuration files, validators, and other HawkSpan
+software remain under MIT License.

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "hawkspan": {
+      "command": "node",
+      "args": [
+        "./scripts/mcp-server.mjs"
+      ],
+      "cwd": "."
+    }
+  }
+}

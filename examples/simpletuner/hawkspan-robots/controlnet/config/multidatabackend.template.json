@@ -1,0 +1,34 @@
+[
+  {
+    "id": "hawkspan-robot-controlnet-targets-v1",
+    "type": "local",
+    "dataset_type": "image",
+    "conditioning": {
+      "type": "canny",
+      "conditioning_type": "controlnet",
+      "instance_data_dir": "<approved-dataset-root>/hawkspan-robot-controlnet-acceptance-v1/conditioning"
+    },
+    "instance_data_dir": "<approved-dataset-root>/hawkspan-robot-controlnet-acceptance-v1/targets",
+    "caption_strategy": "textfile",
+    "repeats": 1,
+    "disable_multiline_split": false,
+    "metadata_backend": "discovery",
+    "cache_dir_vae": "<versioned-cache-root>/hawkspan-robot-controlnet-v1/vae/targets",
+    "resolution": 1024,
+    "resolution_type": "pixel_area",
+    "minimum_image_size": 1024,
+    "maximum_image_size": 1024,
+    "target_downsample_size": 1024,
+    "crop": true,
+    "crop_aspect": "square",
+    "crop_style": "center",
+    "cache_file_suffix": "hawkspan-controlnet-sdxl-v1"
+  },
+  {
+    "id": "hawkspan-robot-controlnet-text-v1",
+    "type": "local",
+    "dataset_type": "text_embeds",
+    "default": true,
+    "cache_dir": "<versioned-cache-root>/hawkspan-robot-controlnet-v1/text/sdxl"
+  }
+]

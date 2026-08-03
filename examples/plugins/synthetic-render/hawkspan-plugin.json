@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-render",
+  "name": "SyntheticRender Test Plugin",
+  "version": "1.0.0",
+  "entrypoint": "plugin.mjs",
+  "operations": [
+    {
+      "name": "render",
+      "description": "Render a deterministic SVG title card and register it as an artifact.",
+      "roles": ["worker"],
+      "access": ["peer"],
+      "inputSchema": {
+        "type": "object",
+        "required": ["title"],
+        "properties": {
+          "title": {"type": "string", "minLength": 1, "maxLength": 120},
+          "subtitle": {"type": "string", "maxLength": 200},
+          "background": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"}
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false
+      }
+    }
+  ]
+}
