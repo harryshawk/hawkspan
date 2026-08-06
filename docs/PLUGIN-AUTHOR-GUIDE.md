@@ -17,9 +17,9 @@ object input schema, and MCP annotations.
 
 A plugin can expose reviewed, named quick starts through a manifest `presets`
 array. Each preset has a stable kebab-case `id`, a human `name`, `description`,
-`impact`, and `settings`. Settings may contain only `role_profile`, `node_role`,
-approved `features`, and the required `enabled_operations` array. Operation
-names must be unique and declared by the same manifest.
+`impact`, and `settings`. First-release settings contain only the required
+`enabled_operations` array. Operation names must be unique and declared by the
+same manifest.
 
 ```json
 {
@@ -28,27 +28,13 @@ names must be unique and declared by the same manifest.
     "name": "Headless application worker",
     "description": "Run only the reviewed worker operations on this Mac.",
     "impact": "Accepts selected application tools and blocks broad commands.",
-    "settings": {
-      "role_profile": "controller-worker",
-      "node_role": "worker",
-      "features": {
-        "allowed_peer_tools": {
-          "inbound": ["app_example_renderer_submit", "app_example_renderer_status"],
-          "outbound": []
-        },
-        "enable_broad_run_command": { "inbound": false, "outbound": false }
-      },
-      "enabled_operations": ["submit", "status"]
-    }
+    "settings": { "enabled_operations": ["submit", "status"] }
   }]
 }
 ```
 
-Do not put connection values, credentials, paths, tokens, application options,
-or workload data in presets. Peer-tool restrictions may name only same-plugin
-tools or the fixed safe core coordination subset (`create_job`,
-`update_job_status`, `list_jobs`, and `receive_artifacts`); all other core tool
-names fail validation. Keep application-specific integrations in their
+Do not put roles, control capabilities, connection values, credentials, paths,
+tokens, application options, or workload data in presets. Keep application-specific integrations in their
 separately installable plugins rather than public HawkSpan core; sanitized
 plugins can themselves be public releases.
 

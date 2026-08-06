@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>org.hawkspan.queue-supervisor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__PLUGIN_ROOT__/scripts/queue-supervisor.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HAWKSPAN_STATE_DIR</key>
+    <string>__STATE_ROOT__</string>
+    <key>HAWKSPAN_CONFIG</key>
+    <string>__STATE_ROOT__/config.json</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__STATE_ROOT__/audit/queue-supervisor-stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__STATE_ROOT__/audit/queue-supervisor-error.log</string>
+</dict>
+</plist>

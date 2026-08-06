@@ -2,8 +2,6 @@
 
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { minimalChildEnvironment } from "./hawkspan-env.mjs";
 
 const [toolName, rawArguments = "{}"] = process.argv.slice(2);
 if (!toolName) {
@@ -28,16 +26,15 @@ const requestTimeoutMs = Math.max(
 );
 
 const serverPath = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
+  path.dirname(new URL(import.meta.url).pathname),
   "mcp-server.mjs",
 );
 const child = spawn(process.execPath, [serverPath], {
   env: {
-    ...minimalChildEnvironment({
-      ...(process.env.HAWKSPAN_STATE_DIR ? { HAWKSPAN_STATE_DIR: process.env.HAWKSPAN_STATE_DIR } : {}),
-      ...(process.env.HAWKSPAN_CONFIG ? { HAWKSPAN_CONFIG: process.env.HAWKSPAN_CONFIG } : {}),
-      ...(process.env.HAWKSPAN_CALL_ORIGIN ? { HAWKSPAN_CALL_ORIGIN: process.env.HAWKSPAN_CALL_ORIGIN } : {}),
-    }),
+    ...process.env,
+    ...(process.env.HAWKSPAN_CALL_ORIGIN
+      ? { HAWKSPAN_CALL_ORIGIN: process.env.HAWKSPAN_CALL_ORIGIN }
+      : {}),
     HAWKSPAN_LOCAL_CONTROL_DISABLED: "1",
   },
   stdio: ["pipe", "pipe", "inherit"],

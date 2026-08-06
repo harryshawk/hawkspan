@@ -5,31 +5,37 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { createApplicationPluginFramework } from "./application-plugins.mjs";
-import {
-  applyHawkspanEnv, minimalChildEnvironment, readHawkspanEnv, redactedHawkspanEnv,
-  writeHawkspanEnv,
-} from "./hawkspan-env.mjs";
+import { applyHawkspanEnv, readHawkspanEnv } from "./hawkspan-env.mjs";
+import { runReadinessMonitor } from "./hawkspan-readiness-monitor.mjs";
 import { startLocalControlSurface } from "./local-control-surface.mjs";
+import { createQueueRegistry } from "./queue-registry.mjs";
+import { operationAttemptFits, routeAttemptPlan } from "./route-attempt-plan.mjs";
+import {
+  assertExecutingRelease,
+  installedRevisionPath,
+  readReleaseAuthority,
+  validateLiveReleaseConfiguration,
+} from "./release-authority.mjs";
 
 const STATE_ROOT = process.env.HAWKSPAN_STATE_DIR
   ? path.resolve(process.env.HAWKSPAN_STATE_DIR)
   : path.join(os.homedir(), ".hawkspan");
-const CONFIG_PATH = process.env.HAWKSPAN_CONFIG
-  ? path.resolve(process.env.HAWKSPAN_CONFIG)
+const CONFIG_PATH = process.env.HAWKSPAN_CONFIG || process.env.HAWKSPAN_CONFIG_PATH
+  ? path.resolve(process.env.HAWKSPAN_CONFIG || process.env.HAWKSPAN_CONFIG_PATH)
   : path.join(STATE_ROOT, "config.json");
 const ENV_PATH = path.join(STATE_ROOT, "hawkspan.env");
+const machineEnvironment = readHawkspanEnv(ENV_PATH);
 const DB_PATH = path.join(STATE_ROOT, "spool.sqlite3");
 const INBOX = path.join(STATE_ROOT, "inbox");
 const OUTBOX = path.join(STATE_ROOT, "outbox");
 const ARTIFACTS = path.join(STATE_ROOT, "artifacts");
 const AUDIT = path.join(STATE_ROOT, "audit");
-const CONFIGURATION_PROFILES_PATH = path.join(STATE_ROOT, "configuration-profiles.json");
 const SCRIPT_ROOT = path.dirname(fileURLToPath(import.meta.url));
-let localControl = null;
+const LORA_AUTOMATION_SCRIPT = path.join(SCRIPT_ROOT, "lora-automation.mjs");
 
 for (const dir of [STATE_ROOT, INBOX, OUTBOX, ARTIFACTS, AUDIT]) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -37,872 +43,129 @@ for (const dir of [STATE_ROOT, INBOX, OUTBOX, ARTIFACTS, AUDIT]) {
 
 const defaultConfig = {
   schema_version: 1,
-  node_id: "unconfigured-node",
-  role_profile: "symmetric",
-  features: {},
+  node_id: os.hostname(),
+  peer: null,
+  application_plugins: {
+    enabled: true,
+    roles: ["controller", "worker"],
+    roots: [path.join(STATE_ROOT, "plugins")],
+    entries: {},
+  },
   local_control: {
     enabled: true,
     host: "127.0.0.1",
     port: 0,
+    allowed_tools: [
+      "link_status", "application_plugin_status", "application_plugin_cancel",
+      "list_messages", "list_jobs", "list_artifacts", "list_audit_events",
+      "list_queue_adapters", "create_queue", "configure_queue", "delete_queue",
+      "list_queues", "queue_status", "enqueue_queue_item", "enqueue_queue_batch",
+      "queue_control", "start_next_queue_item", "supervise_queue",
+      "list_application_presets", "preview_application_preset",
+      "apply_application_preset", "reset_application_preset",
+    ],
   },
-  peer: null,
+  training: {
+    process_match: "simpletuner|train.py|accelerate launch",
+    allow_start: false,
+    allow_stop: false,
+    allow_package: false,
+    minimum_checkpoint_retention: 10,
+    preservation_root: null,
+    simpletuner_root: null,
+    queue_root: null,
+    output_root: null,
+    log_root: null,
+    start_script: null,
+    stop_script: null,
+    package_script: null,
+  },
+  readiness: {
+    local_config_timeout_ms: 10000,
+    peer_ping_timeout_ms: 60000,
+    ssh_port_timeout_ms: 90000,
+    ssh_login_timeout_ms: 120000,
+    agent_timeout_ms: 90000,
+    trainer_timeout_ms: 60000,
+    total_timeout_ms: 300000,
+    retry_delays_ms: [2000, 3000, 5000, 8000],
+  },
+  queue_supervisor: {
+    enabled: true,
+    poll_interval_ms: 120000,
+    worker_restart_delays_ms: [2000, 5000, 10000, 20000],
+    item_lease_ms: 300000,
+    max_items_per_worker: 10,
+    default_maximum_attempts: 5,
+    default_maximum_pending_items: 10000,
+    default_maximum_payload_bytes: 1048576,
+    retry_jitter: true,
+  },
+  link: {
+    operation_retry_delays_ms: [2000, 5000, 10000, 20000],
+    operation_attempt_timeout_ms: 15000,
+    connect_timeout_ms: 5000,
+    cycle_timeout_ms: 120000,
+    server_alive_interval_seconds: 15,
+    server_alive_count_max: 3,
+    primary_reprobe_ms: 60000,
+  },
 };
 
 function readConfig() {
   const loaded = fs.existsSync(CONFIG_PATH)
     ? JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"))
     : {};
-  return applyHawkspanEnv({
+  const merged = {
     ...defaultConfig,
     ...loaded,
-  }, machineEnvironment);
+    training: { ...defaultConfig.training, ...(loaded.training || {}) },
+    application_plugins: {
+      ...defaultConfig.application_plugins,
+      ...(loaded.application_plugins || {}),
+      entries: { ...(loaded.application_plugins?.entries || {}) },
+    },
+    local_control: { ...defaultConfig.local_control, ...(loaded.local_control || {}) },
+    readiness: { ...defaultConfig.readiness, ...(loaded.readiness || {}) },
+    queue_supervisor: {
+      ...defaultConfig.queue_supervisor,
+      ...(loaded.queue_supervisor || {}),
+    },
+    link: { ...defaultConfig.link, ...(loaded.link || {}) },
+  };
+  return applyHawkspanEnv(merged, machineEnvironment);
 }
 
-let machineEnvironment = readHawkspanEnv(ENV_PATH);
 const config = readConfig();
-
-const nonSecretMachineNames = new Set([
-  "HAWKSPAN_PRIMARY_ENABLED", "HAWKSPAN_FALLBACK_ENABLED",
-  "HAWKSPAN_PRIMARY_LABEL", "HAWKSPAN_FALLBACK_LABEL",
-  "HAWKSPAN_LOCAL_CONTROL_PORT",
-]);
-function redactResolvedMachineValues(value) {
-  const secrets = Object.entries(machineEnvironment)
-    .filter(([name]) => !nonSecretMachineNames.has(name))
-    .map(([, configured]) => configured)
-    .filter((configured) => configured.length >= 3)
-    .sort((left, right) => right.length - left.length);
-  const redactString = (input) => secrets.reduce(
-    (result, configured) => result.replaceAll(configured, "[configured]"),
-    input,
-  );
-  if (typeof value === "string") return redactString(value);
-  if (Array.isArray(value)) return value.map(redactResolvedMachineValues);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-      key, redactResolvedMachineValues(item),
-    ]));
-  }
-  return value;
-}
-
-function redactResolvedMachineError(error) {
-  const configuredValues = Object.values(machineEnvironment)
-    .filter((configured) => configured.length >= 3)
-    .sort((left, right) => right.length - left.length);
-  return configuredValues.reduce(
-    (message, configured) => message.replaceAll(configured, "[configured]"),
-    String(error?.message || error),
-  );
-}
-
-const approvedFeatureDefaults = Object.freeze({
-  allow_peer_commands: { inbound: true, outbound: true },
-  require_authorized_job_for_all_commands: false,
-  require_authorized_job_for_consequential_commands: false,
-  allowed_peer_tools: { inbound: "current", outbound: "current" },
-  allow_peer_wakeup: { inbound: true, outbound: true },
-  allow_peer_messages: { inbound: true, outbound: true },
-  allow_peer_acknowledgements: { inbound: true, outbound: true },
-  allow_peer_jobs: { inbound: true, outbound: true },
-  allow_peer_artifact_send: { inbound: true, outbound: true },
-  allow_peer_artifact_receive: { inbound: true, outbound: true },
-  enable_background_outbox: true,
-  enable_background_artifact_sender: true,
-  enable_background_artifact_receiver: true,
-  enable_scoped_operation_adapters: true,
-  enable_broad_run_command: { inbound: true, outbound: true },
-  audit_command_content: true,
-  artifact_verification_mode: "on-change",
-  wake_prompt_mode: "embedded-message",
-  strict_host_key_checking: true,
-});
-const approvedFeatureKeys = new Set(Object.keys(approvedFeatureDefaults));
-
-function validateDirectionalBoolean(name, value) {
-  if (typeof value === "boolean") return { inbound: value, outbound: value };
-  if (
-    value && typeof value === "object" && !Array.isArray(value) &&
-    Object.keys(value).every((key) => ["inbound", "outbound"].includes(key)) &&
-    ["inbound", "outbound"].every((key) => value[key] === undefined || typeof value[key] === "boolean")
-  ) {
-    return {
-      inbound: value.inbound ?? approvedFeatureDefaults[name].inbound,
-      outbound: value.outbound ?? approvedFeatureDefaults[name].outbound,
-    };
-  }
-  throw new Error(`${name} must be a boolean or an inbound/outbound boolean object`);
-}
-
-function validateFeature(name, value) {
-  if (!approvedFeatureKeys.has(name)) throw new Error(`unsupported configuration key: ${name}`);
-  if (name === "artifact_verification_mode") {
-    if (!["always", "on-change", "cached"].includes(value)) {
-      throw new Error("artifact_verification_mode must be always, on-change, or cached");
-    }
-    return value;
-  }
-  if (name === "wake_prompt_mode") {
-    if (!["notification", "embedded-message"].includes(value)) {
-      throw new Error("wake_prompt_mode must be notification or embedded-message");
-    }
-    return value;
-  }
-  if (name === "allowed_peer_tools") {
-    if (value === "current") return { inbound: "current", outbound: "current" };
-    if (
-      value && typeof value === "object" && !Array.isArray(value) &&
-      Object.keys(value).every((key) => ["inbound", "outbound"].includes(key)) &&
-      ["inbound", "outbound"].every((key) => value[key] === undefined || value[key] === "current" ||
-        (Array.isArray(value[key]) && value[key].every((item) =>
-          typeof item === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(item))))
-    ) {
-      return {
-        inbound: value.inbound ?? "current",
-        outbound: value.outbound ?? "current",
-      };
-    }
-    throw new Error("allowed_peer_tools must be current or inbound/outbound arrays (or current)");
-  }
-  if (typeof approvedFeatureDefaults[name] === "object") {
-    return validateDirectionalBoolean(name, value);
-  }
-  if (typeof value !== "boolean") throw new Error(`${name} must be a boolean`);
-  return value;
-}
-
-function effectiveConfiguration() {
-  const features = {};
-  for (const [name, fallback] of Object.entries(approvedFeatureDefaults)) {
-    features[name] = config.features?.[name] === undefined
-      ? structuredClone(fallback)
-      : validateFeature(name, config.features[name]);
-  }
-  const roleProfile = config.role_profile ?? "symmetric";
-  if (!["symmetric", "controller-worker"].includes(roleProfile)) {
-    throw new Error("role_profile must be symmetric or controller-worker");
-  }
-  const nodeRole = config.node_role ?? null;
-  if (roleProfile === "controller-worker" && !["controller", "worker"].includes(nodeRole)) {
-    throw new Error("node_role must be controller or worker when role_profile is controller-worker");
-  }
-  if (roleProfile === "symmetric" && nodeRole !== null && !["controller", "worker"].includes(nodeRole)) {
-    throw new Error("node_role must be controller, worker, or omitted");
-  }
-  return { role_profile: roleProfile, node_role: nodeRole, features };
-}
-
-let effective = effectiveConfiguration();
-
-function directionEnabled(name, direction) {
-  const explicitlyConfigured = config.features?.[name];
-  if (
-    effective.role_profile === "controller-worker" &&
-    (explicitlyConfigured === undefined ||
-      (typeof explicitlyConfigured === "object" && explicitlyConfigured[direction] === undefined))
-  ) {
-    return effective.node_role === "controller" ? direction === "outbound" : direction === "inbound";
-  }
-  return effective.features[name][direction];
-}
-
-function getConfiguration() {
-  const result = structuredClone(effective);
-  result.configured_features = structuredClone(config.features || {});
-  for (const [name, value] of Object.entries(result.features)) {
-    if (
-      value && typeof value === "object" && !Array.isArray(value) &&
-      typeof value.inbound === "boolean" && typeof value.outbound === "boolean"
-    ) {
-      result.features[name] = {
-        inbound: directionEnabled(name, "inbound"),
-        outbound: directionEnabled(name, "outbound"),
-      };
-    }
-  }
-  if (effective.role_profile === "controller-worker") {
-    const explicit = config.features?.allowed_peer_tools;
-    for (const direction of ["inbound", "outbound"]) {
-      if (
-        (explicit === undefined || explicit?.[direction] === undefined) &&
-        (effective.node_role === "controller" ? direction === "inbound" : direction === "outbound")
-      ) {
-        result.features.allowed_peer_tools[direction] = [];
-      }
-    }
-  }
-  return result;
-}
-
-function updateConfiguration(args) {
-  if (!args || typeof args !== "object" || Array.isArray(args)) {
-    throw new Error("configuration update must be an object");
-  }
-  const allowedTop = new Set(["role_profile", "node_role", "features"]);
-  for (const key of Object.keys(args)) {
-    if (!allowedTop.has(key)) throw new Error(`unsupported configuration key: ${key}`);
-  }
-  const next = JSON.parse(JSON.stringify(config));
-  const roleSelectionChanged = (
-    (args.role_profile !== undefined && args.role_profile !== (config.role_profile ?? "symmetric")) ||
-    (args.node_role !== undefined && args.node_role !== (config.node_role ?? null))
-  );
-  if (args.role_profile !== undefined) {
-    if (!["symmetric", "controller-worker"].includes(args.role_profile)) {
-      throw new Error("role_profile must be symmetric or controller-worker");
-    }
-    next.role_profile = args.role_profile;
-  }
-  if (args.node_role !== undefined) {
-    if (args.node_role !== null && !["controller", "worker"].includes(args.node_role)) {
-      throw new Error("node_role must be controller, worker, or null");
-    }
-    if (args.node_role === null) delete next.node_role;
-    else next.node_role = args.node_role;
-  }
-  if (roleSelectionChanged) {
-    next.features = { ...(next.features || {}) };
-    for (const [name, fallback] of Object.entries(approvedFeatureDefaults)) {
-      if (
-        fallback && typeof fallback === "object" && !Array.isArray(fallback) &&
-        args.features?.[name] === undefined
-      ) {
-        delete next.features[name];
-      }
-    }
-  }
-  if (args.features !== undefined) {
-    if (!args.features || typeof args.features !== "object" || Array.isArray(args.features)) {
-      throw new Error("features must be an object");
-    }
-    next.features = { ...(next.features || {}) };
-    for (const [name, value] of Object.entries(args.features)) {
-      if (
-        value && typeof value === "object" && !Array.isArray(value) &&
-        typeof approvedFeatureDefaults[name] === "object"
-      ) {
-        const partial = {
-          ...(config.features?.[name] &&
-              typeof config.features[name] === "object" &&
-              !Array.isArray(config.features[name])
-            ? config.features[name]
-            : {}),
-          ...value,
-        };
-        validateFeature(name, partial);
-        next.features[name] = partial;
-      } else {
-        next.features[name] = validateFeature(name, value);
-      }
-    }
-  }
-  const nextProfile = next.role_profile ?? "symmetric";
-  if (nextProfile === "controller-worker" && !["controller", "worker"].includes(next.node_role)) {
-    throw new Error("node_role is required when role_profile is controller-worker");
-  }
-  writeConfiguration(next);
-  audit("update", "configuration", config.node_id, "saved", {
-    role_profile: effective.role_profile,
-    node_role: effective.node_role,
-    changed_features: Object.keys(args.features || {}),
+if (fs.existsSync(installedRevisionPath(STATE_ROOT))) {
+  const authority = readReleaseAuthority(STATE_ROOT);
+  assertExecutingRelease(authority, path.dirname(SCRIPT_ROOT));
+  const mismatches = validateLiveReleaseConfiguration(authority, {
+    envValues: machineEnvironment,
+    config,
   });
-  return { ...getConfiguration(), restart_required: true };
-}
-
-function writeConfiguration(next) {
-  const persisted = JSON.parse(JSON.stringify(next));
-  const remove = (name, target, key) => {
-    if (Object.hasOwn(machineEnvironment, name) && target) delete target[key];
-  };
-  remove("HAWKSPAN_NODE_ID", persisted, "node_id");
-  remove("HAWKSPAN_PLUGIN_ROOT", persisted, "plugin_root");
-  if (Object.hasOwn(machineEnvironment, "HAWKSPAN_APPLICATION_PLUGIN_ROOT")) {
-    delete persisted.application_plugins?.roots;
+  if (mismatches.length) {
+    throw new Error(`live release configuration disagrees with installed authority: ${JSON.stringify(mismatches)}`);
   }
-  if (Object.hasOwn(machineEnvironment, "HAWKSPAN_LOCAL_CONTROL_PORT")) {
-    delete persisted.local_control?.port;
-  }
-  for (const [name, key] of [
-    ["HAWKSPAN_PEER_NODE_ID", "node_id"], ["HAWKSPAN_PEER_USER", "user"],
-    ["HAWKSPAN_PEER_THREAD_ID", "thread_id"], ["HAWKSPAN_REMOTE_NODE", "remote_node"],
-    ["HAWKSPAN_REMOTE_PLUGIN_ROOT", "remote_plugin_root"],
-    ["HAWKSPAN_REMOTE_CALL_TOOL", "remote_call_tool"],
-    ["HAWKSPAN_PRIMARY_ENABLED", "primary_enabled"], ["HAWKSPAN_PRIMARY_LABEL", "primary_label"],
-    ["HAWKSPAN_PRIMARY_HOST", "primary_host"], ["HAWKSPAN_FALLBACK_ENABLED", "fallback_enabled"],
-    ["HAWKSPAN_FALLBACK_LABEL", "fallback_label"], ["HAWKSPAN_FALLBACK_HOST", "fallback_host"],
-    ["HAWKSPAN_SSH_IDENTITY", "ssh_identity"], ["HAWKSPAN_REMOTE_INBOX", "remote_inbox"],
-    ["HAWKSPAN_REMOTE_ARTIFACTS", "remote_artifacts"], ["HAWKSPAN_REMOTE_AUDIT", "remote_audit"],
-  ]) remove(name, persisted.peer, key);
-  const temporary = `${CONFIG_PATH}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
-  fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(temporary, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(temporary, CONFIG_PATH);
-  Object.keys(config).forEach((key) => delete config[key]);
-  Object.assign(config, applyHawkspanEnv(persisted, machineEnvironment));
-  effective = effectiveConfiguration();
-}
-
-function approvedConfigurationOverrides(source = config) {
-  const settings = {};
-  if (Object.hasOwn(source, "role_profile")) settings.role_profile = source.role_profile;
-  if (Object.hasOwn(source, "node_role")) settings.node_role = source.node_role;
-  if (Object.hasOwn(source, "features")) settings.features = structuredClone(source.features);
-  return settings;
-}
-
-function validateApprovedConfigurationOverrides(settings) {
-  if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
-    throw new Error("profile settings must be an object");
-  }
-  for (const key of Object.keys(settings)) {
-    if (!["role_profile", "node_role", "features"].includes(key)) {
-      throw new Error(`profile contains unsupported configuration key: ${key}`);
-    }
-  }
-  if (
-    settings.role_profile !== undefined &&
-    !["symmetric", "controller-worker"].includes(settings.role_profile)
-  ) {
-    throw new Error("profile role_profile must be symmetric or controller-worker");
-  }
-  if (
-    settings.node_role !== undefined &&
-    !["controller", "worker"].includes(settings.node_role)
-  ) {
-    throw new Error("profile node_role must be controller or worker");
-  }
-  if (
-    settings.features !== undefined &&
-    (!settings.features || typeof settings.features !== "object" ||
-      Array.isArray(settings.features))
-  ) {
-    throw new Error("profile features must be an object");
-  }
-  for (const [name, value] of Object.entries(settings.features || {})) {
-    validateFeature(name, value);
-  }
-  const profile = settings.role_profile ?? "symmetric";
-  if (profile === "controller-worker" && !["controller", "worker"].includes(settings.node_role)) {
-    throw new Error("profile node_role is required for controller-worker mode");
-  }
-  return structuredClone(settings);
-}
-
-function normalizeProfileName(value) {
-  if (typeof value !== "string") throw new Error("profile name must be a string");
-  const name = value.trim().replace(/\s+/g, " ");
-  if (!name || name.length > 80 || /[\u0000-\u001f\u007f]/u.test(name)) {
-    throw new Error("profile name must contain 1 to 80 printable characters");
-  }
-  return name;
-}
-
-function readConfigurationProfiles() {
-  if (!fs.existsSync(CONFIGURATION_PROFILES_PATH)) {
-    return { schema_version: 1, profiles: [] };
-  }
-  const document = JSON.parse(fs.readFileSync(CONFIGURATION_PROFILES_PATH, "utf8"));
-  if (
-    document?.schema_version !== 1 ||
-    !Array.isArray(document.profiles)
-  ) {
-    throw new Error("configuration profile store is invalid");
-  }
-  for (const profile of document.profiles) {
-    if (
-      !profile || typeof profile !== "object" ||
-      typeof profile.id !== "string" || !/^profile-[a-f0-9]{24}$/.test(profile.id) ||
-      normalizeProfileName(profile.name) !== profile.name ||
-      typeof profile.created_at !== "string" || typeof profile.updated_at !== "string"
-    ) {
-      throw new Error("configuration profile store contains an invalid profile");
-    }
-    validateApprovedConfigurationOverrides(profile.settings);
-  }
-  return document;
-}
-
-function writeConfigurationProfiles(document) {
-  const temporary = `${CONFIGURATION_PROFILES_PATH}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
-  fs.writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(temporary, CONFIGURATION_PROFILES_PATH);
-}
-
-function publicConfigurationProfile(profile) {
-  return {
-    id: profile.id,
-    name: profile.name,
-    source: profile.source || "user",
-    description: profile.description || "",
-    impact: profile.impact || "Applies the role and feature choices saved in this profile.",
-    read_only: profile.source === "builtin",
-    created_at: profile.created_at,
-    updated_at: profile.updated_at,
-    settings: structuredClone(profile.settings),
-  };
-}
-
-const coordinationFeatures = Object.freeze({
-  allowed_peer_tools: { inbound: "current", outbound: "current" },
-  allow_peer_messages: { inbound: true, outbound: true },
-  allow_peer_acknowledgements: { inbound: true, outbound: true },
-  allow_peer_jobs: { inbound: true, outbound: true },
-  allow_peer_wakeup: { inbound: true, outbound: true },
-  allow_peer_artifact_send: { inbound: true, outbound: true },
-  allow_peer_artifact_receive: { inbound: true, outbound: true },
-  strict_host_key_checking: true,
-});
-const builtinConfigurationProfiles = Object.freeze([
-  {
-    id: "builtin-current-symmetric",
-    name: "Current symmetric",
-    source: "builtin",
-    description: "Both Macs retain the inherited symmetric defaults with no feature overrides.",
-    impact: "Removes role-specific restrictions and returns all approved features to their inherited defaults.",
-    created_at: null,
-    updated_at: null,
-    settings: { role_profile: "symmetric" },
-  },
-  {
-    id: "builtin-high-value-controller",
-    name: "High-value controller",
-    source: "builtin",
-    description: "This Mac initiates commands but rejects inbound commands; coordination and artifacts remain bidirectional.",
-    impact: "Protects the higher-value Mac from peer-initiated commands while allowing it to direct the worker.",
-    created_at: null,
-    updated_at: null,
-    settings: {
-      role_profile: "controller-worker",
-      node_role: "controller",
-      features: {
-        ...coordinationFeatures,
-        allow_peer_commands: { inbound: false, outbound: true },
-        enable_broad_run_command: { inbound: false, outbound: true },
-      },
-    },
-  },
-  {
-    id: "builtin-compute-worker",
-    name: "Compute worker",
-    source: "builtin",
-    description: "This Mac accepts controller commands but cannot send commands; coordination and artifacts remain bidirectional.",
-    impact: "Lets the compute Mac perform requested work without allowing it to initiate commands on the controller.",
-    created_at: null,
-    updated_at: null,
-    settings: {
-      role_profile: "controller-worker",
-      node_role: "worker",
-      features: {
-        ...coordinationFeatures,
-        allow_peer_commands: { inbound: true, outbound: false },
-        enable_broad_run_command: { inbound: true, outbound: false },
-      },
-    },
-  },
-  {
-    id: "builtin-coordination-only",
-    name: "Coordination only",
-    source: "builtin",
-    description: "Commands are blocked in both directions while messages, jobs, wakeups, and artifacts remain bidirectional.",
-    impact: "Keeps coordination and file exchange available while preventing either Mac from running peer commands.",
-    created_at: null,
-    updated_at: null,
-    settings: {
-      role_profile: "symmetric",
-      features: {
-        ...coordinationFeatures,
-        allow_peer_commands: { inbound: false, outbound: false },
-        enable_broad_run_command: { inbound: false, outbound: false },
-      },
-    },
-  },
-]);
-
-function listConfigurationProfiles() {
-  return {
-    profiles: [
-      ...builtinConfigurationProfiles.map(publicConfigurationProfile),
-      ...readConfigurationProfiles().profiles.map(publicConfigurationProfile),
-    ],
-  };
-}
-
-function saveConfigurationProfile(args) {
-  const name = normalizeProfileName(args?.name);
-  const document = readConfigurationProfiles();
-  if (builtinConfigurationProfiles.some(
-    (profile) => profile.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
-  )) {
-    throw new Error("built-in profile names are reserved and cannot be replaced");
-  }
-  const existing = document.profiles.find(
-    (profile) => profile.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
-  );
-  if (existing && args.confirm_replace !== true) {
-    throw new Error("a profile with this name exists; set confirm_replace to true to replace it");
-  }
-  const timestamp = now();
-  const settings = validateApprovedConfigurationOverrides(approvedConfigurationOverrides());
-  const profile = existing || {
-    id: `profile-${crypto.randomBytes(12).toString("hex")}`,
-    created_at: timestamp,
-  };
-  profile.name = name;
-  profile.updated_at = timestamp;
-  profile.settings = settings;
-  if (!existing) document.profiles.push(profile);
-  writeConfigurationProfiles(document);
-  audit(existing ? "replace" : "save", "configuration_profile", profile.id, "saved", {
-    name,
-  });
-  return { profile: publicConfigurationProfile(profile), replaced: Boolean(existing) };
-}
-
-function findConfigurationProfile(document, profileId) {
-  if (typeof profileId !== "string") {
-    throw new Error("profile_id is invalid");
-  }
-  const builtin = builtinConfigurationProfiles.find((profile) => profile.id === profileId);
-  if (builtin) return builtin;
-  if (!/^profile-[a-f0-9]{24}$/.test(profileId)) throw new Error("profile_id is invalid");
-  const profile = document.profiles.find((candidate) => candidate.id === profileId);
-  if (!profile) throw new Error(`configuration profile not found: ${profileId}`);
-  return profile;
-}
-
-function applyConfigurationProfile(args) {
-  if (args?.confirm !== true) {
-    throw new Error("applying a configuration profile requires confirm: true");
-  }
-  const document = readConfigurationProfiles();
-  const profile = findConfigurationProfile(document, args.profile_id);
-  const settings = validateApprovedConfigurationOverrides(profile.settings);
-  const next = JSON.parse(JSON.stringify(config));
-  delete next.role_profile;
-  delete next.node_role;
-  delete next.features;
-  Object.assign(next, settings);
-  writeConfiguration(next);
-  audit("apply", "configuration_profile", profile.id, "saved", { name: profile.name });
-  return {
-    profile: publicConfigurationProfile(profile),
-    configuration: getConfiguration(),
-    restart_required: true,
-  };
-}
-
-function deleteConfigurationProfile(args) {
-  if (args?.confirm !== true) {
-    throw new Error("deleting a configuration profile requires confirm: true");
-  }
-  const document = readConfigurationProfiles();
-  const profile = findConfigurationProfile(document, args.profile_id);
-  if (profile.source === "builtin") {
-    throw new Error("built-in configuration profiles cannot be deleted");
-  }
-  document.profiles = document.profiles.filter((candidate) => candidate.id !== profile.id);
-  writeConfigurationProfiles(document);
-  audit("delete", "configuration_profile", profile.id, "deleted", { name: profile.name });
-  return { deleted: true, profile: publicConfigurationProfile(profile) };
-}
-
-function resetConfiguration(args) {
-  if (args?.confirm !== true) {
-    throw new Error("resetting configuration requires confirm: true");
-  }
-  const next = JSON.parse(JSON.stringify(config));
-  delete next.role_profile;
-  delete next.node_role;
-  delete next.features;
-  writeConfiguration(next);
-  audit("reset", "configuration", config.node_id, "saved", {
-    removed_keys: ["role_profile", "node_role", "features"],
-  });
-  return { ...getConfiguration(), reset: true, restart_required: true };
-}
-
-let applicationPresets = [];
-const APPLICATION_PRESET_CORE_COORDINATION_TOOLS = new Set([
-  "acknowledge_message",
-  "create_job",
-  "link_status",
-  "receive_messages",
-  "register_artifact",
-  "send_artifact",
-  "update_job_status",
-  "list_jobs",
-  "receive_artifacts",
-]);
-
-function findApplicationPreset(presetId) {
-  if (typeof presetId !== "string" ||
-      !/^[a-z][a-z0-9-]{0,62}\/[a-z][a-z0-9-]{0,62}$/.test(presetId)) {
-    throw new Error("application preset_id is invalid");
-  }
-  const preset = applicationPresets.find((candidate) => candidate.id === presetId);
-  if (!preset) throw new Error(`application preset not found: ${presetId}`);
-  return preset;
-}
-
-function approvedApplicationPresetSettings(preset) {
-  const settings = preset.settings || {};
-  const configuration = {};
-  for (const key of ["role_profile", "node_role", "features"]) {
-    if (Object.hasOwn(settings, key)) configuration[key] = structuredClone(settings[key]);
-  }
-  const approved = validateApprovedConfigurationOverrides(configuration);
-  const prefix = `app_${preset.plugin_id.replaceAll("-", "_")}_`;
-  const toolRestriction = approved.features?.allowed_peer_tools;
-  if (toolRestriction !== undefined) {
-    const normalized = validateFeature("allowed_peer_tools", toolRestriction);
-    for (const direction of ["inbound", "outbound"]) {
-      if (!Array.isArray(normalized[direction]) || normalized[direction].some((name) =>
-        !name.startsWith(prefix) && !APPLICATION_PRESET_CORE_COORDINATION_TOOLS.has(name))) {
-        throw new Error("application preset peer tools must be same-plugin tools or the fixed safe core coordination subset");
-      }
-    }
-  }
-  const broad = approved.features?.enable_broad_run_command;
-  if (broad === true || broad?.inbound === true || broad?.outbound === true) {
-    throw new Error("application presets cannot enable broad commands");
-  }
-  if (!Array.isArray(settings.enabled_operations)) {
-    throw new Error("application preset must declare enabled_operations");
-  }
-  return { configuration: approved, enabled_operations: [...settings.enabled_operations] };
-}
-
-function publicApplicationPreset(preset) {
-  const approved = approvedApplicationPresetSettings(preset);
-  return {
-    id: preset.id,
-    plugin_id: preset.plugin_id,
-    plugin_name: preset.plugin_name,
-    plugin_version: preset.plugin_version,
-    name: preset.name,
-    description: preset.description,
-    impact: preset.impact,
-    settings: {
-      ...approved.configuration,
-      enabled_operations: approved.enabled_operations,
-    },
-    read_only: true,
-  };
-}
-
-function listApplicationPresets() {
-  return { presets: applicationPresets.map(publicApplicationPreset) };
-}
-
-function previewApplicationPreset(args) {
-  const preset = findApplicationPreset(args?.preset_id);
-  const publicPreset = publicApplicationPreset(preset);
-  return {
-    preset: publicPreset,
-    changes: {
-      role_and_capabilities: structuredClone(publicPreset.settings),
-      plugin_id: preset.plugin_id,
-      enabled_operations: [...publicPreset.settings.enabled_operations],
-    },
-    preserved: [
-      "connections", "credentials", "paths", "tokens", "local_control",
-      "plugin_configuration", "other_plugin_entries", "application_data",
-    ],
-    confirmation_required: true,
-  };
-}
-
-function applyApplicationPreset(args) {
-  if (args?.confirm !== true) {
-    throw new Error("applying an application preset requires confirm: true");
-  }
-  const preset = findApplicationPreset(args.preset_id);
-  const approved = approvedApplicationPresetSettings(preset);
-  const next = JSON.parse(JSON.stringify(config));
-  delete next.role_profile;
-  delete next.node_role;
-  delete next.features;
-  Object.assign(next, approved.configuration);
-  next.application_plugins = { ...(next.application_plugins || {}) };
-  next.application_plugins.entries = { ...(next.application_plugins.entries || {}) };
-  const priorEntry = next.application_plugins.entries[preset.plugin_id];
-  if (priorEntry !== undefined && (!priorEntry || typeof priorEntry !== "object" || Array.isArray(priorEntry))) {
-    throw new Error("application plugin entry configuration must be an object");
-  }
-  next.application_plugins.entries[preset.plugin_id] = {
-    ...(priorEntry || {}),
-    enabled_operations: approved.enabled_operations,
-  };
-  writeConfiguration(next);
-  audit("apply", "application_preset", preset.id, "saved", {
-    plugin_id: preset.plugin_id,
-    enabled_operations: approved.enabled_operations,
-  });
-  return {
-    preset: publicApplicationPreset(preset),
-    configuration: getConfiguration(),
-    restart_required: true,
-  };
-}
-
-function resetApplicationPreset(args) {
-  if (args?.confirm !== true) {
-    throw new Error("resetting an application preset requires confirm: true");
-  }
-  const preset = findApplicationPreset(args.preset_id);
-  const next = JSON.parse(JSON.stringify(config));
-  delete next.role_profile;
-  delete next.node_role;
-  delete next.features;
-  const entry = next.application_plugins?.entries?.[preset.plugin_id];
-  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-    delete entry.enabled_operations;
-  }
-  writeConfiguration(next);
-  audit("reset", "application_preset", preset.id, "saved", {
-    plugin_id: preset.plugin_id,
-    removed_keys: ["role_profile", "node_role", "features", "enabled_operations"],
-  });
-  return {
-    preset: publicApplicationPreset(preset),
-    configuration: getConfiguration(),
-    reset: true,
-    restart_required: true,
-  };
-}
-
-function normalizeConnectionLabel(value, fallback) {
-  if (value === undefined) return fallback;
-  if (typeof value !== "string") throw new Error("connection label must be a string");
-  const label = value.trim().replace(/\s+/g, " ");
-  if (!label || label.length > 40 || /[\u0000-\u001f\u007f]/u.test(label)) {
-    throw new Error("connection label must contain 1 to 40 printable characters");
-  }
-  return label;
-}
-
-function normalizeConnectionHost(value) {
-  if (typeof value !== "string") throw new Error("connection host must be a string");
-  const host = value.trim();
-  if (!host || host.length > 253 || /\s|[\u0000-\u001f\u007f]/u.test(host)) {
-    throw new Error("enabled connection host must be a nonempty hostname or address");
-  }
-  return host;
-}
-
-function connectionConfiguration(source = config) {
-  const peer = source.peer || {};
-  return {
-    primary: {
-      enabled: peer.primary_enabled ?? Boolean(peer.primary_host),
-      label: normalizeConnectionLabel(
-        peer.primary_label,
-        source.local_control?.route_labels?.primary || "Thunderbolt",
-      ),
-      host: typeof peer.primary_host === "string" ? peer.primary_host : "",
-    },
-    fallback: {
-      enabled: peer.fallback_enabled ?? Boolean(peer.fallback_host),
-      label: normalizeConnectionLabel(
-        peer.fallback_label,
-        source.local_control?.route_labels?.fallback || "Ethernet",
-      ),
-      host: typeof peer.fallback_host === "string" ? peer.fallback_host : "",
-    },
-  };
-}
-
-function validateConnectionConfiguration(settings) {
-  for (const role of ["primary", "fallback"]) {
-    const route = settings[role];
-    if (typeof route.enabled !== "boolean") {
-      throw new Error(`${role} connection enabled must be a boolean`);
-    }
-    route.label = normalizeConnectionLabel(
-      route.label,
-      role === "primary" ? "Thunderbolt" : "Ethernet",
-    );
-    if (route.enabled) route.host = normalizeConnectionHost(route.host);
-    else if (route.host !== "" && typeof route.host !== "string") {
-      throw new Error(`${role} connection host must be a string`);
-    } else if (typeof route.host === "string") {
-      route.host = route.host.trim();
-    }
-  }
-  if (!settings.primary.enabled && !settings.fallback.enabled) {
-    throw new Error("at least one connection must be enabled");
-  }
-  return settings;
-}
-
-function getConnectionConfiguration() {
-  const connections = validateConnectionConfiguration(connectionConfiguration());
-  return {
-    routes: structuredClone(connections),
-    automatic_fallback: connections.primary.enabled && connections.fallback.enabled,
-  };
-}
-
-function updateConnectionConfiguration(args) {
-  if (args?.confirm !== true) {
-    throw new Error("updating connection configuration requires confirm: true");
-  }
-  for (const key of Object.keys(args || {})) {
-    if (!["routes", "confirm"].includes(key)) {
-      throw new Error(`unsupported connection configuration key: ${key}`);
-    }
-  }
-  if (!args.routes || typeof args.routes !== "object" || Array.isArray(args.routes)) {
-    throw new Error("connection routes update must be an object");
-  }
-  for (const key of Object.keys(args.routes)) {
-    if (!["primary", "fallback"].includes(key)) {
-      throw new Error(`unsupported connection route: ${key}`);
-    }
-  }
-  const nextConnections = connectionConfiguration();
-  for (const role of ["primary", "fallback"]) {
-    if (args.routes[role] === undefined) continue;
-    if (!args.routes[role] || typeof args.routes[role] !== "object" || Array.isArray(args.routes[role])) {
-      throw new Error(`${role} connection update must be an object`);
-    }
-    for (const key of Object.keys(args.routes[role])) {
-      if (!["enabled", "label", "host"].includes(key)) {
-        throw new Error(`unsupported ${role} connection key: ${key}`);
-      }
-    }
-    Object.assign(nextConnections[role], args.routes[role]);
-  }
-  validateConnectionConfiguration(nextConnections);
-  const nextEnvironment = {
-    ...machineEnvironment,
-    HAWKSPAN_PRIMARY_ENABLED: String(nextConnections.primary.enabled),
-    HAWKSPAN_PRIMARY_LABEL: nextConnections.primary.label,
-    ...(nextConnections.primary.host ? { HAWKSPAN_PRIMARY_HOST: nextConnections.primary.host } : {}),
-    HAWKSPAN_FALLBACK_ENABLED: String(nextConnections.fallback.enabled),
-    HAWKSPAN_FALLBACK_LABEL: nextConnections.fallback.label,
-    ...(nextConnections.fallback.host ? { HAWKSPAN_FALLBACK_HOST: nextConnections.fallback.host } : {}),
-  };
-  if (!nextConnections.primary.host) delete nextEnvironment.HAWKSPAN_PRIMARY_HOST;
-  if (!nextConnections.fallback.host) delete nextEnvironment.HAWKSPAN_FALLBACK_HOST;
-  writeHawkspanEnv(ENV_PATH, nextEnvironment);
-  machineEnvironment = Object.freeze(nextEnvironment);
-  const next = JSON.parse(JSON.stringify(config));
-  next.peer = { ...(next.peer || {}) };
-  for (const role of ["primary", "fallback"]) {
-    next.peer[`${role}_enabled`] = nextConnections[role].enabled;
-    next.peer[`${role}_label`] = nextConnections[role].label;
-    next.peer[`${role}_host`] = nextConnections[role].host;
-  }
-  writeConfiguration(next);
-  audit("update", "connection_configuration", config.node_id, "saved", {
-    primary_enabled: nextConnections.primary.enabled,
-    fallback_enabled: nextConnections.fallback.enabled,
-  });
-  return { ...getConnectionConfiguration(), restart_required: true };
 }
 const db = new DatabaseSync(DB_PATH);
-db.exec(`
+
+function execWithRetry(sql, attempts = 20) {
+  let lastError;
+  for (let index = 0; index < attempts; index += 1) {
+    try {
+      return db.exec(sql);
+    } catch (error) {
+      lastError = error;
+      const message = String(error?.message || error);
+      if (!/database is locked|SQLITE_BUSY|SQLITE_LOCKED/i.test(message)) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+    }
+  }
+  throw lastError;
+}
+
+execWithRetry(`
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = FULL;
   PRAGMA busy_timeout = 10000;
@@ -965,6 +228,14 @@ db.exec(`
   );
 `);
 
+const queueRegistry = createQueueRegistry(db, {
+  retryDelaysMs: config.queue_supervisor.worker_restart_delays_ms,
+  maximumAttempts: config.queue_supervisor.default_maximum_attempts,
+  maximumPendingItems: config.queue_supervisor.default_maximum_pending_items,
+  maximumPayloadBytes: config.queue_supervisor.default_maximum_payload_bytes,
+  retryJitter: config.queue_supervisor.retry_jitter,
+});
+
 function now() {
   return new Date().toISOString();
 }
@@ -982,15 +253,71 @@ function audit(action, objectType, objectId, result, details = {}) {
     INSERT INTO audit_events
       (timestamp,node_id,action,object_type,object_id,result,details_json)
     VALUES (?,?,?,?,?,?,?)
-  `).run(
-    now(),
-    redactResolvedMachineValues(config.node_id),
-    action,
-    objectType,
-    redactResolvedMachineValues(objectId || null),
-    result,
-    json(redactResolvedMachineValues(details)),
-  );
+  `).run(now(), config.node_id, action, objectType, objectId || null, result, json(details));
+}
+
+function removeDuplicateSimpleTunerQueues() {
+  const adapters = [
+    "tool:trainer_start_authorized_job",
+    "tool:trainer_stop_authorized_job",
+    "tool:trainer_package_authorized_job",
+    "tool:trainer_queue_control",
+  ];
+  const placeholders = adapters.map(() => "?").join(",");
+  const rejected = db.prepare(`SELECT id,adapter FROM queues WHERE adapter IN (${placeholders})`)
+    .all(...adapters);
+  if (!rejected.length) return [];
+  const remove = db.prepare("DELETE FROM queues WHERE id=?");
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const queue of rejected) remove.run(queue.id);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  audit("remove_rejected", "queue_set", "duplicate-simpletuner-queues", "removed", {
+    queues: rejected,
+    authority: "lora-scheduler.py",
+  });
+  return rejected;
+}
+
+removeDuplicateSimpleTunerQueues();
+
+for (const definition of [
+  {
+    queue_id: "hawkspan-messages",
+    name: "HawkSpan messages",
+    kind: "message",
+    adapter: "message",
+    concurrency: 2,
+    priority: 100,
+  },
+  {
+    queue_id: "hawkspan-artifacts",
+    name: "HawkSpan artifacts and files",
+    kind: "file",
+    adapter: "artifact",
+    concurrency: 1,
+    priority: 200,
+  },
+]) {
+  const created = queueRegistry.createQueue(definition);
+  if (created.created) audit("create", "queue", definition.queue_id, "created", definition);
+}
+
+function enqueueDeliveryReference(queueId, itemIdValue, payload, priority = 1000) {
+  const result = queueRegistry.enqueueItem({
+    queue_id: queueId,
+    item_id: itemIdValue,
+    payload,
+    priority,
+  });
+  if (!result.already_present) {
+    audit("enqueue", "queue_item", itemIdValue, "queued", { queue_id: queueId, payload });
+  }
+  return result;
 }
 
 function sha256(filePath) {
@@ -1030,17 +357,6 @@ function ingestInbox() {
       if (!envelope.id || !envelope.sender || !envelope.recipient) {
         throw new Error("missing required envelope fields");
       }
-      const acknowledgement = envelope.kind === "acknowledgement";
-      const inboundFeature = acknowledgement
-        ? "allow_peer_acknowledgements"
-        : "allow_peer_messages";
-      if (!directionEnabled(inboundFeature, "inbound")) {
-        audit("ingest", "message", envelope.id, "rejected", {
-          reason: `${inboundFeature} is disabled for inbound envelopes`,
-          envelope_path: filePath,
-        });
-        continue;
-      }
       const exists = db.prepare("SELECT 1 FROM messages WHERE id=?").get(envelope.id);
       if (exists) continue;
       db.prepare(`
@@ -1079,48 +395,45 @@ function ingestInbox() {
   return imported;
 }
 
-function configuredRoutes() {
-  if (!config.peer) return [];
-  const connections = connectionConfiguration();
-  return ["primary", "fallback"].map((role) => ({
-    role,
-    ...connections[role],
-  }));
-}
+const routeRetryAfter = new Map();
 
 function peerCandidates() {
-  return configuredRoutes()
-    .filter((route) => route.enabled && route.host)
-    .map((route) => route.host);
+  if (!config.peer) return [];
+  return [
+    config.peer.primary_enabled === false ? null : config.peer.primary_host,
+    config.peer.fallback_enabled === false ? null : config.peer.fallback_host,
+  ].filter((host) => host && Date.now() >= Number(routeRetryAfter.get(host) || 0));
 }
 
-function strictSshOptions() {
-  return [
-    "-o", "BatchMode=yes",
-    "-o", `StrictHostKeyChecking=${effective.features.strict_host_key_checking ? "yes" : "accept-new"}`,
-    "-o", `UserKnownHostsFile=${path.join(STATE_ROOT, "ssh", "known_hosts")}`,
-    "-o", "ConnectTimeout=5",
-    "-o", "ServerAliveInterval=15",
-    "-o", "ServerAliveCountMax=3",
-  ];
+function recordRouteFailure(host) {
+  if (host === config.peer?.primary_host) {
+    routeRetryAfter.set(host, Date.now() + config.link.primary_reprobe_ms);
+  }
+}
+
+function recordRouteSuccess(host) {
+  routeRetryAfter.delete(host);
 }
 
 function sshArgs(host, remoteCommand) {
   const args = [];
   if (config.peer.ssh_identity) args.push("-i", config.peer.ssh_identity);
+  const connectSeconds = Math.max(1, Math.ceil(config.link.connect_timeout_ms / 1000));
   args.push(
-    ...strictSshOptions(),
+    "-o", "BatchMode=yes",
+    "-o", `ConnectTimeout=${connectSeconds}`,
+    "-o", `ServerAliveInterval=${config.link.server_alive_interval_seconds}`,
+    "-o", `ServerAliveCountMax=${config.link.server_alive_count_max}`,
     `${config.peer.user}@${host}`,
     remoteCommand,
   );
   return args;
 }
 
-function ensureRemoteDirectory(host, remoteDir) {
+function ensureRemoteDirectory(host, remoteDir, timeout) {
   const result = spawnSync("ssh", sshArgs(host, `mkdir -p ${shellQuote(remoteDir)}`), {
     encoding: "utf8",
-    timeout: 15000,
-    env: minimalChildEnvironment(),
+    timeout,
   });
   return { ok: result.status === 0, stderr: result.stderr?.trim() || "" };
 }
@@ -1129,14 +442,75 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'\"'\"'`)}'`;
 }
 
+function discoverPeerRelease(host, timeout = 15000) {
+  const remoteStateRoot = config.peer.remote_state_dir ||
+    path.posix.join("/Users", config.peer.user || "", ".hawkspan");
+  const authorityPath = path.posix.join(remoteStateRoot, "installed-revision.json");
+  const result = spawnSync("ssh", sshArgs(host, `cat ${shellQuote(authorityPath)}`), {
+    encoding: "utf8",
+    timeout,
+  });
+  if (result.status !== 0) {
+    return { ok: false, status: result.status, error: result.stderr?.trim() || "peer release authority unavailable" };
+  }
+  try {
+    const record = JSON.parse(result.stdout);
+    const root = record.active_release_root;
+    if (record.schema_version !== 2 || !record.revision ||
+        typeof root !== "string" || !path.posix.isAbsolute(root)) {
+      throw new Error("peer release authority is incomplete");
+    }
+    return { ok: true, revision: String(record.revision), active_release_root: root };
+  } catch (error) {
+    return { ok: false, status: result.status, error: String(error.message || error) };
+  }
+}
+
 let rsyncAppendVerify;
+
+function waitMilliseconds(milliseconds) {
+  if (milliseconds <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function beginLinkCycle() {
+  return Date.now() + Number(config.link.cycle_timeout_ms);
+}
+
+function waitForOperationRetry(delayMs, deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0 || delayMs >= remaining) return false;
+  waitMilliseconds(delayMs);
+  return true;
+}
+
+function reserveOperationAttempt(delayMs, deadline, isLastRoute) {
+  const attemptMs = Number(config.link.operation_attempt_timeout_ms);
+  if (!operationAttemptFits({
+    remainingMs: deadline - Date.now(),
+    delayMs,
+    attemptTimeoutMs: attemptMs,
+    isLastRoute,
+  })) return false;
+  return waitForOperationRetry(delayMs, deadline);
+}
+
+function remainingLinkCycle(deadline, requestedMs) {
+  return Math.max(1, Math.min(Number(requestedMs), deadline - Date.now()));
+}
+
+function operationAttemptDeadline(cycleDeadline) {
+  return Math.min(
+    cycleDeadline,
+    Date.now() + Number(config.link.operation_attempt_timeout_ms),
+  );
+}
 
 function supportsAppendVerify() {
   if (rsyncAppendVerify !== undefined) return rsyncAppendVerify;
   const result = spawnSync("rsync", ["--help"], {
     encoding: "utf8",
     timeout: 5000,
-    env: minimalChildEnvironment(),
   });
   rsyncAppendVerify = result.status === 0 &&
     `${result.stdout || ""}\n${result.stderr || ""}`.includes("--append-verify");
@@ -1148,54 +522,79 @@ function rsyncFile(localPath, remoteDir, remoteName = null) {
     return { ok: false, error: "peer is not configured", attempts: [] };
   }
   const attempts = [];
-  for (const host of peerCandidates()) {
-    const prepared = ensureRemoteDirectory(host, remoteDir);
-    if (!prepared.ok) {
-      attempts.push({ host, stage: "mkdir", error: prepared.stderr });
-      continue;
-    }
-    const sshCommand = [
-      "ssh",
-      ...(config.peer.ssh_identity ? ["-i", config.peer.ssh_identity] : []),
-      ...strictSshOptions(),
-    ].join(" ");
-    const resumeArgs = supportsAppendVerify()
-      ? ["--partial", "--append-verify"]
-      : ["--partial"];
-    const remoteTarget = remoteName
-      ? `${remoteDir.replaceAll(" ", "\\ ")}/${remoteName.replaceAll(" ", "\\ ")}`
-      : `${remoteDir.replaceAll(" ", "\\ ")}/`;
-    const result = spawnSync("rsync", [
-      "-a",
-      ...resumeArgs,
-      "-e", sshCommand,
-      localPath,
-      `${config.peer.user}@${host}:${remoteTarget}`,
-    ], {
-      encoding: "utf8",
-      timeout: 24 * 60 * 60 * 1000,
-      env: minimalChildEnvironment(),
-    });
-    attempts.push({
-      host,
-      stage: "rsync",
-      resume_mode: supportsAppendVerify() ? "append-verify" : "partial",
-      status: result.status,
-      error: result.stderr?.trim() || "",
-    });
-    if (result.status === 0) return { ok: true, host, attempts };
+  const deadline = beginLinkCycle();
+  for (const { host, cycle, delay_ms: delayMs, is_last_route: isLastRoute } of routeAttemptPlan(
+    peerCandidates(), config.link.operation_retry_delays_ms,
+  )) {
+      if (!reserveOperationAttempt(delayMs, deadline, isLastRoute)) {
+        if (isLastRoute) break;
+        continue;
+      }
+      const attemptDeadline = operationAttemptDeadline(deadline);
+      const prepared = ensureRemoteDirectory(
+        host,
+        remoteDir,
+        remainingLinkCycle(attemptDeadline, config.link.connect_timeout_ms + 5000),
+      );
+      if (!prepared.ok) {
+        attempts.push({ cycle, host, stage: "mkdir", error: prepared.stderr });
+        recordRouteFailure(host);
+        continue;
+      }
+      const sshCommand = [
+        "ssh",
+        ...(config.peer.ssh_identity ? ["-i", config.peer.ssh_identity] : []),
+        "-o", "BatchMode=yes",
+        "-o", `ConnectTimeout=${Math.max(1, Math.ceil(config.link.connect_timeout_ms / 1000))}`,
+        "-o", `ServerAliveInterval=${config.link.server_alive_interval_seconds}`,
+        "-o", `ServerAliveCountMax=${config.link.server_alive_count_max}`,
+      ].join(" ");
+      const resumeArgs = supportsAppendVerify()
+        ? ["--partial", "--append-verify"]
+        : ["--partial"];
+      const remoteTarget = remoteName
+        ? `${remoteDir.replaceAll(" ", "\\ ")}/${remoteName.replaceAll(" ", "\\ ")}`
+        : `${remoteDir.replaceAll(" ", "\\ ")}/`;
+      const result = spawnSync("rsync", [
+        "-a",
+        ...resumeArgs,
+        "-e", sshCommand,
+        localPath,
+        `${config.peer.user}@${host}:${remoteTarget}`,
+      ], {
+        encoding: "utf8",
+        timeout: remainingLinkCycle(attemptDeadline, config.link.operation_attempt_timeout_ms),
+      });
+      attempts.push({
+        cycle,
+        host,
+        stage: "rsync",
+        resume_mode: supportsAppendVerify() ? "append-verify" : "partial",
+        status: result.status,
+        error: result.stderr?.trim() || "",
+      });
+      if (result.status === 0) {
+        recordRouteSuccess(host);
+        return { ok: true, host, attempts };
+      }
+      recordRouteFailure(host);
   }
   return { ok: false, error: "all routes failed", attempts };
 }
 
 function retryMessage(args) {
-  if (!directionEnabled("allow_peer_messages", "outbound")) {
-    throw new Error("outbound peer messages are disabled");
-  }
   const row = db.prepare(`
     SELECT * FROM messages WHERE id=? AND direction='outbound'
   `).get(args.message_id);
   if (!row) throw new Error(`outbound message not found: ${args.message_id}`);
+  if (row.state === "delivered" || row.state === "acknowledged") {
+    return {
+      message_id: row.id,
+      envelope_path: row.envelope_path,
+      delivery: { ok: true, already_delivered: true, host: row.delivered_via || null, attempts: [] },
+      wake: null,
+    };
+  }
   if (!fs.existsSync(row.envelope_path)) {
     throw new Error(`immutable envelope is missing: ${row.envelope_path}`);
   }
@@ -1217,17 +616,15 @@ function retryMessage(args) {
     delivery,
     wake,
   });
+  if (!delivery.ok) {
+    enqueueDeliveryReference(
+      "hawkspan-messages", `message-${row.id}`, { message_id: row.id, wake: args.wake !== false }, 100,
+    );
+  }
   return { message_id: row.id, envelope_path: row.envelope_path, delivery, wake };
 }
 
-function sendMessage(args) {
-  const acknowledgement = args.kind === "acknowledgement";
-  if (!directionEnabled(
-    acknowledgement ? "allow_peer_acknowledgements" : "allow_peer_messages",
-    "outbound",
-  )) {
-    throw new Error(`outbound peer ${acknowledgement ? "acknowledgements" : "messages"} are disabled`);
-  }
+function sendMessage(args, { onEnvelopeWritten = null } = {}) {
   const messageId = id("msg");
   const envelope = {
     schema_version: 1,
@@ -1242,25 +639,31 @@ function sendMessage(args) {
     metadata: args.metadata || {},
   };
   const envelopePath = writeEnvelope(envelope);
-  db.prepare(`
-    INSERT INTO messages
-      (id,created_at,sender,recipient,kind,subject,body,correlation_id,
-       direction,state,envelope_path,metadata_json)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-  `).run(
-    messageId,
-    envelope.created_at,
-    envelope.sender,
-    envelope.recipient,
-    envelope.kind,
-    envelope.subject,
-    envelope.body,
-    envelope.correlation_id,
-    "outbound",
-    "queued",
-    envelopePath,
-    json(envelope.metadata),
-  );
+  onEnvelopeWritten?.(envelopePath);
+  try {
+    db.prepare(`
+      INSERT INTO messages
+        (id,created_at,sender,recipient,kind,subject,body,correlation_id,
+         direction,state,envelope_path,metadata_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      messageId,
+      envelope.created_at,
+      envelope.sender,
+      envelope.recipient,
+      envelope.kind,
+      envelope.subject,
+      envelope.body,
+      envelope.correlation_id,
+      "outbound",
+      "queued",
+      envelopePath,
+      json(envelope.metadata),
+    );
+  } catch (error) {
+    fs.rmSync(envelopePath, { force: true });
+    throw error;
+  }
   let delivery = null;
   if (args.deliver !== false && config.peer?.remote_inbox) {
     delivery = rsyncFile(envelopePath, config.peer.remote_inbox);
@@ -1281,13 +684,15 @@ function sendMessage(args) {
     delivery,
     wake,
   });
+  if (args.deliver !== false && !delivery?.ok) {
+    enqueueDeliveryReference(
+      "hawkspan-messages", `message-${messageId}`, { message_id: messageId, wake: args.wake !== false }, 100,
+    );
+  }
   return { message_id: messageId, envelope_path: envelopePath, delivery, wake };
 }
 
 function wakePeerThread(args) {
-  if (!directionEnabled("allow_peer_wakeup", "outbound")) {
-    return { ok: false, skipped: true, error: "outbound peer wakeups are disabled", attempts: [] };
-  }
   if (!config.peer?.allow_remote_wake) {
     return {
       ok: false,
@@ -1301,7 +706,30 @@ function wakePeerThread(args) {
   }
   const codexCommand = config.peer.codex_command || "codex";
   const remoteNode = config.peer.remote_node || "node";
-  const remoteCallTool = config.peer.remote_call_tool || "call-tool.mjs";
+  let peerRelease = null;
+  const discoveryAttempts = [];
+  const deadline = beginLinkCycle();
+  for (const { host, cycle, delay_ms: delayMs, is_last_route: isLastRoute } of routeAttemptPlan(
+    peerCandidates(), config.link.operation_retry_delays_ms,
+  )) {
+    if (!reserveOperationAttempt(delayMs, deadline, isLastRoute)) {
+      if (isLastRoute) break;
+      continue;
+    }
+    const observed = discoverPeerRelease(
+      host,
+      remainingLinkCycle(operationAttemptDeadline(deadline), 15000),
+    );
+    discoveryAttempts.push({ host, cycle, ...observed });
+    if (observed.ok) {
+      peerRelease = observed;
+      break;
+    }
+  }
+  if (!peerRelease) {
+    return { ok: false, error: "peer release authority unavailable", attempts: discoveryAttempts };
+  }
+  const remoteCallTool = path.posix.join(peerRelease.active_release_root, "scripts", "call-tool.mjs");
   const auditDir = config.peer.remote_audit || `${config.peer.remote_inbox}/../audit`;
   const wakeId = id("wake");
   const logPath = path.posix.join(auditDir, `${wakeId}.log`);
@@ -1309,13 +737,8 @@ function wakePeerThread(args) {
     auditDir,
     `wake-${String(config.peer.thread_id).replace(/[^A-Za-z0-9._-]/g, "_")}.lock`,
   );
-  const prompt = effective.features.wake_prompt_mode === "notification"
-    ? [
-      `HawkSpan delivered message ${args.message_id || "unknown"}.`,
-      "Import and acknowledge the durable envelope when MCP tools are available.",
-    ].join(" ")
-    : [
-    `HawkSpan delivered message ${args.message_id || "unknown"}.`,
+  const prompt = [
+    `HawkSpan-D delivered message ${args.message_id || "unknown"}.`,
     args.subject ? `Subject: ${args.subject}.` : "",
     args.body ? `Message body: ${args.body}` : "",
     "Import and acknowledge the durable envelope when MCP tools are available.",
@@ -1324,7 +747,7 @@ function wakePeerThread(args) {
     `Direct acknowledge fallback: ${remoteNode} ${remoteCallTool} acknowledge_message ` +
       `'{"message_id":"${args.message_id || "unknown"}","deliver":true}'`,
     "Continue the existing task without repeating completed work.",
-    ].filter(Boolean).join(" ");
+  ].filter(Boolean).join(" ");
   const resumedCommand = [
     "trap",
     shellQuote(`rm -rf ${shellQuote(leasePath)}`),
@@ -1357,27 +780,39 @@ function wakePeerThread(args) {
     "/dev/null",
     "&",
   ].join(" ");
-  const attempts = [];
-  for (const host of peerCandidates()) {
-    const result = spawnSync("ssh", sshArgs(host, command), {
-      encoding: "utf8",
-      timeout: 15000,
-      env: minimalChildEnvironment(),
-    });
-    attempts.push({
-      host,
-      status: result.status,
-      error: result.stderr?.trim() || "",
-    });
-    if (result.status === 0) {
-      audit("wake", "thread", config.peer.thread_id, "started", {
-        host,
-        wake_id: wakeId,
-        log_path: logPath,
-        message_id: args.message_id || null,
+  const attempts = [...discoveryAttempts.map((attempt) => ({ ...attempt, phase: "release_discovery" }))];
+  for (const { host, cycle, delay_ms: delayMs, is_last_route: isLastRoute } of routeAttemptPlan(
+    peerCandidates(), config.link.operation_retry_delays_ms,
+  )) {
+      if (!reserveOperationAttempt(delayMs, deadline, isLastRoute)) {
+        if (isLastRoute) break;
+        continue;
+      }
+      const result = spawnSync("ssh", sshArgs(host, command), {
+        encoding: "utf8",
+        timeout: remainingLinkCycle(
+          operationAttemptDeadline(deadline),
+          Math.max(15000, config.link.connect_timeout_ms + 5000),
+        ),
       });
-      return { ok: true, host, wake_id: wakeId, log_path: logPath, attempts };
-    }
+      attempts.push({
+        cycle,
+        host,
+        status: result.status,
+        error: result.stderr?.trim() || "",
+      });
+      if (result.status === 0) {
+        recordRouteSuccess(host);
+        audit("wake", "thread", config.peer.thread_id, "started", {
+          host,
+          peer_revision: peerRelease.revision,
+          wake_id: wakeId,
+          log_path: logPath,
+          message_id: args.message_id || null,
+        });
+        return { ok: true, host, wake_id: wakeId, log_path: logPath, attempts };
+      }
+      recordRouteFailure(host);
   }
   audit("wake", "thread", config.peer.thread_id, "failed", { attempts });
   return { ok: false, error: "all routes failed", wake_id: wakeId, attempts };
@@ -1478,9 +913,10 @@ const jobTransitions = {
   awaiting_authorization: new Set(["authorized", "cancelled"]),
   authorized: new Set(["queued", "cancelled"]),
   queued: new Set(["running", "cancelled", "failed"]),
-  running: new Set(["paused", "completed", "failed", "cancel_requested"]),
+  running: new Set(["paused", "returning", "completed", "failed", "cancel_requested"]),
+  returning: new Set(["completed", "failed", "cancel_requested"]),
   paused: new Set(["queued", "cancelled"]),
-  cancel_requested: new Set(["cancelled", "failed"]),
+  cancel_requested: new Set(["paused", "cancelled", "failed"]),
   completed: new Set(["verified"]),
   failed: new Set(["queued", "cancelled"]),
   verified: new Set(),
@@ -1556,15 +992,42 @@ function updateJobStatus(args) {
 
 function listJobs(args) {
   const limit = Math.min(Math.max(Number(args.limit || 100), 1), 500);
-  const rows = args.state
-    ? db.prepare("SELECT * FROM jobs WHERE state=? ORDER BY updated_at DESC LIMIT ?")
-        .all(args.state, limit)
-    : db.prepare("SELECT * FROM jobs ORDER BY updated_at DESC LIMIT ?").all(limit);
+  const clauses = [];
+  const values = [];
+  if (args.state) {
+    clauses.push("state=?");
+    values.push(args.state);
+  }
+  if (args.job_id) {
+    clauses.push("id=?");
+    values.push(args.job_id);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const rows = db.prepare(`SELECT * FROM jobs ${where} ORDER BY updated_at DESC LIMIT ?`)
+    .all(...values, limit);
   return rows.map((row) => ({
     ...row,
     metadata: JSON.parse(row.metadata_json),
     metadata_json: undefined,
   }));
+}
+
+function jobCountSummary() {
+  const activeStates = ["running", "returning", "started", "stop_requested", "cancel_requested"];
+  const pendingStates = ["queued", "authorized"];
+  const terminalStates = ["completed", "verified", "cancelled", "failed"];
+  const countWhere = (states) => db.prepare(`
+    SELECT count(*) AS count FROM jobs
+    WHERE state IN (${states.map(() => "?").join(",")})
+  `).get(...states).count;
+  return {
+    active_jobs: countWhere(activeStates),
+    pending_jobs: countWhere(pendingStates),
+    paused_jobs: db.prepare(`
+      SELECT count(*) AS count FROM jobs WHERE state='paused'
+    `).get().count,
+    completed_jobs: countWhere(terminalStates),
+  };
 }
 
 function registerArtifact(args) {
@@ -1616,11 +1079,14 @@ function verifyArtifact(args) {
 }
 
 function sendArtifact(args) {
-  if (!directionEnabled("allow_peer_artifact_send", "outbound")) {
-    throw new Error("outbound artifact sending is disabled");
-  }
   const row = db.prepare("SELECT * FROM artifacts WHERE id=?").get(args.artifact_id);
   if (!row) throw new Error(`artifact not found: ${args.artifact_id}`);
+  if (row.state === "delivered") {
+    return {
+      artifact_id: row.id,
+      delivery: { ok: true, verified: true, already_delivered: true, host: row.delivered_via || null, attempts: [] },
+    };
+  }
   if (!config.peer?.remote_artifacts) throw new Error("peer.remote_artifacts is not configured");
   if (!fs.existsSync(row.path)) {
     db.prepare("UPDATE artifacts SET state='source_missing' WHERE id=?").run(row.id);
@@ -1629,8 +1095,7 @@ function sendArtifact(args) {
     return { artifact_id: row.id, delivery };
   }
   const currentStat = fs.statSync(row.path);
-  const verifySource = effective.features.artifact_verification_mode !== "cached";
-  const currentSha256 = verifySource ? sha256(row.path) : row.sha256;
+  const currentSha256 = sha256(row.path);
   if (Number(currentStat.size) !== Number(row.size_bytes) || currentSha256 !== row.sha256) {
     db.prepare("UPDATE artifacts SET state='source_changed' WHERE id=?").run(row.id);
     const delivery = {
@@ -1652,7 +1117,7 @@ function sendArtifact(args) {
     const verified = spawnSync(
       "ssh",
       sshArgs(delivery.host, `shasum -a 256 ${shellQuote(remotePath)}`),
-      { encoding: "utf8", timeout: 24 * 60 * 60 * 1000, env: minimalChildEnvironment() },
+      { encoding: "utf8", timeout: config.link.operation_attempt_timeout_ms },
     );
     const remoteSha256 = verified.status === 0
       ? verified.stdout.trim().split(/\s+/)[0]
@@ -1689,13 +1154,35 @@ function sendArtifact(args) {
     db.prepare("UPDATE artifacts SET state='delivery_queued' WHERE id=?").run(row.id);
   }
   audit("send", "artifact", row.id, delivery.verified ? "delivered" : "failed", { delivery });
+  if (!delivery.verified) {
+    queueArtifactDelivery({ artifact_id: row.id });
+  }
   return { artifact_id: row.id, delivery };
 }
 
-function flushOutbox(args) {
-  if (process.env.HAWKSPAN_BACKGROUND === "1" && !effective.features.enable_background_outbox) {
-    throw new Error("background outbox processing is disabled");
+function queueArtifactDelivery(args) {
+  const row = db.prepare("SELECT id,state FROM artifacts WHERE id=?").get(args.artifact_id);
+  if (!row) throw new Error(`artifact not found: ${args.artifact_id}`);
+  if (row.state === "delivered") {
+    return { artifact_id: row.id, queued: false, delivery: { verified: true, already_delivered: true } };
   }
+  db.prepare("UPDATE artifacts SET state='delivery_queued' WHERE id=?").run(row.id);
+  const queued = enqueueDeliveryReference(
+    "hawkspan-artifacts", `artifact-${row.id}`, { artifact_id: row.id }, 200,
+  );
+  if (queued.item?.state === "failed") {
+    queued.item = queueRegistry.control({
+      queue_id: "hawkspan-artifacts",
+      item_id: queued.item.item_id,
+      action: "retry-item",
+      reason: "automatic artifact delivery retry",
+    }).item;
+  }
+  audit("enqueue", "artifact", row.id, "delivery_queued", { queue_id: "hawkspan-artifacts" });
+  return { artifact_id: row.id, queued: true, queue_item: queued.item };
+}
+
+function flushOutbox(args) {
   const messageRows = db.prepare(`
     SELECT id FROM messages
     WHERE direction='outbound' AND state='queued'
@@ -1708,14 +1195,6 @@ function flushOutbox(args) {
   `).all();
   const messages = [];
   const artifacts = [];
-  for (const row of effective.features.enable_background_artifact_sender || process.env.HAWKSPAN_BACKGROUND !== "1"
-    ? artifactRows : []) {
-    try {
-      artifacts.push(sendArtifact({ artifact_id: row.id }));
-    } catch (error) {
-      artifacts.push({ artifact_id: row.id, error: String(error?.message || error) });
-    }
-  }
   for (const row of messageRows) {
     try {
       messages.push(retryMessage({ message_id: row.id, wake: args.wake !== false }));
@@ -1723,25 +1202,41 @@ function flushOutbox(args) {
       messages.push({ message_id: row.id, error: String(error?.message || error) });
     }
   }
+  for (const row of artifactRows) {
+    try {
+      artifacts.push(enqueueDeliveryReference(
+        "hawkspan-artifacts", `artifact-${row.id}`, { artifact_id: row.id }, 200,
+      ));
+    } catch (error) {
+      artifacts.push({ artifact_id: row.id, error: String(error?.message || error) });
+    }
+  }
   ingestInbox();
-  const received = effective.features.enable_background_artifact_receiver ||
-      process.env.HAWKSPAN_BACKGROUND !== "1"
-    ? receiveArtifacts()
-    : { artifacts: [], skipped: true };
+  const received = receiveArtifacts();
   audit("flush", "outbox", null, "complete", {
     message_count: messages.length,
     artifact_count: artifacts.length,
+    artifact_delivery: "independent queue supervisor",
     received_artifact_count: received.artifacts.length,
   });
   return { messages, artifacts, received };
 }
 
 function listArtifacts(args) {
-  const limit = Math.min(Math.max(Number(args.limit || 100), 1), 500);
-  const rows = args.state
-    ? db.prepare("SELECT * FROM artifacts WHERE state=? ORDER BY created_at DESC LIMIT ?")
-        .all(args.state, limit)
-    : db.prepare("SELECT * FROM artifacts ORDER BY created_at DESC LIMIT ?").all(limit);
+  const limit = Math.min(Math.max(Number(args.limit || 100), 1), 5000);
+  const clauses = [];
+  const values = [];
+  for (const [column, value] of [
+    ["state", args.state], ["id", args.artifact_id], ["sha256", args.sha256],
+  ]) {
+    if (value) {
+      clauses.push(`${column}=?`);
+      values.push(value);
+    }
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const rows = db.prepare(`SELECT * FROM artifacts ${where} ORDER BY created_at DESC LIMIT ?`)
+    .all(...values, limit);
   return rows.map((row) => ({
     ...row,
     metadata: JSON.parse(row.metadata_json),
@@ -1750,9 +1245,6 @@ function listArtifacts(args) {
 }
 
 function receiveArtifacts() {
-  if (!directionEnabled("allow_peer_artifact_receive", "inbound")) {
-    throw new Error("inbound artifact receiving is disabled");
-  }
   const results = [];
   for (const name of fs.readdirSync(ARTIFACTS)) {
     if (!name.endsWith(".artifact.json")) continue;
@@ -1760,15 +1252,25 @@ function receiveArtifacts() {
     try {
       const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
       const filePath = path.join(ARTIFACTS, manifest.file_name);
-      const existing = db.prepare("SELECT id FROM artifacts WHERE id=?").get(manifest.artifact_id);
-      if (!fs.existsSync(filePath)) {
-        if (existing) {
-          db.prepare("UPDATE artifacts SET state='received_missing' WHERE id=?")
-            .run(manifest.artifact_id);
-        }
-        throw new Error(`artifact file is missing: ${manifest.file_name}`);
-      }
+      if (!fs.existsSync(filePath)) throw new Error(`artifact file is missing: ${manifest.file_name}`);
       const stat = fs.statSync(filePath);
+      const existing = db.prepare(
+        "SELECT size_bytes,sha256,state FROM artifacts WHERE id=?"
+      ).get(manifest.artifact_id);
+      if (
+        existing?.state === "received_verified" &&
+        Number(existing.size_bytes) === Number(manifest.size_bytes) &&
+        Number(stat.size) === Number(manifest.size_bytes) &&
+        existing.sha256 === manifest.sha256
+      ) {
+        results.push({
+          artifact_id: manifest.artifact_id,
+          path: filePath,
+          verified: true,
+          cached: true,
+        });
+        continue;
+      }
       const digest = sha256(filePath);
       const verified = stat.size === manifest.size_bytes && digest === manifest.sha256;
       if (!existing) {
@@ -1787,21 +1289,6 @@ function receiveArtifacts() {
           verified ? "received_verified" : "received_mismatch",
           manifest.delivered_via || null,
           json(manifest.metadata),
-        );
-      } else {
-        db.prepare(`
-          UPDATE artifacts
-          SET path=?,name=?,size_bytes=?,sha256=?,state=?,delivered_via=?,metadata_json=?
-          WHERE id=?
-        `).run(
-          filePath,
-          manifest.name || manifest.file_name,
-          stat.size,
-          digest,
-          verified ? "received_verified" : "received_mismatch",
-          manifest.delivered_via || null,
-          json(manifest.metadata),
-          manifest.artifact_id,
         );
       }
       audit("receive", "artifact", manifest.artifact_id, verified ? "verified" : "mismatch", {
@@ -1849,63 +1336,30 @@ const peerToolAllowlist = new Set([
   "receive_artifacts",
   "flush_outbox",
   "list_audit_events",
+  "create_queue",
+  "configure_queue",
+  "delete_queue",
+  "list_queues",
+  "queue_status",
+  "enqueue_queue_item",
+  "enqueue_queue_batch",
+  "queue_control",
+  "start_next_queue_item",
+  "list_queue_adapters",
+  "trainer_status",
+  "trainer_run_status",
+  "trainer_queue_status",
+  "trainer_queue_detail",
+  "trainer_validate_dataset",
+  "trainer_tail_log",
+  "trainer_audit_checkpoint_retention",
+  "trainer_preservation_status",
+  "trainer_start_authorized_job",
+  "trainer_stop_authorized_job",
+  "trainer_package_authorized_job",
+  "trainer_queue_control",
+  "lora_automation",
 ]);
-const outboundPeerToolAllowlist = new Set(peerToolAllowlist);
-for (const name of config.peer?.allowed_tools || []) {
-  if (typeof name !== "string" || !/^[a-z][a-z0-9_]{0,127}$/.test(name)) {
-    throw new Error("peer.allowed_tools must contain valid MCP tool names");
-  }
-  outboundPeerToolAllowlist.add(name);
-}
-for (const direction of ["inbound", "outbound"]) {
-  const explicitlyConfigured = config.features?.allowed_peer_tools;
-  const configured = (
-    effective.role_profile === "controller-worker" &&
-    (explicitlyConfigured === undefined || explicitlyConfigured?.[direction] === undefined) &&
-    (effective.node_role === "controller" ? direction === "inbound" : direction === "outbound")
-  ) ? [] : effective.features.allowed_peer_tools[direction];
-  if (Array.isArray(configured)) {
-    const target = direction === "inbound" ? peerToolAllowlist : outboundPeerToolAllowlist;
-    target.clear();
-    for (const name of configured) {
-      if (!/^[a-z][a-z0-9_]{0,127}$/.test(name)) {
-        throw new Error(`features.allowed_peer_tools.${direction} contains an invalid tool name`);
-      }
-      target.add(name);
-    }
-  }
-}
-
-const peerFeatureForTool = new Map([
-  ["run_command", "allow_peer_commands"],
-  ["wake_peer_thread", "allow_peer_wakeup"],
-  ["send_message", "allow_peer_messages"],
-  ["retry_message", "allow_peer_messages"],
-  ["receive_messages", "allow_peer_messages"],
-  ["list_messages", "allow_peer_messages"],
-  ["acknowledge_message", "allow_peer_acknowledgements"],
-  ["create_job", "allow_peer_jobs"],
-  ["update_job_status", "allow_peer_jobs"],
-  ["list_jobs", "allow_peer_jobs"],
-  ["send_artifact", "allow_peer_artifact_send"],
-  ["register_artifact", "allow_peer_artifact_receive"],
-  ["verify_artifact", "allow_peer_artifact_receive"],
-  ["receive_artifacts", "allow_peer_artifact_receive"],
-]);
-
-function enforcePeerFeature(toolName, direction) {
-  if (
-    toolName === "run_command" &&
-    (!directionEnabled("allow_peer_commands", direction) ||
-      !directionEnabled("enable_broad_run_command", direction))
-  ) {
-    throw new Error(`peer commands are disabled for ${direction} calls`);
-  }
-  const feature = peerFeatureForTool.get(toolName);
-  if (feature && feature !== "allow_peer_commands" && !directionEnabled(feature, direction)) {
-    throw new Error(`${feature} is disabled for ${direction} calls`);
-  }
-}
 
 function runCommand(args) {
   const command = String(args.command || "").trim();
@@ -1916,13 +1370,6 @@ function runCommand(args) {
     : null;
   if (args.job_id && !trackedJob) {
     throw new Error(`job not found: ${args.job_id}`);
-  }
-  const authorizationRequired =
-    effective.features.require_authorized_job_for_all_commands ||
-    (args.consequential === true &&
-      effective.features.require_authorized_job_for_consequential_commands);
-  if (authorizationRequired && (!trackedJob || trackedJob.authorization_state !== "recorded")) {
-    throw new Error("this command requires a job with recorded authorization");
   }
 
   const cwd = args.cwd ? path.resolve(args.cwd) : os.homedir();
@@ -1944,16 +1391,14 @@ function runCommand(args) {
     encoding: "utf8",
     timeout: timeoutMs,
     maxBuffer: outputLimit,
-    env: minimalChildEnvironment(),
+    env: process.env,
   });
   const stdout = result.stdout || "";
   const stderr = result.stderr || "";
   const commandId = id("command");
   const ok = result.status === 0 && !result.error;
   const details = {
-    ...(effective.features.audit_command_content
-      ? { command }
-      : { command_sha256: crypto.createHash("sha256").update(command).digest("hex") }),
+    command,
     cwd,
     consequential: args.consequential === true,
     tracking_job_id: trackedJob?.id || null,
@@ -1975,53 +1420,226 @@ function runCommand(args) {
   };
 }
 
+function loraAutomation(args) {
+  const action = String(args.action || "").trim();
+  const allowedActions = new Set([
+    "inventory",
+    "preflight",
+    "preflight-all",
+    "training-readiness",
+    "prepare-versioned-job",
+    "scheduler-enqueue",
+    "stage-runtime-job",
+    "telemetry",
+    "queue",
+    "compare",
+    "recovery",
+    "packet-audit",
+    "packet-validation-plan",
+    "registry-refresh",
+    "validation-plan",
+    "validation-ingest",
+    "draw-things-plan",
+    "draw-things-ingest",
+    "revision-ingest",
+    "estimate",
+  ]);
+  if (!allowedActions.has(action)) {
+    throw new Error(`unsupported LoRA automation action: ${action}`);
+  }
+  const operationArgs = { ...args };
+  delete operationArgs.action;
+  delete operationArgs.timeout_ms;
+  const result = spawnSync(process.execPath, [
+    LORA_AUTOMATION_SCRIPT,
+    action,
+    JSON.stringify(operationArgs),
+  ], {
+    encoding: "utf8",
+    timeout: Number(args.timeout_ms || 300000),
+    maxBuffer: 32 * 1024 * 1024,
+    env: {
+      ...process.env,
+      HAWKSPAN_CONFIG: CONFIG_PATH,
+      HAWKSPAN_STATE_DIR: STATE_ROOT,
+    },
+  });
+  const ok = result.status === 0 && !result.error;
+  audit("execute", "lora_automation", action, ok ? "completed" : "failed", {
+    arguments: operationArgs,
+    status: result.status,
+    error: result.error ? String(result.error) : null,
+    stderr: result.stderr?.slice(-4000) || "",
+  });
+  if (!ok) {
+    throw new Error(result.stderr?.trim() || result.error || `LoRA automation ${action} failed`);
+  }
+  return JSON.parse(result.stdout);
+}
+
+const delegatedTrainerTools = new Set([
+  "trainer_start_authorized_job",
+  "trainer_stop_authorized_job",
+  "trainer_package_authorized_job",
+]);
+
+function delegatedJobRecord(row) {
+  return {
+    id: row.id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    creator: row.creator,
+    assignee: row.assignee,
+    kind: row.kind,
+    title: row.title,
+    description: row.description,
+    state: row.state,
+    authorization_state: row.authorization_state,
+    authorization_evidence: row.authorization_evidence,
+    metadata: JSON.parse(row.metadata_json),
+  };
+}
+
+function importDelegatedJob(context, expectedJobId) {
+  if (process.env.HAWKSPAN_CALL_ORIGIN !== "peer") {
+    throw new Error("delegated job context is accepted only from the paired peer");
+  }
+  if (!context || context.id !== expectedJobId) {
+    throw new Error("delegated job identity does not match requested job");
+  }
+  if (!context.creator || !context.kind || !context.state) {
+    throw new Error("delegated job context is incomplete");
+  }
+  const existing = db.prepare("SELECT * FROM jobs WHERE id=?").get(expectedJobId);
+  if (existing && existing.creator !== context.creator) {
+    throw new Error(`delegated job creator conflict: ${expectedJobId}`);
+  }
+  const values = [
+    context.created_at || now(), context.updated_at || now(), context.creator,
+    context.assignee || config.node_id, context.kind, context.title || expectedJobId,
+    context.description || "", context.state,
+    context.authorization_state || "not_required",
+    context.authorization_evidence || null, json(context.metadata), expectedJobId,
+  ];
+  if (existing) {
+    db.prepare(`
+      UPDATE jobs SET created_at=?,updated_at=?,creator=?,assignee=?,kind=?,title=?,
+        description=?,state=?,authorization_state=?,authorization_evidence=?,metadata_json=?
+      WHERE id=?
+    `).run(...values);
+  } else {
+    db.prepare(`
+      INSERT INTO jobs
+        (created_at,updated_at,creator,assignee,kind,title,description,state,
+         authorization_state,authorization_evidence,metadata_json,id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(...values);
+  }
+  audit("import", "job", expectedJobId, context.state, {
+    creator: context.creator,
+    delegated: true,
+  });
+}
+
 function peerCallTool(args) {
   if (!config.peer) throw new Error("peer is not configured");
-  enforcePeerFeature(args.tool_name, "outbound");
-  if (!outboundPeerToolAllowlist.has(args.tool_name)) {
+  if (!peerToolAllowlist.has(args.tool_name)) {
     throw new Error(`peer tool is not allowed: ${args.tool_name}`);
   }
   const remoteNode = config.peer.remote_node || "node";
-  const remoteCallTool = config.peer.remote_call_tool ||
-    path.posix.join(config.peer.remote_plugin_root || "", "scripts/call-tool.mjs");
-  if (!remoteCallTool) throw new Error("peer.remote_call_tool is not configured");
-  const peerTimeoutMs = args.timeout_ms === undefined ? 300000 : args.timeout_ms;
-  if (!Number.isInteger(peerTimeoutMs) || peerTimeoutMs < 1000 || peerTimeoutMs > 4 * 60 * 60 * 1000) {
-    throw new Error("peer timeout_ms must be from 1000 through 14400000");
-  }
-  const remoteCommand = [
-    "env",
-    "HAWKSPAN_CALL_ORIGIN=peer",
-    `HAWKSPAN_CALL_TIMEOUT_MS=${peerTimeoutMs}`,
-    shellQuote(remoteNode),
-    shellQuote(remoteCallTool),
-    shellQuote(args.tool_name),
-    shellQuote(JSON.stringify(args.arguments || {})),
-  ].join(" ");
-  const attempts = [];
-  for (const host of peerCandidates()) {
-    const result = spawnSync("ssh", sshArgs(host, remoteCommand), {
-      encoding: "utf8",
-      timeout: peerTimeoutMs,
-      env: minimalChildEnvironment(),
-    });
-    attempts.push({
-      host,
-      status: result.status,
-      error: result.stderr?.trim() || "",
-    });
-    if (result.status !== 0) continue;
-    let output;
-    try {
-      output = JSON.parse(result.stdout);
-    } catch {
-      throw new Error(`peer returned invalid JSON: ${result.stdout.slice(0, 1000)}`);
+  const forwardedArguments = { ...(args.arguments || {}) };
+  if (delegatedTrainerTools.has(args.tool_name) && forwardedArguments.job_id) {
+    let job = db.prepare("SELECT * FROM jobs WHERE id=?").get(forwardedArguments.job_id);
+    if (!job) throw new Error(`job not found: ${forwardedArguments.job_id}`);
+    if (args.tool_name === "trainer_start_authorized_job" &&
+        !forwardedArguments.expected_revision_fingerprint) {
+      throw new Error("trainer start requires expected_revision_fingerprint");
     }
-    audit("call", "peer_tool", args.tool_name, output.isError ? "error" : "ok", {
-      host,
-      remote_is_error: Boolean(output.isError),
-    });
-    return { host, tool_name: args.tool_name, result: output, attempts };
+    if (args.tool_name === "trainer_start_authorized_job" && job.state === "authorized") {
+      updateJobStatus({ job_id: job.id, state: "queued" });
+      job = db.prepare("SELECT * FROM jobs WHERE id=?").get(job.id);
+    }
+    if (args.tool_name === "trainer_stop_authorized_job" && job.state === "running") {
+      updateJobStatus({ job_id: job.id, state: "cancel_requested" });
+      job = db.prepare("SELECT * FROM jobs WHERE id=?").get(job.id);
+    }
+    forwardedArguments._delegated_job = delegatedJobRecord(job);
+  }
+  const attempts = [];
+  const deadline = beginLinkCycle();
+  for (const { host, cycle, delay_ms: delayMs, is_last_route: isLastRoute } of routeAttemptPlan(
+    peerCandidates(), config.link.operation_retry_delays_ms,
+  )) {
+      if (!reserveOperationAttempt(delayMs, deadline, isLastRoute)) {
+        if (isLastRoute) break;
+        continue;
+      }
+      const attemptDeadline = operationAttemptDeadline(deadline);
+      const peerRelease = discoverPeerRelease(
+        host,
+        remainingLinkCycle(attemptDeadline, Math.max(15000, config.link.connect_timeout_ms + 5000)),
+      );
+      if (!peerRelease.ok) {
+        attempts.push({ cycle, host, status: peerRelease.status ?? null, error: peerRelease.error, phase: "release_discovery" });
+        recordRouteFailure(host);
+        continue;
+      }
+      const remoteCallTool = path.posix.join(peerRelease.active_release_root, "scripts", "call-tool.mjs");
+      const remoteCommand = [
+        "env",
+        "HAWKSPAN_CALL_ORIGIN=peer",
+        shellQuote(remoteNode),
+        shellQuote(remoteCallTool),
+        shellQuote(args.tool_name),
+        shellQuote(JSON.stringify(forwardedArguments)),
+      ].join(" ");
+      const result = spawnSync("ssh", sshArgs(host, remoteCommand), {
+        encoding: "utf8",
+        timeout: remainingLinkCycle(attemptDeadline, Number(args.timeout_ms || 300000)),
+      });
+      attempts.push({
+        cycle,
+        host,
+        status: result.status,
+        error: result.stderr?.trim() || "",
+        revision: peerRelease.revision,
+        active_release_root: peerRelease.active_release_root,
+      });
+      if (result.status !== 0) {
+        recordRouteFailure(host);
+        continue;
+      }
+      let output;
+      try {
+        output = JSON.parse(result.stdout);
+      } catch {
+        attempts.at(-1).error = `invalid JSON: ${result.stdout.slice(0, 1000)}`;
+        recordRouteFailure(host);
+        continue;
+      }
+      recordRouteSuccess(host);
+      audit("call", "peer_tool", args.tool_name, output.isError ? "error" : "ok", {
+        host,
+        peer_revision: peerRelease.revision,
+        remote_is_error: Boolean(output.isError),
+      });
+      if (!output.isError && forwardedArguments.job_id) {
+        const localJob = db.prepare("SELECT * FROM jobs WHERE id=?")
+          .get(forwardedArguments.job_id);
+        if (args.tool_name === "trainer_start_authorized_job" &&
+            localJob?.state === "queued") {
+          updateJobStatus({ job_id: localJob.id, state: "running" });
+        }
+        if (args.tool_name === "trainer_stop_authorized_job" &&
+            localJob?.state === "cancel_requested") {
+          updateJobStatus({
+            job_id: localJob.id,
+            state: "paused",
+            metadata: { target: forwardedArguments.target || null, phase: "stopped" },
+          });
+        }
+      }
+      return { host, tool_name: args.tool_name, result: output, attempts };
   }
   audit("call", "peer_tool", args.tool_name, "failed", { attempts });
   return { tool_name: args.tool_name, error: "all routes failed", attempts };
@@ -2039,266 +1657,1292 @@ function linkStatus() {
       SELECT count(*) AS count FROM messages
       WHERE direction='outbound' AND state='queued'
     `).get().count,
-    active_jobs: db.prepare(`
-      SELECT count(*) AS count FROM jobs
-      WHERE state IN ('queued','authorized','running','started','stop_requested')
-    `).get().count,
-    paused_jobs: db.prepare(`
-      SELECT count(*) AS count FROM jobs WHERE state='paused'
-    `).get().count,
-    completed_jobs: db.prepare(`
-      SELECT count(*) AS count FROM jobs
-      WHERE state IN ('completed','verified')
-    `).get().count,
+    ...jobCountSummary(),
     artifacts: db.prepare("SELECT count(*) AS count FROM artifacts").get().count,
   };
-  const routes = [];
-  for (const route of configuredRoutes()) {
-    if (!route.enabled) {
-      routes.push({
-        role: route.role,
-        label: route.label,
-        host: route.host,
-        enabled: false,
-        status: "disabled",
-        network_reachable: null,
-        transport_ready: null,
-        transport_error: "",
-      });
-      continue;
-    }
-    const host = route.host;
-    const ping = spawnSync("ping", ["-c", "1", "-W", "1000", host], {
-      encoding: "utf8",
-      timeout: 3000,
-      env: minimalChildEnvironment(),
-    });
-    const ssh = spawnSync("ssh", sshArgs(host, "true"), {
-      encoding: "utf8",
-      timeout: 8000,
-      env: minimalChildEnvironment(),
-    });
-    routes.push({
+  const readiness = runReadinessMonitor(config, { once: true });
+  const routes = readiness.routes.map((route) => {
+    const failed = route.layers.find((entry) => !entry.ok);
+    return {
       role: route.role,
       label: route.label,
-      host,
-      enabled: true,
-      status: ssh.status === 0 ? "connected" : "unavailable",
-      network_reachable: ping.status === 0,
-      transport_ready: ssh.status === 0,
-      transport_error: ssh.status === 0 ? "" : ssh.stderr?.trim() || "",
-    });
-  }
-  const selectedRoute = routes.find((route) => route.enabled && route.transport_ready) || null;
+      host: route.host,
+      local_host: route.local_host,
+      network_reachable: route.network_reachable,
+      transport_ready: route.transport_ready,
+      ready: route.ready,
+      failed_layer: route.failed_layer,
+      transport_error: route.transport_ready ? "" : failed?.evidence || "",
+      layers: route.layers,
+    };
+  });
+  const selectedRoute = routes.find((route) => route.ready) ||
+    routes.find((route) => route.transport_ready) ||
+    null;
   return {
-    node_id: redactResolvedMachineValues(config.node_id),
-    state_root: "[local HawkSpan state]",
-    config_path: "[local HawkSpan configuration]",
-    machine_settings: {
-      source: fs.existsSync(ENV_PATH) ? "hawkspan.env" : "defaults",
-      values: redactedHawkspanEnv(machineEnvironment),
-    },
+    node_id: config.node_id,
+    state_root: STATE_ROOT,
+    config_path: CONFIG_PATH,
     peer: config.peer ? {
-      node_id: redactResolvedMachineValues(config.peer.node_id),
-      primary_host: config.peer.primary_host ? "[configured]" : "",
-      fallback_host: config.peer.fallback_host ? "[configured]" : "",
-      primary_enabled: config.peer.primary_enabled ?? Boolean(config.peer.primary_host),
-      fallback_enabled: config.peer.fallback_enabled ?? Boolean(config.peer.fallback_host),
-      primary_label: connectionConfiguration().primary.label,
-      fallback_label: connectionConfiguration().fallback.label,
+      node_id: config.peer.node_id,
+      primary_host: config.peer.primary_host,
+      fallback_host: config.peer.fallback_host,
     } : null,
-    routes: routes.map((route) => ({
-      ...route,
-      host: route.host ? "[configured]" : "",
-      transport_error: route.transport_error ? "Connection failed; inspect locally." : "",
-    })),
-    selected_route: selectedRoute ? "[configured]" : null,
-    selected_route_role: selectedRoute?.role || null,
+    routes,
+    readiness,
+    selected_route: selectedRoute?.host || null,
+    counts,
+    queue_registry: queueRegistry.listQueues(),
+    queue_supervisor: {
+      enabled: config.queue_supervisor.enabled,
+      poll_interval_ms: config.queue_supervisor.poll_interval_ms,
+      item_lease_ms: config.queue_supervisor.item_lease_ms,
+      max_items_per_worker: config.queue_supervisor.max_items_per_worker,
+      worker_restart_delays_ms: config.queue_supervisor.worker_restart_delays_ms,
+    },
     local_control: localControl ? {
       enabled: true,
       host: localControl.host,
       port: localControl.port,
       url: localControl.url,
     } : { enabled: false },
-    counts,
   };
 }
 
+function trainerStatus() {
+  const result = spawnSync("ps", ["-axo", "pid,ppid,etime,%cpu,%mem,command"], {
+    encoding: "utf8",
+    timeout: 5000,
+  });
+  const matcher = new RegExp(
+    [config.training.process_match, "run_captioned_loras\\.py"]
+      .filter(Boolean)
+      .join("|"),
+    "i",
+  );
+  const processes = (result.stdout || "")
+    .split("\n")
+    .filter((line) => (
+      matcher.test(line) &&
+      !line.includes("mcp-server.mjs") &&
+      !line.includes("codex exec resume") &&
+      !line.includes("/Applications/ChatGPT.app/Contents/Resources/codex")
+    ))
+    .map((line) => line.trim());
+  let logHeartbeat = null;
+  try {
+    const queueRoot = configuredDirectory("queue_root");
+    const logRoot = configuredDirectory("log_root");
+    const statusPath = path.join(queueRoot, "captioned-lora-status.json");
+    const status = fs.existsSync(statusPath)
+      ? JSON.parse(fs.readFileSync(statusPath, "utf8"))
+      : {};
+    const current = status.current || null;
+    const logPath = current ? path.join(logRoot, `${current}.log`) : null;
+    if (logPath && fs.existsSync(logPath)) {
+      const ageSeconds = Math.max(
+        0,
+        (Date.now() - fs.statSync(logPath).mtimeMs) / 1000,
+      );
+      logHeartbeat = {
+        current,
+        log_path: logPath,
+        age_seconds: ageSeconds,
+        fresh: ageSeconds <= 120,
+      };
+    }
+  } catch (error) {
+    logHeartbeat = {
+      fresh: false,
+      error: String(error?.message || error),
+    };
+  }
+  const processInspectionError = result.status === 0
+    ? null
+    : result.error?.message || result.stderr?.trim() || `ps exited ${result.status}`;
+  const active = processes.length > 0 || Boolean(logHeartbeat?.fresh);
+  const activeSource = processes.length > 0
+    ? "process-list"
+    : logHeartbeat?.fresh
+      ? "fresh-log-heartbeat"
+      : "none";
+  audit("inspect", "trainer", null, "ok", {
+    process_count: processes.length,
+    active,
+    active_source: activeSource,
+    process_inspection_error: processInspectionError,
+    log_heartbeat: logHeartbeat,
+  });
+  return {
+    process_match: config.training.process_match,
+    active,
+    active_source: activeSource,
+    processes,
+    process_inspection_error: processInspectionError,
+    log_heartbeat: logHeartbeat,
+    allow_start: config.training.allow_start,
+    allow_stop: config.training.allow_stop,
+  };
+}
+
+function jobIdSet(entries) {
+  return new Set(
+    (entries || [])
+      .map((entry) => typeof entry === "string" ? entry : entry?.job_id)
+      .filter(Boolean),
+  );
+}
+
+function configuredDirectory(key, required = true) {
+  const value = config.training[key];
+  if (!value && required) throw new Error(`training.${key} is not configured`);
+  return value ? path.resolve(value) : null;
+}
+
+function assertWithin(candidate, roots) {
+  const resolved = path.resolve(candidate);
+  const allowed = roots.filter(Boolean).map((root) => path.resolve(root));
+  if (!allowed.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`))) {
+    throw new Error(`path is outside configured training roots: ${resolved}`);
+  }
+  return resolved;
+}
+
+function trainerQueueStatus() {
+  const queueRoot = configuredDirectory("queue_root");
+  const entries = fs.existsSync(queueRoot)
+    ? fs.readdirSync(queueRoot, { withFileTypes: true })
+        .filter((entry) => !entry.name.startsWith("."))
+        .map((entry) => {
+          const itemPath = path.join(queueRoot, entry.name);
+          const stat = fs.statSync(itemPath);
+          return {
+            name: entry.name,
+            type: entry.isDirectory() ? "directory" : "file",
+            modified_at: stat.mtime.toISOString(),
+            size_bytes: entry.isFile() ? stat.size : null,
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name))
+    : [];
+  return { queue_root: queueRoot, exists: fs.existsSync(queueRoot), entries };
+}
+
+const imageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp", ".heic", ".tif", ".tiff"]);
+
+function trainerValidateDataset(args) {
+  const roots = [
+    configuredDirectory("queue_root", false),
+    configuredDirectory("simpletuner_root", false),
+  ];
+  const datasetPath = assertWithin(args.path, roots);
+  if (!fs.statSync(datasetPath).isDirectory()) throw new Error("dataset path must be a directory");
+  const files = fs.readdirSync(datasetPath, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.startsWith("._"));
+  const images = files.filter((entry) => imageExtensions.has(path.extname(entry.name).toLowerCase()));
+  const captions = new Set(
+    files.filter((entry) => path.extname(entry.name).toLowerCase() === ".txt")
+      .map((entry) => path.basename(entry.name, path.extname(entry.name))),
+  );
+  const missingCaptions = images
+    .map((entry) => path.basename(entry.name, path.extname(entry.name)))
+    .filter((stem) => !captions.has(stem));
+  const emptyCaptions = images
+    .map((entry) => path.basename(entry.name, path.extname(entry.name)))
+    .filter((stem) => {
+      const captionPath = path.join(datasetPath, `${stem}.txt`);
+      return fs.existsSync(captionPath) && fs.statSync(captionPath).size === 0;
+    });
+  const result = {
+    path: datasetPath,
+    image_count: images.length,
+    caption_count: captions.size,
+    missing_captions: missingCaptions,
+    empty_captions: emptyCaptions,
+    valid: images.length > 0 && missingCaptions.length === 0 && emptyCaptions.length === 0,
+  };
+  audit("validate", "dataset", datasetPath, result.valid ? "valid" : "invalid", result);
+  return result;
+}
+
+function trainerTailLog(args) {
+  const logRoot = configuredDirectory("log_root");
+  const controlRoot = configuredDirectory("control_root", false);
+  const logPath = assertWithin(args.path, [logRoot, controlRoot]);
+  const lines = Math.min(Math.max(Number(args.lines || 100), 1), 2000);
+  const result = spawnSync("tail", ["-n", String(lines), logPath], {
+    encoding: "utf8",
+    timeout: 5000,
+  });
+  if (result.status !== 0) throw new Error(result.stderr?.trim() || "tail failed");
+  return { path: logPath, lines, content: result.stdout };
+}
+
+function trainerAuditCheckpointRetention() {
+  const effectiveTraining = activeRuntimeConfig()?.training || config.training;
+  const queueRoot = path.resolve(
+    effectiveTraining.queue_root || config.training.queue_root,
+  );
+  if (!fs.existsSync(queueRoot) || !fs.statSync(queueRoot).isDirectory()) {
+    throw new Error(`configured directory is unavailable: ${queueRoot}`);
+  }
+  const minimum = Number(effectiveTraining.minimum_checkpoint_retention || 10);
+  const configs = [];
+  const manifestPath = path.join(queueRoot, "captioned-lora-manifest.json");
+  const manifest = fs.existsSync(manifestPath)
+    ? JSON.parse(fs.readFileSync(manifestPath, "utf8"))
+    : [];
+  for (const job of manifest) {
+    const filePath = path.join(path.resolve(job.config_dir || ""), "config.json");
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      if (!Object.hasOwn(parsed, "checkpoints_total_limit")) continue;
+      const retention = Number(parsed.checkpoints_total_limit);
+      const preservedRoot = parsed.output_dir
+        ? path.join(path.resolve(parsed.output_dir), "PRESERVED_CHECKPOINTS")
+        : null;
+      const protectedByPreservedCheckpoints = Boolean(
+        preservedRoot &&
+        fs.existsSync(preservedRoot) &&
+        fs.readdirSync(preservedRoot).some((name) => name.startsWith("checkpoint-")),
+      );
+      configs.push({
+        job_id: job.job_id || null,
+        path: filePath,
+        checkpoints_total_limit: retention,
+        meets_minimum: Number.isFinite(retention) && retention >= minimum,
+        output_dir: parsed.output_dir || null,
+        preserved_root: preservedRoot,
+        protected_by_preserved_checkpoints: protectedByPreservedCheckpoints,
+      });
+    } catch {
+      // Ignore unrelated or incomplete JSON; only parsed SimpleTuner configs count.
+    }
+  }
+  const belowMinimum = configs.filter((entry) => !entry.meets_minimum);
+  const unprotectedBelowMinimum = belowMinimum.filter(
+    (entry) => !entry.protected_by_preserved_checkpoints,
+  );
+  const result = {
+    queue_root: queueRoot,
+    minimum,
+    config_count: configs.length,
+    below_minimum_count: belowMinimum.length,
+    below_minimum: belowMinimum,
+    unprotected_below_minimum_count: unprotectedBelowMinimum.length,
+    valid: configs.length > 0 && unprotectedBelowMinimum.length === 0,
+  };
+  audit("audit", "checkpoint-retention", queueRoot, result.valid ? "valid" : "attention", result);
+  return result;
+}
+
+function trainerPreservationStatus() {
+  const effectiveTraining = activeRuntimeConfig()?.training || config.training;
+  const preservationRoot = path.resolve(
+    effectiveTraining.preservation_root || config.training.preservation_root,
+  );
+  const preservedRoots = [];
+  if (fs.existsSync(preservationRoot)) {
+    const pending = [preservationRoot];
+    while (pending.length) {
+      const current = pending.pop();
+      const entries = fs.readdirSync(current, { withFileTypes: true });
+      if (path.basename(current) === "PRESERVED_CHECKPOINTS") {
+        preservedRoots.push({
+          path: current,
+          checkpoints: entries
+            .filter((entry) => entry.isDirectory() && entry.name.startsWith("checkpoint-"))
+            .map((entry) => entry.name)
+            .sort(),
+        });
+        continue;
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith(".")) {
+          pending.push(path.join(current, entry.name));
+        }
+      }
+    }
+  }
+  return {
+    preservation_root: preservationRoot,
+    exists: fs.existsSync(preservationRoot),
+    preserved_roots: preservedRoots,
+    preserved_checkpoint_count: preservedRoots.reduce(
+      (total, entry) => total + entry.checkpoints.length,
+      0,
+    ),
+  };
+}
+
+function durationTextToSeconds(value) {
+  if (!value) return null;
+  const parts = String(value).split(":").map(Number);
+  if (parts.some((part) => !Number.isFinite(part))) return null;
+  return parts.reduce((total, part) => total * 60 + part, 0);
+}
+
+function trainerControlRecords() {
+  const controlRoot = path.resolve(
+    config.training.control_root || path.join(STATE_ROOT, "trainer-control"),
+  );
+  if (!fs.existsSync(controlRoot)) return [];
+  return fs.readdirSync(controlRoot, { withFileTypes: true })
+    .filter((entry) =>
+      entry.isFile() && entry.name.endsWith(".json") &&
+      !entry.name.endsWith(".status.json") &&
+      !entry.name.endsWith(".package-status.json"))
+    .map((entry) => path.join(controlRoot, entry.name))
+    .sort((left, right) =>
+      fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs);
+}
+
+function latestTrainerControlRecord(preferredTarget = null) {
+  const records = [];
+  for (const recordPath of trainerControlRecords()) {
+    try {
+      const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+      if (record?.durable_job_id && record?.target && record?.pid) {
+        records.push({ ...record, record_path: recordPath });
+      }
+    } catch {
+      // Ignore an interrupted control-record write and inspect older records.
+    }
+  }
+  return records.find((record) =>
+    ["started", "running", "stop_requested"].includes(record.state) &&
+    trainerRecordIsActive(record)
+  ) || records.find((record) =>
+    !["interrupted_no_checkpoint", "interrupted_recoverable"].includes(record.state)
+  ) || records.find((record) =>
+    preferredTarget && record.target === preferredTarget
+  ) || records[0] || null;
+}
+
+function trainerRecordIsActive(record) {
+  try {
+    process.kill(Number(record.pid), 0);
+  } catch {
+    return false;
+  }
+  const inspected = spawnSync(
+    "/bin/ps",
+    ["-p", String(record.pid), "-o", "command="],
+    { encoding: "utf8", timeout: 5000 },
+  );
+  if (inspected.status !== 0) return false;
+  const command = inspected.stdout || "";
+  return command.includes(String(record.runner || "")) &&
+    command.includes(String(record.target));
+}
+
+function activeRuntimeConfig() {
+  const pointerPath = path.resolve(
+    config.lora_automation?.active_runtime_pointer ||
+      path.join(path.dirname(CONFIG_PATH), "active-lora-runtime.json"),
+  );
+  if (!fs.existsSync(pointerPath)) return null;
+  const pointer = JSON.parse(fs.readFileSync(pointerPath, "utf8"));
+  if (!pointer?.config_path || !pointer?.runtime_root) return null;
+  const runtimeRoot = path.resolve(pointer.runtime_root);
+  const runtimeConfigPath = path.resolve(pointer.config_path);
+  if (!runtimeConfigPath.startsWith(`${runtimeRoot}${path.sep}`) ||
+      !fs.existsSync(runtimeConfigPath)) {
+    throw new Error("active runtime configuration is missing or outside its runtime root");
+  }
+  return JSON.parse(fs.readFileSync(runtimeConfigPath, "utf8"));
+}
+
+function trainerRunStatus() {
+  const runtimeConfig = activeRuntimeConfig();
+  const effectiveTraining = runtimeConfig?.training || config.training;
+  const queueRoot = path.resolve(effectiveTraining.queue_root);
+  const logRoot = path.resolve(effectiveTraining.log_root);
+  const statusPath = path.join(queueRoot, "captioned-lora-status.json");
+  const manifestPath = path.join(queueRoot, "captioned-lora-manifest.json");
+  const queueStatus = fs.existsSync(statusPath)
+    ? JSON.parse(fs.readFileSync(statusPath, "utf8"))
+    : {};
+  const manifest = fs.existsSync(manifestPath)
+    ? JSON.parse(fs.readFileSync(manifestPath, "utf8"))
+    : [];
+  const adapterRecord = latestTrainerControlRecord(queueStatus.current || null);
+  const adapterActive = Boolean(
+    adapterRecord &&
+    ["started", "stop_requested"].includes(adapterRecord.state) &&
+    trainerRecordIsActive(adapterRecord),
+  );
+  const adapterStatus = adapterRecord?.status_path &&
+    fs.existsSync(adapterRecord.status_path)
+    ? JSON.parse(fs.readFileSync(adapterRecord.status_path, "utf8"))
+    : {};
+  const directRunState = adapterRecord
+    ? adapterActive
+      ? "running"
+      : jobIdSet(adapterStatus.trained).has(adapterRecord.target)
+        ? "completed"
+        : jobIdSet(adapterStatus.failed).has(adapterRecord.target)
+          ? "failed"
+          : adapterRecord.state
+    : null;
+  const adapterInterrupted = ["interrupted_no_checkpoint", "interrupted_recoverable"]
+    .includes(directRunState);
+  const status = adapterRecord
+    ? { ...queueStatus, ...adapterStatus }
+    : queueStatus;
+  const current = adapterActive
+    ? adapterRecord.target
+    : adapterInterrupted
+      ? (queueStatus.current === adapterRecord.target ? null : queueStatus.current || null)
+      : (status.current || null);
+  const currentJob = manifest.find((entry) => entry.job_id === current) || null;
+  const logPath = adapterActive && adapterRecord.log_path
+    ? adapterRecord.log_path
+    : current ? path.join(logRoot, `${current}.log`) : null;
+  let progress = null;
+  if (logPath && fs.existsSync(logPath)) {
+    const stat = fs.statSync(logPath);
+    const bytes = Math.min(stat.size, 1024 * 1024);
+    const fd = fs.openSync(logPath, "r");
+    const buffer = Buffer.alloc(bytes);
+    try {
+      fs.readSync(fd, buffer, 0, bytes, stat.size - bytes);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const text = buffer.toString("utf8")
+      .replaceAll("\r", "\n")
+      .replace(/\u001b\[[0-9;]*m/g, "");
+    const pattern = /Epoch\s+(\d+)\/(\d+),?\s+Steps:\s+(\d+)%[^\n]*?\|\s*(\d+)\/(\d+)\s+\[([^\]]+)\]/g;
+    for (const match of text.matchAll(pattern)) {
+      const timing = match[6];
+      const eta = timing.match(/<([^,\]]+)/)?.[1] || null;
+      const secondsPerIteration = timing.match(/([\d.]+)s\/it/)?.[1] || null;
+      const learningRate = timing.match(/lr=([^,\]]+)/)?.[1] || null;
+      const stepLoss = timing.match(/step_loss=([^,\]\s]+)/)?.[1] || null;
+      progress = {
+        epoch: Number(match[1]),
+        epochs_total: Number(match[2]),
+        percent: Number(match[3]),
+        step: Number(match[4]),
+        steps_total: Number(match[5]),
+        eta,
+        eta_seconds: eta ? durationTextToSeconds(eta) : null,
+        seconds_per_iteration: secondsPerIteration === null
+          ? null
+          : Number(secondsPerIteration),
+        learning_rate: learningRate === null ? null : Number(learningRate),
+        step_loss: stepLoss === null ? null : Number(stepLoss),
+      };
+    }
+  }
+  const checkpoints = [];
+  if (currentJob?.output_dir && fs.existsSync(currentJob.output_dir)) {
+    for (const entry of fs.readdirSync(currentJob.output_dir, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.startsWith("checkpoint-")) {
+        checkpoints.push({
+          name: entry.name,
+          path: path.join(currentJob.output_dir, entry.name),
+          preserved: false,
+        });
+      }
+    }
+    const preservedRoot = path.join(currentJob.output_dir, "PRESERVED_CHECKPOINTS");
+    if (fs.existsSync(preservedRoot)) {
+      for (const entry of fs.readdirSync(preservedRoot, { withFileTypes: true })) {
+        if (entry.isDirectory() && entry.name.startsWith("checkpoint-")) {
+          checkpoints.push({
+            name: entry.name,
+            path: path.join(preservedRoot, entry.name),
+            preserved: true,
+          });
+        }
+      }
+    }
+  }
+  const process = trainerStatus();
+  const effectiveCurrentJob = currentJob
+    ? {
+        ...currentJob,
+        state: adapterRecord?.target === current
+          ? directRunState
+          : "running",
+      }
+    : null;
+  const result = {
+    batch: status.batch || null,
+    queue_total: Number(status.total || manifest.length),
+    current,
+    current_job: effectiveCurrentJob,
+    completed: status.completed || [],
+    failed: status.failed || [],
+    remaining: Math.max(
+      0,
+      Number(status.total || manifest.length) -
+        (status.completed?.length || 0) -
+        (status.failed?.length || 0),
+    ),
+    started_at: status.started_at || null,
+    current_started_at: status.current_started_at || null,
+    process_active: process.active,
+    activity_source: process.active_source,
+    process_inspection_error: process.process_inspection_error,
+    log_heartbeat: process.log_heartbeat,
+    progress,
+    log_path: logPath,
+    checkpoints: checkpoints.sort((a, b) => a.name.localeCompare(b.name)),
+    direct_run: adapterRecord ? {
+      durable_job_id: adapterRecord.durable_job_id,
+      target: adapterRecord.target,
+      state: directRunState,
+      pid: adapterRecord.pid,
+      process_group: adapterRecord.process_group || null,
+      revision_fingerprint: adapterRecord.revision_fingerprint || null,
+      readiness_path: adapterRecord.readiness_path || null,
+      status_path: adapterRecord.status_path || null,
+      log_path: adapterRecord.log_path || null,
+      record_path: adapterRecord.record_path,
+      active: adapterActive,
+    } : null,
+  };
+  audit("inspect", "trainer_run", current, "ok", {
+    process_active: result.process_active,
+    step: progress?.step || null,
+    steps_total: progress?.steps_total || null,
+  });
+  return result;
+}
+
+function trainerQueueDetail() {
+  const queueRoot = configuredDirectory("queue_root");
+  const statusPath = path.join(queueRoot, "captioned-lora-status.json");
+  const manifestPath = path.join(queueRoot, "captioned-lora-manifest.json");
+  const status = fs.existsSync(statusPath)
+    ? JSON.parse(fs.readFileSync(statusPath, "utf8"))
+    : {};
+  const manifest = fs.existsSync(manifestPath)
+    ? JSON.parse(fs.readFileSync(manifestPath, "utf8"))
+    : [];
+  const completed = jobIdSet(status.completed);
+  const failed = jobIdSet(status.failed);
+  return {
+    batch: status.batch || null,
+    jobs: manifest.map((job) => ({
+      ...job,
+      state: job.job_id === status.current
+        ? "running"
+        : completed.has(job.job_id)
+          ? "completed"
+          : failed.has(job.job_id)
+            ? "failed"
+            : "pending",
+    })),
+  };
+}
+
+function requireAuthorizedJob(jobId, kind, allowedStates) {
+  const row = db.prepare("SELECT * FROM jobs WHERE id=?").get(jobId);
+  if (!row) throw new Error(`job not found: ${jobId}`);
+  if (kind && row.kind !== kind) throw new Error(`job kind must be ${kind}`);
+  if (row.authorization_state !== "recorded") {
+    throw new Error("job does not contain recorded explicit authorization");
+  }
+  if (!allowedStates.includes(row.state)) {
+    throw new Error(`job state ${row.state} is not allowed for this operation`);
+  }
+  return row;
+}
+
+function requireTrackedJob(jobId, kind, allowedStates) {
+  const row = db.prepare("SELECT * FROM jobs WHERE id=?").get(jobId);
+  if (!row) throw new Error(`job not found: ${jobId}`);
+  if (kind && row.kind !== kind) throw new Error(`job kind must be ${kind}`);
+  if (allowedStates && !allowedStates.includes(row.state)) {
+    throw new Error(`job state ${row.state} is not allowed for this operation`);
+  }
+  return row;
+}
+
+function runConfiguredScript(scriptKey, allowKey, args, jobKind, allowedStates) {
+  if (!config.training[allowKey]) throw new Error(`training.${allowKey} is disabled`);
+  if (args._delegated_job) importDelegatedJob(args._delegated_job, args.job_id);
+  const job = requireTrackedJob(args.job_id, jobKind, allowedStates);
+  const scriptPath = path.resolve(config.training[scriptKey] || "");
+  if (!scriptPath || !fs.existsSync(scriptPath)) {
+    throw new Error(`training.${scriptKey} is not configured to an existing script`);
+  }
+  const commandArgs = ["--job-id", job.id];
+  if (args.target) commandArgs.push("--target", String(args.target));
+  if (args.expected_revision_fingerprint) {
+    commandArgs.push(
+      "--expected-revision-fingerprint",
+      String(args.expected_revision_fingerprint),
+    );
+  }
+  const result = spawnSync(scriptPath, commandArgs, {
+    encoding: "utf8",
+    timeout: Number(args.timeout_ms || 30000),
+  });
+  const ok = result.status === 0;
+  audit("execute", "trainer", job.id, ok ? "started" : "failed", {
+    script: scriptPath,
+    status: result.status,
+    stdout: result.stdout?.slice(-4000) || "",
+    stderr: result.stderr?.slice(-4000) || "",
+  });
+  if (!ok) throw new Error(result.stderr?.trim() || `${scriptKey} failed`);
+  return { job_id: job.id, script: scriptPath, stdout: result.stdout?.trim() || "" };
+}
+
+function trainerStartAuthorizedJob(args) {
+  if (args._delegated_job) importDelegatedJob(args._delegated_job, args.job_id);
+  let job = requireTrackedJob(args.job_id, "training", ["authorized", "queued"]);
+  if (!args.expected_revision_fingerprint) {
+    throw new Error("trainer start requires expected_revision_fingerprint");
+  }
+  if (job.state === "authorized") {
+    updateJobStatus({ job_id: job.id, state: "queued" });
+  }
+  try {
+    const result = runConfiguredScript(
+      "start_script", "allow_start", { ...args, _delegated_job: null }, "training", ["queued"],
+    );
+    updateJobStatus({
+      job_id: job.id,
+      state: "running",
+      metadata: { target: args.target || null, phase: "training" },
+    });
+    return result;
+  } catch (error) {
+    job = requireTrackedJob(args.job_id, "training", ["queued"]);
+    updateJobStatus({
+      job_id: job.id,
+      state: "failed",
+      metadata: { target: args.target || null, phase: "start-failed", error: String(error.message || error) },
+    });
+    throw error;
+  }
+}
+
+function trainerQueueControlScript(args) {
+  const resolved = path.join(path.dirname(new URL(import.meta.url).pathname), "lora-queue-control.py");
+  const commandArgs = [String(args.action)];
+  if (args.target) commandArgs.push("--target", String(args.target));
+  if (args.reason) commandArgs.push("--reason", String(args.reason));
+  const result = spawnSync("/usr/bin/python3", [resolved, ...commandArgs], {
+    encoding: "utf8",
+    timeout: Number(args.timeout_ms || 30000),
+    env: { ...process.env, HAWKSPAN_CONFIG: CONFIG_PATH },
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr?.trim() || "queue control failed");
+  }
+  return JSON.parse(result.stdout);
+}
+
+function trainerStopAuthorizedJob(args) {
+  if (args._delegated_job) importDelegatedJob(args._delegated_job, args.job_id);
+  const job = requireTrackedJob(args.job_id, "training", ["running", "cancel_requested"]);
+  if (job.state === "running") updateJobStatus({ job_id: job.id, state: "cancel_requested" });
+  const result = runConfiguredScript(
+    "stop_script", "allow_stop", { ...args, _delegated_job: null }, "training", ["cancel_requested"],
+  );
+  updateJobStatus({
+    job_id: job.id,
+    state: "paused",
+    metadata: { target: args.target || null, phase: "stopped" },
+  });
+  const queueControl = args.target
+    ? trainerQueueControlScript({
+      action: "pause-job",
+      target: args.target,
+      reason: "exact authorized stop completed; explicit resume is required",
+      timeout_ms: args.timeout_ms,
+    })
+    : null;
+  return { ...result, queue_control: queueControl };
+}
+
+function trainerQueueControl(args) {
+  if (args.action === "resume-job" && !args.reason?.trim()) {
+    throw new Error("resume-job requires a reason recording the explicit resume instruction");
+  }
+  let durableJob = null;
+  let originalDurableState = null;
+  let originalDurableMetadata = null;
+  if (["resume-job", "retry-job"].includes(args.action)) {
+    const expectedState = args.action === "resume-job" ? "paused" : "failed";
+    const schedulerPath = config.lora_automation?.scheduler_jobs_path;
+    if (!schedulerPath || !fs.existsSync(schedulerPath)) {
+      throw new Error(`${args.action} requires configured scheduler state`);
+    }
+    const scheduler = JSON.parse(fs.readFileSync(schedulerPath, "utf8"));
+    const schedulerJob = (scheduler.jobs || []).find((entry) => entry.target === args.target);
+    if (!schedulerJob?.authorization_job_id) {
+      throw new Error(`${args.action} requires a scheduler job linked to a durable authorization job`);
+    }
+    durableJob = requireTrackedJob(schedulerJob.authorization_job_id, "training", [expectedState, "queued"]);
+    const metadata = JSON.parse(durableJob.metadata_json || "{}");
+    const retryingPendingAuthorization = durableJob.state === "queued" &&
+      metadata.phase === `${args.action}-pending-scheduler` &&
+      metadata.target === args.target;
+    if (durableJob.state === "queued" && !retryingPendingAuthorization) {
+      throw new Error(`job state ${durableJob.state} is not allowed for this operation`);
+    }
+    originalDurableState = expectedState;
+    originalDurableMetadata = metadata;
+    if (durableJob.state !== "queued") {
+      updateJobStatus({
+        job_id: durableJob.id,
+        state: "queued",
+        metadata: {
+          target: args.target,
+          phase: `${args.action}-pending-scheduler`,
+          reason: args.reason || null,
+        },
+      });
+    }
+  }
+  let output;
+  try {
+    output = trainerQueueControlScript(args);
+  } catch (error) {
+    if (durableJob) {
+      db.prepare("UPDATE jobs SET state=?,updated_at=?,metadata_json=? WHERE id=?").run(
+        originalDurableState,
+        now(),
+        json(originalDurableMetadata),
+        durableJob.id,
+      );
+      audit("transition", "job", durableJob.id, originalDurableState, {
+        rollback_of: args.action,
+        reason: String(error.message || error),
+      });
+    }
+    throw error;
+  }
+  if (durableJob) {
+    const row = db.prepare("SELECT metadata_json FROM jobs WHERE id=?").get(durableJob.id);
+    db.prepare("UPDATE jobs SET updated_at=?,metadata_json=? WHERE id=?").run(
+      now(),
+      json({
+        ...JSON.parse(row.metadata_json || "{}"),
+        target: args.target,
+        phase: args.action,
+        reason: args.reason || null,
+        scheduler_eligible_at: now(),
+      }),
+      durableJob.id,
+    );
+    output.authorization_job_id = durableJob.id;
+  }
+  if (args.action === "pause-queue") {
+    output.stopped_jobs = [];
+    for (const active of output.active_jobs || []) {
+      if (!active.authorization_job_id || !active.target) continue;
+      const stopped = runConfiguredScript(
+        "stop_script", "allow_stop",
+        { job_id: active.authorization_job_id, target: active.target, timeout_ms: args.timeout_ms },
+        "training", ["running"],
+      );
+      const afterStop = db.prepare("SELECT * FROM jobs WHERE id=?").get(active.authorization_job_id);
+      if (afterStop?.state === "running") {
+        updateJobStatus({
+          job_id: afterStop.id,
+          state: "paused",
+          metadata: { target: active.target, phase: "paused-with-queue" },
+        });
+      }
+      trainerQueueControlScript({
+        action: "pause-job",
+        target: active.target,
+        reason: args.reason || "whole SimpleTuner queue paused",
+        timeout_ms: args.timeout_ms,
+      });
+      output.stopped_jobs.push(stopped);
+    }
+  }
+  audit("control", "trainer_queue", args.target || "queue", "ok", {
+    action: args.action,
+    reason: args.reason || "",
+    resume_authorization: args.action === "resume-job"
+      ? "explicit_control_call"
+      : null,
+  });
+  return output;
+}
+
+const BUILTIN_QUEUE_ADAPTERS = new Set(["message", "artifact", "command"]);
+const QUEUE_MANAGEMENT_TOOLS = new Set([
+  "create_queue", "configure_queue", "delete_queue", "list_queues", "queue_status",
+  "enqueue_queue_item", "enqueue_queue_batch", "queue_control", "start_next_queue_item",
+  "supervise_queue",
+  "list_queue_adapters",
+]);
+const SINGLETON_LIFECYCLE_TOOLS = new Set([
+  "trainer_start_authorized_job",
+  "trainer_stop_authorized_job",
+  "trainer_package_authorized_job",
+  "trainer_queue_control",
+]);
+
+function queueDefinition(queueId) {
+  return queueRegistry.queueStatus({ queue_id: queueId, limit: 1 }).queue;
+}
+
+function validateQueueAdapter(adapter) {
+  if (BUILTIN_QUEUE_ADAPTERS.has(adapter)) return;
+  if (!adapter.startsWith("tool:")) throw new Error(`unsupported queue adapter: ${adapter}`);
+  const toolName = adapter.slice(5);
+  if (!toolMap.has(toolName)) throw new Error(`registered application tool not found: ${toolName}`);
+  if (QUEUE_MANAGEMENT_TOOLS.has(toolName)) {
+    throw new Error(`queue management tools cannot be queue adapters: ${toolName}`);
+  }
+  if (SINGLETON_LIFECYCLE_TOOLS.has(toolName)) {
+    throw new Error(
+      `SimpleTuner lifecycle tools cannot create generic queues; use the single durable SimpleTuner scheduler: ${toolName}`,
+    );
+  }
+}
+
+function createQueueSurface(args) {
+  validateQueueAdapter(String(args.adapter || ""));
+  const result = queueRegistry.createQueue(args);
+  audit("create", "queue", args.queue_id, result.created ? "created" : "already_present", result.queue);
+  return result;
+}
+
+function configureQueueSurface(args) {
+  const result = queueRegistry.configureQueue(args);
+  audit("configure", "queue", args.queue_id, "configured", result.queue);
+  return result;
+}
+
+function normalizeQueuePayload(queue, payload = {}, rollbackFiles = []) {
+  if (queue.adapter === "message" && !payload.message_id) {
+    if (!payload.subject || !payload.body) {
+      throw new Error("message queue items require message_id or subject and body");
+    }
+    const message = sendMessage(
+      { ...payload, deliver: false },
+      { onEnvelopeWritten: (envelopePath) => rollbackFiles.push(envelopePath) },
+    );
+    return { message_id: message.message_id, wake: payload.wake !== false };
+  }
+  if (queue.adapter === "artifact" && !payload.artifact_id) {
+    if (!payload.path) throw new Error("artifact queue items require artifact_id or path");
+    const artifact = registerArtifact({
+      path: payload.path,
+      name: payload.name,
+      metadata: payload.metadata,
+    });
+    return { artifact_id: artifact.artifact_id };
+  }
+  if (queue.adapter === "command" && !payload.command) {
+    throw new Error("command queue items require command");
+  }
+  return payload;
+}
+
+function enqueueQueueItemSurface(args) {
+  const queue = queueDefinition(args.queue_id);
+  const rollbackFiles = [];
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const payload = normalizeQueuePayload(queue, args.payload || {}, rollbackFiles);
+    const result = queueRegistry.enqueueItem({ ...args, payload });
+    audit("enqueue", "queue_item", result.item.item_id, "queued", {
+      queue_id: args.queue_id,
+      adapter: queue.adapter,
+    });
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    for (const filePath of rollbackFiles) fs.rmSync(filePath, { force: true });
+    throw error;
+  }
+}
+
+function enqueueQueueBatchSurface(args) {
+  const queue = queueDefinition(args.queue_id);
+  const rollbackFiles = [];
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const items = args.items.map((entry) => ({
+      ...entry,
+      payload: normalizeQueuePayload(queue, entry.payload || {}, rollbackFiles),
+    }));
+    const result = queueRegistry.enqueueBatch(
+      { queue_id: args.queue_id, items },
+      { withinTransaction: true },
+    );
+    audit("enqueue_batch", "queue", args.queue_id, "queued", { count: items.length });
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    for (const filePath of rollbackFiles) fs.rmSync(filePath, { force: true });
+    throw error;
+  }
+}
+
+function queueControlSurface(args) {
+  const result = queueRegistry.control(args);
+  audit("control", "queue", args.queue_id, args.action, {
+    item_id: args.item_id || null,
+    reason: args.reason || "",
+    priority: args.priority ?? null,
+  });
+  return result;
+}
+
+function deleteQueueSurface(args) {
+  const result = queueRegistry.deleteQueue(args);
+  audit("delete", "queue", args.queue_id, "deleted");
+  return result;
+}
+
+function executeAdapterTool(toolName, payload) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      path.join(SCRIPT_ROOT, "call-tool.mjs"),
+      toolName,
+      JSON.stringify(payload || {}),
+    ], {
+      env: {
+        ...process.env,
+        HAWKSPAN_STATE_DIR: STATE_ROOT,
+        HAWKSPAN_CONFIG: CONFIG_PATH,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const append = (target, chunk) => {
+      const next = target + chunk;
+      if (Buffer.byteLength(next) > 16 * 1024 * 1024) {
+        child.kill("SIGTERM");
+        throw new Error("queue adapter output exceeded 16 MiB");
+      }
+      return next;
+    };
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout = append(stdout, chunk); });
+    child.stderr.on("data", (chunk) => { stderr = append(stderr, chunk); });
+    child.on("error", reject);
+    child.on("exit", (code, signal) => {
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `${toolName} adapter exited ${code ?? signal}`));
+        return;
+      }
+      try {
+        const response = JSON.parse(stdout);
+        if (response.isError) {
+          reject(new Error(response.content?.[0]?.text || `${toolName} reported failure`));
+          return;
+        }
+        resolve(response.structuredContent ?? { content: response.content || [] });
+      } catch (error) {
+        reject(new Error(`invalid ${toolName} adapter response: ${error.message}`));
+      }
+    });
+  });
+}
+
+async function executeQueueAdapter(queue, item) {
+  const toolName = queue.adapter === "message"
+    ? "retry_message"
+    : queue.adapter === "artifact"
+      ? "send_artifact"
+      : queue.adapter === "command"
+        ? "run_command"
+        : queue.adapter.slice(5);
+  validateQueueAdapter(queue.adapter);
+  const result = await executeAdapterTool(toolName, item.payload);
+  if (result?.ok === false || result?.delivery?.ok === false ||
+      (queue.adapter === "artifact" && result?.delivery?.verified !== true)) {
+    throw Object.assign(new Error(result.error || `${toolName} reported failure`), { result });
+  }
+  return result;
+}
+
+async function superviseQueue(args) {
+  const queue = queueDefinition(args.queue_id);
+  validateQueueAdapter(queue.adapter);
+  const workerId = String(args.worker_id || `worker-${process.pid}-${crypto.randomBytes(4).toString("hex")}`);
+  const maxItems = Math.min(
+    Math.max(Number(args.max_items || config.queue_supervisor.max_items_per_worker), 1),
+    1000,
+  );
+  const outcomes = [];
+  for (let index = 0; index < maxItems; index += 1) {
+    const claim = queueRegistry.claim({
+      queue_id: queue.queue_id,
+      worker_id: workerId,
+      lease_ms: config.queue_supervisor.item_lease_ms,
+    });
+    if (!claim.claimed) {
+      return { queue_id: queue.queue_id, worker_id: workerId, outcomes, idle: true, reason: claim.reason };
+    }
+    try {
+      const heartbeatMs = Math.max(1000, Math.floor(config.queue_supervisor.item_lease_ms / 3));
+      const heartbeat = setInterval(() => {
+        try {
+          queueRegistry.renewLease({
+            queue_id: queue.queue_id,
+            item_id: claim.item.item_id,
+            worker_id: workerId,
+            lease_token: claim.item.lease_token,
+            lease_ms: config.queue_supervisor.item_lease_ms,
+          });
+        } catch {
+          clearInterval(heartbeat);
+        }
+      }, heartbeatMs);
+      let result;
+      try {
+        result = await executeQueueAdapter(queue, claim.item);
+      } finally {
+        clearInterval(heartbeat);
+      }
+      const item = queueRegistry.complete({
+        queue_id: queue.queue_id,
+        item_id: claim.item.item_id,
+        worker_id: workerId,
+        lease_token: claim.item.lease_token,
+        result,
+      });
+      outcomes.push({ item_id: item.item_id, state: item.state, result });
+      audit("complete", "queue_item", item.item_id, "completed", { queue_id: queue.queue_id });
+    } catch (error) {
+      const message = String(error?.message || error);
+      const item = queueRegistry.fail({
+        queue_id: queue.queue_id,
+        item_id: claim.item.item_id,
+        worker_id: workerId,
+        lease_token: claim.item.lease_token,
+        error: message,
+        result: error?.result || null,
+      });
+      outcomes.push({ item_id: item.item_id, state: item.state, error: item.error, next_attempt_at: item.next_attempt_at });
+      audit("fail", "queue_item", item.item_id, item.state, {
+        queue_id: queue.queue_id,
+        error: item.error,
+        next_attempt_at: item.next_attempt_at,
+      });
+      if (item.state === "queued") break;
+    }
+  }
+  return { queue_id: queue.queue_id, worker_id: workerId, outcomes, idle: false };
+}
+
+async function startNextQueueItem(args) {
+  return superviseQueue({
+    queue_id: args.queue_id,
+    worker_id: args.worker_id,
+    max_items: 1,
+  });
+}
 
 const coreTools = [
-  {
-    name: "get_configuration",
-    description: "Read the effective HawkSpan role profile and approved compatibility feature flags.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    annotations: { readOnlyHint: true, destructiveHint: false },
-    handler: getConfiguration,
-  },
-  {
-    name: "update_configuration",
-    description: "Atomically update only approved HawkSpan role and compatibility flags while preserving unrelated configuration.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        role_profile: { type: "string", enum: ["symmetric", "controller-worker"] },
-        node_role: { type: ["string", "null"], enum: ["controller", "worker", null] },
-        features: { type: "object" },
-      },
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false },
-    handler: updateConfiguration,
-  },
-  {
-    name: "get_connection_configuration",
-    description: "Read the independently configurable primary and fallback peer connections.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    annotations: { readOnlyHint: true, destructiveHint: false },
-    handler: getConnectionConfiguration,
-  },
-  {
-    name: "update_connection_configuration",
-    description: "Atomically update peer connection enablement, human labels, and hosts while preserving all other settings. Explicit confirmation is required.",
-    inputSchema: {
-      type: "object",
-      required: ["confirm"],
-      properties: {
-        routes: {
-          type: "object",
-          properties: {
-            primary: {
-              type: "object",
-              properties: {
-                enabled: { type: "boolean" },
-                label: { type: "string", minLength: 1, maxLength: 40 },
-                host: { type: "string", maxLength: 253 },
-              },
-              additionalProperties: false,
-            },
-            fallback: {
-              type: "object",
-              properties: {
-                enabled: { type: "boolean" },
-                label: { type: "string", minLength: 1, maxLength: 40 },
-                host: { type: "string", maxLength: 253 },
-              },
-              additionalProperties: false,
-            },
-          },
-          additionalProperties: false,
-        },
-        confirm: { type: "boolean", const: true },
-      },
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: true },
-    handler: updateConnectionConfiguration,
-  },
-  {
-    name: "reset_configuration",
-    description: "Restore inherited symmetric defaults by removing only HawkSpan role and approved feature overrides. Explicit confirmation is required.",
-    inputSchema: {
-      type: "object",
-      required: ["confirm"],
-      properties: {
-        confirm: {
-          type: "boolean",
-          const: true,
-          description: "Must be true to confirm the reset.",
-        },
-      },
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
-    handler: resetConfiguration,
-  },
-  {
-    name: "list_configuration_profiles",
-    description: "List locally saved HawkSpan role and approved-feature profiles.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    annotations: { readOnlyHint: true, destructiveHint: false },
-    handler: listConfigurationProfiles,
-  },
-  {
-    name: "save_configuration_profile",
-    description: "Save the current explicit HawkSpan role and approved-feature overrides under a human-readable name.",
-    inputSchema: {
-      type: "object",
-      required: ["name"],
-      properties: {
-        name: { type: "string", minLength: 1, maxLength: 80 },
-        confirm_replace: {
-          type: "boolean",
-          default: false,
-          description: "Must be true to replace an existing profile with the same name.",
-        },
-      },
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false },
-    handler: saveConfigurationProfile,
-  },
-  {
-    name: "apply_configuration_profile",
-    description: "Atomically apply a named role and approved-feature profile while preserving all unrelated configuration. Explicit confirmation is required.",
-    inputSchema: {
-      type: "object",
-      required: ["profile_id", "confirm"],
-      properties: {
-        profile_id: {
-          type: "string",
-          pattern: "^(?:profile-[a-f0-9]{24}|builtin-(?:current-symmetric|high-value-controller|compute-worker|coordination-only))$",
-        },
-        confirm: {
-          type: "boolean",
-          const: true,
-          description: "Must be true to confirm applying the profile.",
-        },
-      },
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: true },
-    handler: applyConfigurationProfile,
-  },
-  {
-    name: "delete_configuration_profile",
-    description: "Delete one locally saved configuration profile without changing the active configuration. Explicit confirmation is required.",
-    inputSchema: {
-      type: "object",
-      required: ["profile_id", "confirm"],
-      properties: {
-        profile_id: {
-          type: "string",
-          pattern: "^(?:profile-[a-f0-9]{24}|builtin-(?:current-symmetric|high-value-controller|compute-worker|coordination-only))$",
-        },
-        confirm: {
-          type: "boolean",
-          const: true,
-          description: "Must be true to confirm deletion.",
-        },
-      },
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-    handler: deleteConfigurationProfile,
-  },
-  {
-    name: "mcp_status",
-    description: "Confirm that this HawkSpan MCP service is responding and identify its node and version.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    annotations: { readOnlyHint: true, destructiveHint: false },
-    handler: () => ({
-      online: true,
-      service: "hawkspan",
-      version: "0.1.0",
-      node_id: redactResolvedMachineValues(config.node_id),
-    }),
-  },
   {
     name: "link_status",
     description: "Read route, queue, job, and artifact status for this HawkSpan node.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false },
     handler: linkStatus,
+  },
+  {
+    name: "list_queue_adapters",
+    description: "List built-in and registered application adapters available to newly created queues.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    handler: () => ({
+      adapters: [
+        ...[...BUILTIN_QUEUE_ADAPTERS].map((adapter) => ({ adapter, source: "builtin" })),
+        ...[...toolMap.keys()]
+          .filter((name) => !QUEUE_MANAGEMENT_TOOLS.has(name) && !SINGLETON_LIFECYCLE_TOOLS.has(name))
+          .sort()
+          .map((name) => ({ adapter: `tool:${name}`, source: "registered_tool" })),
+      ],
+    }),
+  },
+  {
+    name: "create_queue",
+    description: "Create an independent durable queue using a built-in or registered application adapter.",
+    inputSchema: {
+      type: "object",
+      required: ["queue_id", "adapter"],
+      properties: {
+        queue_id: { type: "string", pattern: "^[A-Za-z0-9._-]+$" },
+        name: { type: "string" },
+        kind: { type: "string" },
+        adapter: { type: "string" },
+        concurrency: { type: "integer", minimum: 1, maximum: 32 },
+        priority: { type: "integer" },
+        ordering: { type: "string", enum: ["fifo", "priority"] },
+        maximum_attempts: { type: "integer", minimum: 1, maximum: 100 },
+        maximum_pending_items: { type: "integer", minimum: 1, maximum: 1000000 },
+        maximum_payload_bytes: { type: "integer", minimum: 1024, maximum: 16777216 },
+        retry_delays_ms: {
+          type: "array", minItems: 1, maxItems: 16,
+          items: { type: "integer", minimum: 100, maximum: 3600000 },
+        },
+        metadata: { type: "object" },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    handler: createQueueSurface,
+  },
+  {
+    name: "configure_queue",
+    description: "Update scheduling, concurrency, and retry policy for an existing queue without replacing its identity or adapter.",
+    inputSchema: {
+      type: "object",
+      required: ["queue_id"],
+      properties: {
+        queue_id: { type: "string" }, name: { type: "string" },
+        concurrency: { type: "integer", minimum: 1, maximum: 32 },
+        priority: { type: "integer" },
+        ordering: { type: "string", enum: ["fifo", "priority"] },
+        maximum_attempts: { type: "integer", minimum: 1, maximum: 100 },
+        maximum_pending_items: { type: "integer", minimum: 1, maximum: 1000000 },
+        maximum_payload_bytes: { type: "integer", minimum: 1024, maximum: 16777216 },
+        retry_delays_ms: {
+          type: "array", minItems: 1, maxItems: 16,
+          items: { type: "integer", minimum: 100, maximum: 3600000 },
+        },
+        metadata: { type: "object" },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    handler: configureQueueSurface,
+  },
+  {
+    name: "delete_queue",
+    description: "Delete an empty queue. A queue containing any item must be archived instead.",
+    inputSchema: {
+      type: "object", required: ["queue_id"],
+      properties: { queue_id: { type: "string" } }, additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    handler: deleteQueueSurface,
+  },
+  {
+    name: "list_queues",
+    description: "List every registered queue, adapter, supervisor policy, and item count by state.",
+    inputSchema: {
+      type: "object",
+      properties: { state: { type: "string", enum: ["running", "paused", "archived"] } },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    handler: (args) => queueRegistry.listQueues(args),
+  },
+  {
+    name: "queue_status",
+    description: "Read one queue and its ordered active, pending, paused, failed, and terminal items.",
+    inputSchema: {
+      type: "object", required: ["queue_id"],
+      properties: {
+        queue_id: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 1000 },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    handler: (args) => queueRegistry.queueStatus(args),
+  },
+  {
+    name: "enqueue_queue_item",
+    description: "Add one durable item to a named queue. Message and file queues may create their durable envelope or artifact from the payload.",
+    inputSchema: {
+      type: "object", required: ["queue_id", "payload"],
+      properties: {
+        queue_id: { type: "string" }, item_id: { type: "string" },
+        priority: { type: "integer" }, payload: { type: "object" },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    handler: enqueueQueueItemSurface,
+  },
+  {
+    name: "enqueue_queue_batch",
+    description: "Atomically add an ordered batch of durable items to one queue.",
+    inputSchema: {
+      type: "object", required: ["queue_id", "items"],
+      properties: {
+        queue_id: { type: "string" },
+        items: {
+          type: "array", minItems: 1, maxItems: 1000,
+          items: {
+            type: "object", required: ["payload"],
+            properties: {
+              item_id: { type: "string" }, priority: { type: "integer" },
+              payload: { type: "object" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    handler: enqueueQueueBatchSurface,
+  },
+  {
+    name: "queue_control",
+    description: "Pause, resume, archive, or clear a queue; or pause, resume, cancel, skip, retry, or reprioritize one item.",
+    inputSchema: {
+      type: "object", required: ["queue_id", "action"],
+      properties: {
+        queue_id: { type: "string" },
+        action: {
+          type: "string",
+          enum: [
+            "pause-queue", "resume-queue", "archive-queue", "clear-pending",
+            "pause-item", "resume-item", "cancel-item", "skip-item", "retry-item", "reset-attempts", "set-priority",
+          ],
+        },
+        item_id: { type: "string" }, reason: { type: "string" }, priority: { type: "integer" },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    handler: queueControlSurface,
+  },
+  {
+    name: "start_next_queue_item",
+    description: "Start the next eligible item in one running queue through its registered adapter.",
+    inputSchema: {
+      type: "object", required: ["queue_id"],
+      properties: {
+        queue_id: { type: "string" },
+        worker_id: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    handler: startNextQueueItem,
+  },
+  {
+    name: "supervise_queue",
+    description: "Claim and execute eligible items through the queue's adapter, recording completion or an env-backed retry after failure.",
+    inputSchema: {
+      type: "object", required: ["queue_id"],
+      properties: {
+        queue_id: { type: "string" }, worker_id: { type: "string" },
+        max_items: { type: "integer", minimum: 1, maximum: 1000 },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    handler: superviseQueue,
   },
   {
     name: "run_command",
@@ -2335,15 +2979,94 @@ const coreTools = [
     handler: runCommand,
   },
   {
+    name: "lora_automation",
+    description: "Inspect and coordinate SimpleTuner LoRA work: inventory, deep preflight, telemetry, scheduling, recovery, checkpoint comparison, registry, validation, revision ingestion, packet completeness, and estimates. This tool does not start or stop training.",
+    inputSchema: {
+      type: "object",
+      required: ["action"],
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "inventory",
+            "preflight",
+            "preflight-all",
+            "training-readiness",
+            "prepare-versioned-job",
+            "scheduler-enqueue",
+            "stage-runtime-job",
+            "telemetry",
+            "queue",
+            "compare",
+            "recovery",
+            "packet-audit",
+            "packet-validation-plan",
+            "registry-refresh",
+            "validation-plan",
+            "validation-ingest",
+            "draw-things-plan",
+            "draw-things-ingest",
+            "revision-ingest",
+            "estimate"
+          ]
+        },
+        path: { type: "string" },
+        output_dir: { type: "string" },
+        source_path: { type: "string" },
+        result_path: { type: "string" },
+        job_id: { type: "string" },
+        target_job_id: { type: "string" },
+        scheduler_job_id: { type: "string" },
+        authorization_job_id: { type: "string" },
+        revision_fingerprint: { type: "string" },
+        version_tag: { type: "string" },
+        trigger: { type: "string" },
+        required_trigger: { type: "string" },
+        required_adult_phrase: { type: "string" },
+        required_adult_pattern: { type: "string" },
+        tokenizer_root: { type: "string" },
+        runtime_root: { type: "string" },
+        source_manifest: { type: "string" },
+        caption_overlay_root: { type: "string" },
+        recovery_checkpoint: { type: "string" },
+        validation_prompt_library: { type: "string" },
+        required_validation_prompt_ids: {
+          type: "array",
+          items: { type: "string", minLength: 1 },
+          minItems: 1,
+          uniqueItems: true
+        },
+        validation_base_model: { type: "string" },
+        base_model_reason: { type: "string" },
+        notes: { type: "string" },
+        expected_caption_variants: { type: "integer", minimum: 1, maximum: 20 },
+        maximum_tokens: { type: "integer", minimum: 1, maximum: 512 },
+        minimum_checkpoint_retention: { type: "integer", minimum: 1 },
+        checkpoint_step_interval: { type: "integer", minimum: 1 },
+        max_train_steps: { type: "integer", minimum: 1 },
+        lora_rank: { type: "integer", minimum: 1 },
+        lora_alpha: { type: "integer", minimum: 1 },
+        minimum_free_bytes: { type: "integer", minimum: 0 },
+        priority: { type: "integer" },
+        index: { type: "integer", minimum: 1 },
+        write_manifest: { type: "boolean", default: false },
+        timeout_ms: { type: "integer", minimum: 1000, maximum: 3600000 }
+      },
+      additionalProperties: false
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    handler: loraAutomation,
+  },
+  {
     name: "peer_call_tool",
-    description: "Call one allowlisted HawkSpan tool on the paired Mac over the preferred private route with fallback. The active user instruction remains authoritative.",
+    description: "Call one allowlisted HawkSpan-D tool on the paired Mac over the preferred private route with fallback. The active user instruction remains authoritative.",
     inputSchema: {
       type: "object",
       required: ["tool_name"],
       properties: {
         tool_name: { type: "string" },
         arguments: { type: "object" },
-        timeout_ms: { type: "integer", minimum: 1000, maximum: 14400000 },
+        timeout_ms: { type: "integer", minimum: 1000, maximum: 3600000 },
       },
       additionalProperties: false,
     },
@@ -2357,7 +3080,7 @@ const coreTools = [
   },
   {
     name: "send_message",
-    description: "Send routine private peer-to-peer coordination over the already-authorized HawkSpan link. This is durable, idempotent IPC, not an external communication or consequential action.",
+    description: "Send routine private M2/M4 coordination over the already-authorized local HawkSpan-D. This is durable, idempotent IPC, not an external communication or consequential action.",
     inputSchema: {
       type: "object",
       required: ["subject", "body"],
@@ -2504,7 +3227,7 @@ const coreTools = [
         job_id: { type: "string" },
         state: {
           type: "string",
-          enum: ["awaiting_authorization", "authorized", "queued", "running", "paused", "cancel_requested", "cancelled", "completed", "failed", "verified"],
+          enum: ["awaiting_authorization", "authorized", "queued", "running", "returning", "paused", "cancel_requested", "cancelled", "completed", "failed", "verified"],
         },
         authorization_evidence: { type: "string" },
         metadata: { type: "object" },
@@ -2521,6 +3244,7 @@ const coreTools = [
       type: "object",
       properties: {
         state: { type: "string" },
+        job_id: { type: "string" },
         limit: { type: "integer", minimum: 1, maximum: 500 },
       },
       additionalProperties: false,
@@ -2572,13 +3296,27 @@ const coreTools = [
     handler: sendArtifact,
   },
   {
+    name: "queue_artifact_delivery",
+    description: "Durably enqueue a registered artifact for resumable peer delivery without waiting for transfer completion.",
+    inputSchema: {
+      type: "object",
+      required: ["artifact_id"],
+      properties: { artifact_id: { type: "string" } },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    handler: queueArtifactDelivery,
+  },
+  {
     name: "list_artifacts",
     description: "List registered artifacts and their durable delivery state.",
     inputSchema: {
       type: "object",
       properties: {
         state: { type: "string" },
-        limit: { type: "integer", minimum: 1, maximum: 500 },
+        artifact_id: { type: "string" },
+        sha256: { type: "string", pattern: "^[a-fA-F0-9]{64}$" },
+        limit: { type: "integer", minimum: 1, maximum: 5000 },
       },
       additionalProperties: false,
     },
@@ -2624,117 +3362,308 @@ const coreTools = [
     annotations: { readOnlyHint: true, destructiveHint: false },
     handler: listAuditEvents,
   },
+  {
+    name: "trainer_status",
+    description: "Read configured SimpleTuner-related process status without changing training.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    handler: trainerStatus,
+  },
+  {
+    name: "trainer_run_status",
+    description: "Read the active SimpleTuner run, exact step/loss/ETA, queue counts, and preserved checkpoints.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    handler: trainerRunStatus,
+  },
+  {
+    name: "trainer_queue_detail",
+    description: "List every manifest job with pending, running, completed, or failed state.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    handler: trainerQueueDetail,
+  },
+  {
+    name: "trainer_queue_status",
+    description: "Inspect the configured SimpleTuner queue without changing it.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    handler: trainerQueueStatus,
+  },
+  {
+    name: "trainer_validate_dataset",
+    description: "Validate that a dataset has images and a non-empty sidecar caption for every image.",
+    inputSchema: {
+      type: "object",
+      required: ["path"],
+      properties: { path: { type: "string" } },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    handler: trainerValidateDataset,
+  },
+  {
+    name: "trainer_tail_log",
+    description: "Read the tail of a configured SimpleTuner log file.",
+    inputSchema: {
+      type: "object",
+      required: ["path"],
+      properties: {
+        path: { type: "string" },
+        lines: { type: "integer", minimum: 1, maximum: 2000 },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    handler: trainerTailLog,
+  },
+  {
+    name: "trainer_audit_checkpoint_retention",
+    description: "Audit queued SimpleTuner configs against the configured minimum checkpoint retention.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    handler: trainerAuditCheckpointRetention,
+  },
+  {
+    name: "trainer_preservation_status",
+    description: "Inspect the preserved-checkpoint root without changing checkpoints.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    handler: trainerPreservationStatus,
+  },
+  {
+    name: "trainer_queue_control",
+    description: "Control one non-running LoRA job independently, or explicitly pause/resume the entire queue. Per-job eligibility controls do not terminate an active process; pause-queue stops the exact active managed target.",
+    inputSchema: {
+      type: "object",
+      required: ["action"],
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "pause-job",
+            "resume-job",
+            "skip-job",
+            "retry-job",
+            "pause-queue",
+            "resume-queue",
+            "status"
+          ]
+        },
+        target: { type: "string" },
+        reason: { type: "string" },
+        timeout_ms: { type: "integer", minimum: 1000, maximum: 300000 }
+      },
+      additionalProperties: false
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: trainerQueueControl,
+  },
+  {
+    name: "trainer_start_authorized_job",
+    description: "Start an exact preconfigured training target when training.allow_start is enabled; readiness and revision checks still apply.",
+    inputSchema: {
+      type: "object",
+      required: ["job_id"],
+      properties: {
+        job_id: { type: "string" },
+        target: { type: "string" },
+        expected_revision_fingerprint: { type: "string", pattern: "^[A-Fa-f0-9]{64}$" },
+        timeout_ms: { type: "integer", minimum: 1000, maximum: 300000 },
+        _delegated_job: { type: "object" },
+      },
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: trainerStartAuthorizedJob,
+  },
+  {
+    name: "trainer_stop_authorized_job",
+    description: "Stop only the exact adapter-managed training target when training.allow_stop is enabled.",
+    inputSchema: {
+      type: "object",
+      required: ["job_id"],
+      properties: {
+        job_id: { type: "string" },
+        target: { type: "string" },
+        timeout_ms: { type: "integer", minimum: 1000, maximum: 300000 },
+        _delegated_job: { type: "object" },
+      },
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: trainerStopAuthorizedJob,
+  },
+  {
+    name: "trainer_package_authorized_job",
+    description: "Package an exact completed training target when training.allow_package is enabled.",
+    inputSchema: {
+      type: "object",
+      required: ["job_id"],
+      properties: {
+        job_id: { type: "string" },
+        target: { type: "string" },
+        timeout_ms: { type: "integer", minimum: 1000, maximum: 300000 },
+        _delegated_job: { type: "object" },
+      },
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: (args) => runConfiguredScript(
+      "package_script", "allow_package", args, "packaging",
+      ["authorized", "queued", "completed"],
+    ),
+  },
 ];
 
 let toolMap = new Map(coreTools.map((tool) => [tool.name, tool]));
 
+function writeConfiguration(next) {
+  fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true, mode: 0o700 });
+  const temporary = `${CONFIG_PATH}.tmp-${process.pid}`;
+  fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, CONFIG_PATH);
+  fs.chmodSync(CONFIG_PATH, 0o600);
+}
+
+function publicPreset(preset) {
+  return {
+    id: preset.id,
+    plugin_id: preset.plugin_id,
+    plugin_name: preset.plugin_name,
+    plugin_version: preset.plugin_version,
+    name: preset.name,
+    description: preset.description,
+    impact: preset.impact,
+    settings: { enabled_operations: [...preset.settings.enabled_operations] },
+  };
+}
+
+function validateLightweightPreset(preset) {
+  const keys = Object.keys(preset.settings || {});
+  if (keys.some((key) => key !== "enabled_operations")) {
+    throw new Error("HawkSpan presets may select package operations only");
+  }
+  return preset;
+}
+
 async function callToolInternal(name, args = {}, origin = "local", pluginId = null) {
   const tool = toolMap.get(name);
   if (!tool) throw new Error(`unknown tool: ${name}`);
-  if (origin === "peer" && !peerToolAllowlist.has(name)) {
-    throw new Error(`peer tool is not allowed: ${name}`);
+  if (tool.allowedOrigins && !tool.allowedOrigins.has(origin)) {
+    throw new Error(`${name} does not allow ${origin} access`);
   }
-  if (origin === "peer") enforcePeerFeature(name, "inbound");
   if (origin === "plugin") {
     const globalAllowlist = config.application_plugins?.core_tool_allowlist || [];
-    const pluginAllowlist = typeof pluginId === "string"
-      ? config.application_plugins?.entries?.[pluginId]?.core_tool_allowlist || []
-      : [];
+    const pluginAllowlist = config.application_plugins?.entries?.[pluginId]?.core_tool_allowlist || [];
     if (!globalAllowlist.includes(name) || !pluginAllowlist.includes(name)) {
       throw new Error(`plugin core-tool access is not allowed: ${name}`);
     }
-  }
-  if (tool.allowedOrigins && !tool.allowedOrigins.has(origin)) {
-    throw new Error(`${name} does not allow ${origin} access`);
   }
   return tool.handler(args, origin);
 }
 
 const pluginFramework = await createApplicationPluginFramework({
-  config: effective.features.enable_scoped_operation_adapters
-    ? config
-    : { ...config, application_plugins: { ...(config.application_plugins || {}), enabled: false } },
+  config,
   stateRoot: STATE_ROOT,
   db,
   audit,
   callCoreTool: callToolInternal,
   environment: machineEnvironment,
-  redact: redactResolvedMachineError,
-  validatePreset: approvedApplicationPresetSettings,
+  validatePreset: validateLightweightPreset,
 });
-applicationPresets = pluginFramework.presets;
-const applicationPresetTools = [
+const applicationPresets = pluginFramework.presets;
+
+function findPreset(presetId) {
+  const preset = applicationPresets.find((entry) => entry.id === presetId);
+  if (!preset) throw new Error(`application preset not found: ${presetId}`);
+  return preset;
+}
+
+const presetTools = [
   {
     name: "list_application_presets",
-    description: "List reviewed quick-start presets declared by installed application plugins.",
+    description: "List operation-selection presets supplied by installed HawkSpan packages.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false },
-    handler: listApplicationPresets,
+    handler: () => ({ presets: applicationPresets.map(publicPreset) }),
   },
   {
     name: "preview_application_preset",
-    description: "Preview the exact role, capability, peer-tool, and plugin-operation restrictions in an installed application preset without changing configuration.",
-    inputSchema: {
-      type: "object",
-      required: ["preset_id"],
-      properties: {
-        preset_id: { type: "string", pattern: "^[a-z][a-z0-9-]{0,62}/[a-z][a-z0-9-]{0,62}$" },
-      },
-      additionalProperties: false,
-    },
+    description: "Preview the package operations selected by an installed preset.",
+    inputSchema: { type: "object", required: ["preset_id"], properties: { preset_id: { type: "string" } }, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false },
-    handler: previewApplicationPreset,
+    handler: ({ preset_id: presetId }) => ({ preset: publicPreset(findPreset(presetId)), confirmation_required: true }),
   },
   {
     name: "apply_application_preset",
-    description: "Apply a reviewed installed application preset while preserving connections, credentials, paths, tokens, local control, plugin configuration, other plugins, and local application data. Explicit confirmation is required.",
-    inputSchema: {
-      type: "object",
-      required: ["preset_id", "confirm"],
-      properties: {
-        preset_id: { type: "string", pattern: "^[a-z][a-z0-9-]{0,62}/[a-z][a-z0-9-]{0,62}$" },
-        confirm: { type: "boolean", const: true },
-      },
-      additionalProperties: false,
-    },
+    description: "Apply only the operation selection from an installed package preset.",
+    inputSchema: { type: "object", required: ["preset_id", "confirm"], properties: { preset_id: { type: "string" }, confirm: { type: "boolean", const: true } }, additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: true },
-    handler: applyApplicationPreset,
+    handler: ({ preset_id: presetId, confirm }) => {
+      if (confirm !== true) throw new Error("applying an application preset requires confirm: true");
+      const preset = findPreset(presetId);
+      const next = structuredClone(config);
+      next.application_plugins.entries[preset.plugin_id] = {
+        ...(next.application_plugins.entries[preset.plugin_id] || {}),
+        enabled_operations: [...preset.settings.enabled_operations],
+      };
+      writeConfiguration(next);
+      audit("apply", "application_preset", preset.id, "saved", { plugin_id: preset.plugin_id });
+      return { preset: publicPreset(preset), restart_required: true };
+    },
   },
   {
     name: "reset_application_preset",
-    description: "Reset role and capability overrides plus the selected plugin's operation restriction to inherited defaults without changing local installation data. Explicit confirmation is required.",
-    inputSchema: {
-      type: "object",
-      required: ["preset_id", "confirm"],
-      properties: {
-        preset_id: { type: "string", pattern: "^[a-z][a-z0-9-]{0,62}/[a-z][a-z0-9-]{0,62}$" },
-        confirm: { type: "boolean", const: true },
-      },
-      additionalProperties: false,
-    },
+    description: "Remove an installed package preset's operation selection.",
+    inputSchema: { type: "object", required: ["preset_id", "confirm"], properties: { preset_id: { type: "string" }, confirm: { type: "boolean", const: true } }, additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
-    handler: resetApplicationPreset,
+    handler: ({ preset_id: presetId, confirm }) => {
+      if (confirm !== true) throw new Error("resetting an application preset requires confirm: true");
+      const preset = findPreset(presetId);
+      const next = structuredClone(config);
+      delete next.application_plugins.entries[preset.plugin_id]?.enabled_operations;
+      writeConfiguration(next);
+      audit("reset", "application_preset", preset.id, "saved", { plugin_id: preset.plugin_id });
+      return { preset: publicPreset(preset), reset: true, restart_required: true };
+    },
   },
 ];
-const tools = [...coreTools, ...applicationPresetTools, ...pluginFramework.tools];
+
+const tools = [...coreTools, ...presetTools, ...pluginFramework.tools];
 toolMap = new Map(tools.map((tool) => [tool.name, tool]));
 for (const tool of pluginFramework.tools) {
   if (tool.allowedOrigins?.has("peer")) peerToolAllowlist.add(tool.name);
 }
-localControl = await startLocalControlSurface(
+const localControl = await startLocalControlSurface(
   process.env.HAWKSPAN_LOCAL_CONTROL_DISABLED === "1"
     ? { enabled: false }
-    : config.local_control,
-  async (name, args, origin) => {
-    try {
-      const output = await callToolInternal(name, args, origin);
-      return ["get_connection_configuration", "update_connection_configuration", "link_status"].includes(name)
-        ? output
-        : redactResolvedMachineValues(output);
-    } catch (error) {
-      throw new Error(redactResolvedMachineError(error));
-    }
-  },
+    : {
+        ...config.local_control,
+        allowed_tools: (config.local_control?.allowed_tools || [])
+          .filter((name) => toolMap.has(name)),
+      },
+  callToolInternal,
 );
 
 function success(idValue, result) {
@@ -2777,20 +3706,16 @@ async function handle(request) {
     }
     try {
       const origin = process.env.HAWKSPAN_CALL_ORIGIN === "peer" ? "peer" : "local";
-      const rawOutput = await callToolInternal(tool.name, request.params?.arguments || {}, origin);
-      const output = ["get_connection_configuration", "update_connection_configuration"].includes(tool.name)
-        ? rawOutput
-        : redactResolvedMachineValues(rawOutput);
+      const output = await callToolInternal(tool.name, request.params?.arguments || {}, origin);
       success(requestId, {
         content: [{ type: "text", text: JSON.stringify(output, null, 2) }],
         structuredContent: output,
         isError: false,
       });
     } catch (error) {
-      const publicError = redactResolvedMachineError(error);
-      audit("tool_call", "tool", tool.name, "error", { error: publicError });
+      audit("tool_call", "tool", tool.name, "error", { error: String(error) });
       success(requestId, {
-        content: [{ type: "text", text: publicError }],
+        content: [{ type: "text", text: String(error?.message || error) }],
         isError: true,
       });
     }
@@ -2811,7 +3736,7 @@ input.on("line", (line) => {
   try {
     const request = JSON.parse(line);
     Promise.resolve(handle(request)).catch((error) => {
-      failure(request.id, -32603, "internal error", redactResolvedMachineError(error));
+      failure(request.id, -32603, "internal error", String(error));
     });
   } catch (error) {
     failure(null, -32700, "parse error", String(error));

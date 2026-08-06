@@ -1,32 +1,24 @@
-name: Release gate
+name: HawkSpan release gate
 
 on:
   pull_request:
   push:
-    branches:
-      - main
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  verify:
-    name: Verify exact release tree
-    runs-on: macos-14
-    timeout-minutes: 30
+  release-gate:
+    runs-on: macos-15
     steps:
-      - name: Check out source
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Use Node.js 22
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+          node-version: 24
+      - uses: actions/setup-python@v5
         with:
-          node-version: 22
-      - name: Install release verifier prerequisites
-        run: brew install ripgrep
+          python-version: "3.12"
+      - name: Install test dependency
+        run: python3 -m pip install --disable-pip-version-check numpy safetensors
       - name: Run complete release gate
-        shell: zsh {0}
-        run: zsh scripts/check-release.sh
+        run: scripts/check-release.sh

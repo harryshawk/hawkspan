@@ -20,7 +20,7 @@ The following file is Copyright 2026 Harry Hawk, All Rights Reserved:
 
 - hawkspan-bottom-up-workflow.mp4
 
-Videos 1–4 contain the embedded creator credit "Designed & Rendered by Codex
+Videos 1-4 contain the embedded creator credit "Designed & Rendered by Codex
 5.6 Sol w/ Remotion" but no embedded copyright or license notice. Video 5
 contains that creator credit and the embedded notice "(c) Copyright Harry Hawk
 - All Rights Reserved."
@@ -29,12 +29,3 @@ All five videos use original programmatic Remotion React/CSS visuals and text.
 The only audible soundtrack, in hawkspan-bottom-up-workflow.mp4, was synthesized
 from tone generators and mastered locally. No third-party stock images, stock
 video, music, sound samples, fonts, or logos are embedded in these media files.
-
-The source images, captions, deterministic Canny conditioning images, review
-PDF, and explanatory documentation under
-examples/simpletuner/hawkspan-robots are separately licensed under Creative
-Commons Attribution 4.0 International (CC BY 4.0). The 20 source images were
-generated at the project owner's direction using GPT Image 2 and are intended
-for public redistribution. See that directory's ASSET-LICENSE.md for the
-attribution statement. Configuration files, validators, and other HawkSpan
-software remain under MIT License.

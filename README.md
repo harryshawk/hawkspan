@@ -1,137 +1,170 @@
-# HawkSpan
+# HawkSpan-D
 
-HawkSpan is a macOS peer-agent link for two machines controlled by the same
-owner. It supports two first-class modes:
+A Codex plugin for durable coordination between two trusted Macs.
 
-1. durable agent-to-agent coordination; and
-2. audited control of software on the peer through command and tool calls.
+This source tree is HawkSpan 0.2.0. The original 0.1.0 release remains
+available under its existing `v0.1.0` tag. See [CHANGELOG.md](CHANGELOG.md).
 
-Messages, acknowledgements, jobs, wakeups, audit events, and SHA-256-verified
-artifacts survive task restarts and temporary network outages. The first
-configured route should normally be Thunderbolt Bridge; Ethernet is the
-fallback. Inference offload is one possible workload, not the product boundary.
+The plugin provides:
 
-## Security model
+- SQLite-backed immutable message, job, artifact, and audit records;
+- acknowledged task messages;
+- durable peer-task wakeup so an idle task can resume without the owner relaying
+  the instruction;
+- durable job state transitions for identity, recovery, and idempotency;
+- SHA-256 artifact registration and verification;
+- collision-safe artifact filenames derived from immutable artifact IDs, with
+  changed or missing registered sources rejected instead of retried forever;
+- resumable `rsync` delivery over SSH with automatic Apple-rsync fallback;
+- primary and fallback private routes;
+- broad audited command execution on either trusted Mac, including through the
+  peer tool bridge;
+- immutable retry of queued messages after either Mac is temporarily offline;
+- a two-minute background launch agent that drains the durable outbox after a
+  peer or route returns;
+- SimpleTuner queue, dataset, process, and log inspection;
+- checkpoint-retention and preserved-checkpoint audits, with a default minimum
+  of 10 for newly prepared queue configs;
+- hash-bound Draw Things direct-import/conversion handoffs that record the
+  actual application version, base model, imported LoRA revision, and any
+  conversion provenance before controlled validation;
+- scoped adapters for starting, stopping, and packaging configured training jobs;
+- exact-revision readiness fingerprints binding source images, captions,
+  training config, backend config, readiness policy, and validation prompts;
+- non-Documents runtime staging so an approved queue can survive screen locks
+  without blocking on macOS Documents privacy/FileProvider access;
+- five-minute autonomous M4 packet sending and M2 packet receiving that do not
+  consume Codex heartbeats or tokens.
 
-HawkSpan currently assumes two trusted Macs, one owner, private networking,
-SSH public-key authentication, and trusted local users. `run_command` is
-intentionally broad: a compromised peer or local account can execute commands
-with the HawkSpan user's privileges. See [SECURITY.md](SECURITY.md) before use.
+Runtime state defaults to `~/.hawkspan`. Configuration is read from
+`~/.hawkspan/config.json`. `~/.hawkspan/installed-revision.json` is the sole
+authority for the active immutable release. Activation regenerates the live
+environment, configuration paths, launchd files, and the stable
+`~/.local/share/hawkspan/current` service link from that record.
 
-Implemented safeguards include BatchMode SSH, configurable identity files,
-primary/fallback routing, immutable message and artifact identities, SHA-256
-verification, collision-safe artifact names, SQLite durability, and an
-append-only application audit trail. Host-key pinning, command sandboxing,
-mutual attestation, payload encryption beyond SSH, and multi-user authorization
-policy are optional hardening—not claims about the current implementation.
-
-Optional application plugins add validated, role- and origin-restricted
-application operations without putting application-specific behavior in the
-core. The HTML control surface is enabled by default on `127.0.0.1` only and
-uses the same internal tool handlers as MCP. Its port and enabled state remain
-user-configurable.
-
-## Install
-
-HawkSpan requires macOS, Node.js with `node:sqlite`, SSH connectivity between
-the peers, and `rsync`. The release verifier also uses `zsh`, `python3`,
-`plutil`, and `rg` (ripgrep). Verify the non-system prerequisites before
-installing:
-
-```sh
-node -e "require('node:sqlite')"
-python3 --version
-rg --version
-```
-
-Installation is expected to be agent-assisted, typically by Codex or Claude
-Code acting under the computer owner's instructions. The resulting
-installation remains usable by a person through the localhost-only HTML
-dashboard; manual interaction does not require an agent to remain attached.
-
-1. Clone `https://github.com/harryshawk/hawkspan.git` to a stable path on each
-   Mac, or download the source archive from that repository's Releases page,
-   then run `scripts/check-release.sh`. A clone verifies both its exact files
-   and Git history; an archive verifies its exact files.
-2. Copy the exact `release_id` from `release/release-manifest.json` into the
-   mode-`600` local rollback record described in [INSTALL.md](INSTALL.md).
-3. Copy `config/example.json` to `~/.hawkspan/config.json` and
-   `config/hawkspan.env.example` to `~/.hawkspan/hawkspan.env`.
-4. Set node IDs, peer user, addresses, remote paths, and the dedicated SSH-key
-   path in `hawkspan.env`. Keep the key itself in a separate mode-`600` file.
-5. Restrict the config and state directory:
-
-   ```sh
-   chmod 700 ~/.hawkspan
-   chmod 600 ~/.hawkspan/config.json
-   chmod 600 ~/.hawkspan/hawkspan.env
-   ```
-
-6. Validate locally:
-
-   ```sh
-   node scripts/test-mcp.mjs
-   node scripts/call-tool.mjs link_status
-   ```
-
-   Start the foreground dashboard and open the printed loopback URL:
-
-   ```sh
-   node scripts/start-local-control.mjs
-   ```
-
-7. Optionally install the two-minute retry agent:
-
-   ```sh
-   scripts/install-link-agent.sh
-   ```
-
-8. For a persistent human-facing dashboard, choose a nonzero
-   `local_control.port` and install the local-control agent:
-
-   ```sh
-   scripts/install-local-control-agent.sh
-   ```
-
-The peer paths and addresses in the example are documentation-only values.
-
-## Agent quick start
-
-Call `link_status` first. Use `send_message` for durable instructions and
-`acknowledge_message` for correlated acknowledgements. Use `create_job` when an
-operation needs durable lifecycle state. Register a file before
-`send_artifact`. Use `peer_call_tool` with `run_command` for peer software
-control only when the user's active instruction authorizes that command.
-
-## Development
+Activate an immutable installed release, then start and verify its services:
 
 ```sh
-node --check scripts/mcp-server.mjs
-node scripts/test-mcp.mjs
-python3 /path/to/plugin-creator/scripts/validate_plugin.py .
+node scripts/activate-release.mjs --release-root "$PWD" --revision RELEASE_ID
+node scripts/hawkspan-startup.mjs
+node scripts/audit-release-authority.mjs
 ```
 
-Acceptance behavior is documented in `features/`. Provenance and release rules
-are in `docs/`. See [application plugins](docs/APPLICATION-PLUGINS.md),
-[the optional SimpleTuner workflow plugin](docs/APPLICATION-WORKFLOWS-PLUGIN.md),
-[Apple-silicon SimpleTuner worker setup](docs/SIMPLETUNER-SETUP.md),
-[the public robot LoRA and ControlNet acceptance examples](examples/simpletuner/hawkspan-robots/README.md),
-[plugin authoring](docs/PLUGIN-AUTHOR-GUIDE.md),
-[installation and lifecycle](docs/PLUGIN-LIFECYCLE.md),
-[local HTML control](docs/LOCAL-CONTROL.md),
-[privacy-safe real-pair acceptance](docs/REAL-PAIR-ACCEPTANCE.md),
-[coexistence](docs/COEXISTENCE.md), and the
-[high-trust threat model](docs/THREAT-MODEL.md).
+Before packaging or publishing a candidate, run the complete fail-closed gate:
 
-## Support
+```sh
+scripts/check-release.sh
+```
 
-Use the repository's structured GitHub issue forms for reproducible bugs,
-installation problems, and feature requests. Read [SUPPORT.md](SUPPORT.md)
-before posting diagnostics. Report security vulnerabilities privately through
-GitHub Security Advisories as directed by [SECURITY.md](SECURITY.md).
+The gate rejects predecessor runtime identifiers, dependencies, symbolic links,
+hard links, or incorrect HawkSpan plugin/MCP identity before running the full
+test suite. Release activation enforces the same separation invariant.
 
-## License
+Startup fails instead of repairing paths when any live file disagrees with the
+installed-revision authority. Peer operations discover the peer's active
+release from its own authority record; no remote release executable path is
+stored locally.
 
-HawkSpan code is MIT License. Separately identified media and example
-assets use the terms stated in [NOTICE](NOTICE), including the robot example
-bundle's [CC BY 4.0 asset notice](examples/simpletuner/hawkspan-robots/ASSET-LICENSE.md).
+`run_command` is the general trusted-machine control surface. Routine status,
+file, configuration, packaging, and maintenance commands run directly and are
+recorded in the audit database. Routine private M2/M4 messages,
+acknowledgements, retries, outbox flushing, and peer task wakeups are
+pre-authorized local IPC and must not trigger one approval per message. The
+active user instruction authorizes its in-scope training start or stop; the
+durable job identifies the operation and supports recovery rather than adding
+a second permission ceremony. Deletion, publishing, and materially broader
+work still require an explicit user instruction.
+
+The M4 configuration includes scoped adapters for exact manifest job IDs.
+Start refuses when any training is already active; stop can signal only a
+process group previously launched and recorded by that adapter; package
+refuses while training is active and operates only on an existing manifest
+job. Start also recomputes readiness and refuses a changed revision
+fingerprint. Configuration controls whether each adapter is enabled.
+
+`lora_automation` supports `stage-runtime-job` for cloning one prepared,
+versioned revision to an internal runtime root outside `Documents`. It
+rewrites only cloned config/backend/cache/output paths, preserves the
+pre-overlay captions, writes a source and overlay SHA-256 inventory, prepares
+a runtime-specific HawkSpan-D config, and runs readiness. It never starts
+training. `scheduler-enqueue` separately requires a durable authorized
+training job and the exact readiness fingerprint.
+
+Checkpoint recovery is also exact-revision gated. A recovery preparation names
+an explicit complete checkpoint in both `config.json` and the readiness policy.
+Readiness verifies its required optimizer/scheduler/training-state/LoRA files
+and folds a deterministic checkpoint-tree SHA-256 into the authorization
+fingerprint. Runtime staging preserves that binding; it never silently resumes
+an unbound or incomplete checkpoint.
+
+`draw-things-plan` selects the registry's recommended checkpoint (or the final
+LoRA), hashes the exact weights, and emits a Draw Things import plus fixed
+validation handoff. `draw-things-ingest` refuses missing files, hash drift,
+unrecorded conversion, or incomplete application/base-model provenance.
+Successful import is only a prerequisite; the fixed validation suite must
+still be rendered and ingested before a checkpoint is accepted. Validation
+ingestion binds the saved plan SHA-256, exact checkpoint/LoRA SHA-256, unchanged
+fixed settings, common seed set, actual render files, scores, and live Draw
+Things metadata.
+
+The dedicated adapters remain useful for repeatable SimpleTuner operations, but
+they are not a restriction on routine coordination. M2 can invoke
+`run_command` on M4 through `peer_call_tool`, and vice versa, over Thunderbolt
+with Ethernet fallback.
+
+HawkSpan also provides an application-neutral durable queue registry. Queues
+can be created for messages, verified artifacts, audited commands, or any
+registered application tool. Each queue owns its concurrency, priority,
+ordering, retries, leases, and pause/resume state. The persistent supervisor
+runs queues independently, so a large artifact cannot block a message or an
+unrelated application. See [docs/QUEUE-REGISTRY.md](docs/QUEUE-REGISTRY.md).
+
+`lora-scheduler.py` is the sole SimpleTuner lifecycle queue. Training,
+packaging, artifact return, and receipt confirmation are phases of that one
+durable job. Generic queues cannot be created with SimpleTuner lifecycle tools.
+HawkSpan contains no time-window or idle admission gate.
+
+Queue control is deliberately separate from individual-job control:
+
+- `pause-job` prevents one target from launching without affecting other jobs.
+- `resume-job` makes that target eligible again.
+- `skip-job` bypasses that target until an explicit retry makes it eligible.
+- `retry-job` makes a failed or stopped target eligible and resets its attempt
+  intent.
+- `pause-queue` prevents new launches and stops the exact active managed target,
+  preserving its checkpoints; `resume-queue` reopens admission but does not
+  silently authorize a stopped target.
+- `trainer_stop_authorized_job` terminates only the adapter-recorded process
+  group for its exact target. It records that target as stopped and does not
+  pause the queue.
+
+Every `trainer_start_authorized_job` request must provide the exact 64-character
+revision fingerprint. Initial starts and explicit resumes therefore use the
+same dataset/config revision guard enforced by the local trainer adapter.
+
+The authoritative queue control files are under
+`~/.hawkspan/lora-scheduler/`, including `queue-control.json` and one
+file per target under `jobs/`. No alternate queue or pause-marker location is
+scheduling authority.
+
+The `trainer_queue_control` MCP tool exposes these controls over the normal
+Thunderbolt-primary/Ethernet-fallback peer bridge. `status` is the recovery
+source for queue and per-job intent; conversational memory is not.
+
+Verified M4 LoRA return packets land in `~/M4-LoRA-Incoming`. The M2 receiver
+copies to the configured artifact destination, verifies size and SHA-256,
+writes a receipt without opening or auditing package contents, and removes only
+the verified staging copy when standing authorization is recorded in
+configuration.
+The sending job remains in `returning` after transport staging and becomes
+complete only after HawkSpan imports that receiver-generated, digest-bound
+receipt. Periodic recovery can reconstruct an interrupted return from the
+SimpleTuner scheduler record without creating another artifact identity.
+
+The immutable message body is embedded in the peer wake prompt. The prompt also
+provides a direct `call-tool.mjs` fallback for Codex exec environments that do
+not load dynamic MCP tools.
+
+Background artifact intake reuses an already verified manifest/database match
+instead of hashing every large artifact again on every two-minute pass. This
+keeps the link agent responsive when multi-gigabyte training packets exist.

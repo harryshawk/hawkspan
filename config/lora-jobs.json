@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "description": "Versioned LoRA starts bound to an exact readiness fingerprint.",
+  "jobs": [],
+  "entry_schema": {
+    "job_id": "unique scheduler entry ID",
+    "target": "exact captioned-lora-manifest job ID",
+    "authorization_job_id": "durable Codex authorization job ID",
+    "revision_fingerprint": "exact training-readiness SHA256 fingerprint",
+    "authorized": false,
+    "priority": 1000,
+    "maximum_attempts": 1,
+    "log_path": "optional scheduler adapter log path"
+  }
+}

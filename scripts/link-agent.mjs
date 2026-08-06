@@ -1,11 +1,25 @@
 #!/usr/bin/env node
 
+import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { minimalChildEnvironment } from "./hawkspan-env.mjs";
+import { minimalChildEnvironment, readHawkspanEnv } from "./hawkspan-env.mjs";
 
 const serverPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "mcp-server.mjs");
+const stateRoot = path.resolve(process.env.HAWKSPAN_STATE_DIR || path.join(os.homedir(), ".hawkspan"));
+const values = readHawkspanEnv(path.join(stateRoot, "hawkspan.env"));
+const cycleTimeoutMs = Number(values.HAWKSPAN_LINK_CYCLE_TIMEOUT_MS || 120000);
+const automaticReturn = path.join(path.dirname(fileURLToPath(import.meta.url)), "automatic-package-return.mjs");
+const returnResult = spawnSync(process.execPath, [automaticReturn], {
+  env: process.env,
+  encoding: "utf8",
+  timeout: cycleTimeoutMs,
+});
+if (returnResult.stdout) process.stdout.write(returnResult.stdout);
+if (returnResult.status !== 0 || returnResult.error) {
+  process.stderr.write(returnResult.stderr || returnResult.error?.message || "automatic package return scan failed\n");
+}
 const child = spawn(process.execPath, [serverPath], {
   env: {
     ...minimalChildEnvironment({
@@ -23,7 +37,7 @@ const timeout = setTimeout(() => {
   process.stderr.write("hawkspan agent timed out\n");
   child.kill("SIGTERM");
   process.exitCode = 1;
-}, 120000);
+}, cycleTimeoutMs);
 
 child.stdout.setEncoding("utf8");
 child.stdout.on("data", (chunk) => {

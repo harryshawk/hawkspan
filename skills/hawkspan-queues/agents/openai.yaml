@@ -1,0 +1,4 @@
+interface:
+  display_name: "HawkSpan Queues"
+  short_description: "Operate and extend durable HawkSpan queues"
+  default_prompt: "Use $hawkspan-queues to create, operate, inspect, or extend a HawkSpan queue safely."

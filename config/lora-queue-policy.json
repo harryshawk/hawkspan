@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "maximum_attempts": 3,
+  "priorities": {}
+}

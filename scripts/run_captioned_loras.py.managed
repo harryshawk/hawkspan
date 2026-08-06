@@ -1,0 +1,588 @@
+#!/usr/bin/env python3
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from hawkspan_scheduler_state import edit_scheduler_state
+
+def required_environment_path(name: str) -> Path:
+    value = os.environ.get(name, "").strip()
+    if not value or not Path(value).is_absolute():
+        raise SystemExit(f"{name} must name an absolute path")
+    return Path(value)
+
+
+INSTALL = required_environment_path("HAWKSPAN_SIMPLETUNER_ROOT")
+RUN_ROOT = required_environment_path("HAWKSPAN_LORA_QUEUE_ROOT")
+MANIFEST = Path(
+    os.environ.get("HAWKSPAN_LORA_MANIFEST", str(RUN_ROOT / "captioned-lora-manifest.json"))
+)
+STATUS = RUN_ROOT / "captioned-lora-status.json"
+LOG_ROOT = RUN_ROOT / "logs"
+RETURN_ROOT = Path(
+    os.environ.get(
+        "HAWKSPAN_LORA_RETURN_ROOT",
+        str(RUN_ROOT / "return-packets"),
+    )
+)
+LEDGER = Path(
+    os.environ.get("HAWKSPAN_LORA_LEDGER_PATH", str(RUN_ROOT / "return-packet-log.json"))
+)
+SOURCE_ZIP = os.environ.get("HAWKSPAN_LORA_SOURCE_ZIP", "not recorded")
+VENV_BIN = INSTALL / ".venv/bin"
+PACKET_BUILDER = Path(
+    os.environ.get(
+        "HAWKSPAN_LORA_PACKET_BUILDER",
+        str(Path(__file__).with_name("build_return_packets.py.managed")),
+    )
+)
+MPS_SHIM_VALUE = os.environ.get("HAWKSPAN_LORA_MPS_SHIM_DIR", "").strip()
+MPS_SHIM_DIR = Path(MPS_SHIM_VALUE) if MPS_SHIM_VALUE else None
+NODE = Path(os.environ.get("HAWKSPAN_RUNTIME_NODE_PATH", "node"))
+AUTOMATION = Path(
+    os.environ.get(
+        "HAWKSPAN_LORA_AUTOMATION",
+        str(Path(__file__).with_name("lora-automation.mjs")),
+    )
+)
+AUTO_RETURN = Path(__file__).with_name("automatic-package-return.mjs")
+CALL_TOOL = Path(__file__).with_name("call-tool.mjs")
+DURABLE_JOB_ID = os.environ.get("HAWKSPAN_DURABLE_TRAINING_JOB_ID")
+SCHEDULER_ITEM_ID = os.environ.get("HAWKSPAN_SIMPLETUNER_QUEUE_ITEM_ID")
+MAX_TRAIN_ATTEMPTS = max(1, int(os.environ.get("HAWKSPAN_MAX_TRAIN_ATTEMPTS", "3")))
+QUEUE_POLICY = RUN_ROOT / "lora-queue-policy.json"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run or package the captioned SimpleTuner LoRA queue."
+    )
+    parser.add_argument(
+        "--only-job",
+        help="Operate on exactly one manifest job ID instead of the full queue.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("full", "train-and-return", "package-only"),
+        default="full",
+        help="Train, package, and return (default), run one train-and-return job, or package and return an existing final.",
+    )
+    parser.add_argument(
+        "--status-file",
+        type=Path,
+        help="Write status to this path instead of the shared queue status file.",
+    )
+    return parser.parse_args()
+
+
+def write_status(state: dict) -> None:
+    temporary = STATUS.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(state, indent=2) + "\n")
+    temporary.replace(STATUS)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def final_is_valid(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size < 1_000_000:
+        return False
+    check = subprocess.run(
+        [
+            str(VENV_BIN / "python"),
+            str(Path(__file__).with_name("validate_safetensors_adapter.py.managed")),
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return check.returncode == 0
+
+
+def read_queue_policy() -> dict:
+    default = {
+        "schema_version": 1,
+        "priorities": {},
+    }
+    if not QUEUE_POLICY.exists():
+        return default
+    return default | json.loads(QUEUE_POLICY.read_text())
+
+
+def package_return_packet(job: dict, log_path: Path) -> Path:
+    spec_path = RUN_ROOT / f"{job['job_id']}-return-spec.json"
+    spec = [
+        {
+            "run_name": job["job_id"],
+            "set_name": job["source"].replace("/", "-"),
+            "config_dir": job["config_dir"],
+            "data_dir": job["data_dir"],
+            "output_dir": job["output_dir"],
+            "log_files": [str(log_path)],
+            "training_zip": SOURCE_ZIP,
+            "trigger": job["trigger"],
+            "require_validation_samples": True,
+            "launcher_command": (
+                f"cd {job['config_dir']!r} && "
+                f"{VENV_BIN / 'simpletuner'} train"
+            ),
+            "environment_variables": {
+                **({"PYTHONPATH": str(MPS_SHIM_DIR)} if MPS_SHIM_DIR else {}),
+                "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.0",
+                "PYTORCH_ENABLE_MPS_FALLBACK": "1",
+                "TOKENIZERS_PARALLELISM": "true",
+                "CONFIG_PATH": str(RUN_ROOT / "configs"),
+                "SIMPLETUNER_ROOT": str(RUN_ROOT),
+                "HF_HOME": str(INSTALL / "cache/huggingface"),
+                "HF_HUB_CACHE": str(INSTALL / "cache/huggingface/hub"),
+                "TRANSFORMERS_CACHE": str(
+                    INSTALL / "cache/huggingface/transformers"
+                ),
+                "TORCH_HOME": str(INSTALL / "cache/torch"),
+                "TMPDIR": str(RUN_ROOT / "cache/tmp"),
+                "WANDB_MODE": "disabled",
+                "HF_HUB_DISABLE_TELEMETRY": "1",
+                "DO_NOT_TRACK": "1",
+            },
+            "notes": (
+                "Diagnostic/rerun candidate, not a final-quality LoRA. "
+                "Captioned full-rerun batch. Text sidecars were consumed with "
+                "caption_strategy=textfile and multiline splitting disabled. "
+                "The batch preflight records that captions lack the owner's "
+                "required labeled six-field structure and configs lack a fixed "
+                "validation_prompt."
+            ),
+        }
+    ]
+    spec_path.write_text(json.dumps(spec, indent=2) + "\n")
+    result = subprocess.run(
+        [
+            str(VENV_BIN / "python"),
+            str(PACKET_BUILDER),
+            "--spec",
+            str(spec_path),
+            "--output-root",
+            str(RETURN_ROOT),
+            "--ledger",
+            str(LEDGER),
+            "--python-bin",
+            str(VENV_BIN / "python"),
+        ],
+        text=True,
+        capture_output=True,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(f"Return-packet build failed for {job['job_id']}")
+    matches = sorted(RETURN_ROOT.glob(f"{job['job_id']}__*__M4-return-packet.zip"))
+    if len(matches) != 1:
+        raise RuntimeError(f"Expected one return packet for {job['job_id']}, found {matches}")
+    return matches[0]
+
+
+def automatically_return_packet(job: dict, packet: Path) -> dict:
+    identity_args = []
+    if DURABLE_JOB_ID:
+        identity_args.extend(["--durable-job-id", DURABLE_JOB_ID])
+    if SCHEDULER_ITEM_ID:
+        identity_args.extend(["--queue-item-id", SCHEDULER_ITEM_ID])
+    result = subprocess.run(
+        [
+            str(NODE),
+            str(AUTO_RETURN),
+            "--strict",
+            "--job-id",
+            job["job_id"],
+            "--packet",
+            str(packet),
+            "--sha256",
+            sha256(packet),
+            *identity_args,
+        ],
+        text=True,
+        capture_output=True,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(f"Automatic package return failed for {job['job_id']}")
+    response = json.loads(result.stdout)
+    if len(response.get("results", [])) != 1 or not response["results"][0].get("ok"):
+        raise RuntimeError(f"Automatic package return was not accepted for {job['job_id']}")
+    return response["results"][0]
+
+
+def update_durable_job_state(state: str, metadata: dict) -> bool:
+    if not DURABLE_JOB_ID:
+        return False
+    result = subprocess.run(
+        [
+            str(NODE),
+            str(CALL_TOOL),
+            "update_job_status",
+            json.dumps({
+                "job_id": DURABLE_JOB_ID,
+                "state": state,
+                "metadata": metadata,
+            }),
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(
+            f"WARNING: durable job state update to {state} failed: {result.stderr}"
+        )
+        return False
+    return True
+
+
+def update_scheduler_state(target: str, state_name: str, phase: str, metadata=None) -> bool:
+    if not SCHEDULER_ITEM_ID:
+        return False
+    config_path = Path(
+        os.environ.get("HAWKSPAN_CONFIG", os.environ.get("HAWKSPAN_CONFIG_PATH", "~/.hawkspan/config.json"))
+    ).expanduser()
+    try:
+        config = json.loads(config_path.read_text())
+        automation = config.get("lora_automation", {})
+        scheduler_root = Path(
+            automation.get("scheduler_root", "~/.hawkspan/lora-scheduler")
+        ).expanduser()
+        state_path = Path(
+            automation.get("scheduler_state_path", scheduler_root / "lora-scheduler-state.json")
+        ).expanduser()
+        with edit_scheduler_state(
+            state_path,
+            {"schema_version": 1, "jobs": {}, "current": None},
+        ) as scheduler:
+            record = scheduler.setdefault("jobs", {}).setdefault(SCHEDULER_ITEM_ID, {})
+            record.update({
+                "state": state_name,
+                "phase": phase,
+                "target": target,
+                "updated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+                **(metadata or {}),
+            })
+            scheduler["current"] = None if state_name in {"completed", "failed", "cancelled"} else target
+            scheduler["decision"] = phase
+        return True
+    except Exception as error:
+        sys.stderr.write(f"WARNING: SimpleTuner queue phase update failed: {error}\n")
+        return False
+
+
+args = parse_args()
+if args.status_file:
+    STATUS = args.status_file
+
+all_jobs = json.loads(MANIFEST.read_text())
+policy = read_queue_policy()
+priorities = policy.get("priorities", {})
+all_jobs.sort(
+    key=lambda job: (
+        int(priorities.get(job["job_id"], 1000 + int(job.get("index", 0)))),
+        int(job.get("index", 0)),
+    )
+)
+jobs = all_jobs
+if args.only_job:
+    jobs = [job for job in all_jobs if job["job_id"] == args.only_job]
+    if len(jobs) != 1:
+        raise SystemExit(f"Unknown or duplicate manifest job ID: {args.only_job}")
+elif args.mode != "full":
+    raise SystemExit("--mode train-and-return/package-only requires --only-job")
+
+if args.mode in {"full", "train-and-return"}:
+    if not args.only_job:
+        raise SystemExit(
+            "TRAINING REFUSED: every training start must name exactly one authorized job"
+        )
+    authorized_job = os.environ.get("HAWKSPAN_AUTHORIZED_TRAINING_JOB_ID")
+    authorized_fingerprint = os.environ.get(
+        "HAWKSPAN_AUTHORIZED_REVISION_FINGERPRINT"
+    )
+    if authorized_job != args.only_job or not authorized_fingerprint:
+        raise SystemExit(
+            "TRAINING REFUSED: exact-job authorization fingerprint is missing"
+        )
+    readiness_result = subprocess.run(
+        [
+            str(NODE),
+            str(AUTOMATION),
+            "training-readiness",
+            json.dumps({
+                "job_id": args.only_job,
+                "ignore_process_group": os.getpgrp(),
+            }),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if readiness_result.returncode:
+        raise SystemExit(
+            "TRAINING REFUSED: readiness evaluation failed\n"
+            + readiness_result.stderr
+        )
+    readiness = json.loads(readiness_result.stdout)
+    if not readiness.get("ready"):
+        raise SystemExit(
+            "TRAINING REFUSED: readiness gate failed\n"
+            + json.dumps(readiness, indent=2)
+        )
+    if readiness.get("revision_fingerprint") != authorized_fingerprint:
+        raise SystemExit(
+            "TRAINING REFUSED: dataset/config revision differs from authorization"
+        )
+
+state = {
+    "batch": "captioned-lora-batch",
+    "total": len(jobs),
+    "started_at": int(time.time()),
+    "current": None,
+    "completed": [],
+    "returning": [],
+    "failed": [],
+}
+if STATUS.exists():
+    previous = json.loads(STATUS.read_text())
+    state["started_at"] = previous.get("started_at", state["started_at"])
+    state["completed"] = previous.get("completed", [])
+    state["returning"] = previous.get("returning", [])
+
+LOG_ROOT.mkdir(parents=True, exist_ok=True)
+RETURN_ROOT.mkdir(parents=True, exist_ok=True)
+(RUN_ROOT / "cache/tmp").mkdir(parents=True, exist_ok=True)
+env = os.environ.copy()
+existing_pythonpath = env.get("PYTHONPATH")
+env.update(
+    {
+        "PATH": f"{VENV_BIN}:{env.get('PATH', '')}",
+        "PYTHONUNBUFFERED": "1",
+        "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.0",
+        "PYTORCH_ENABLE_MPS_FALLBACK": "1",
+        "TOKENIZERS_PARALLELISM": "true",
+        "CONFIG_PATH": str(RUN_ROOT / "configs"),
+        "SIMPLETUNER_ROOT": str(RUN_ROOT),
+        "HF_HOME": str(INSTALL / "cache/huggingface"),
+        "HF_HUB_CACHE": str(INSTALL / "cache/huggingface/hub"),
+        "TRANSFORMERS_CACHE": str(INSTALL / "cache/huggingface/transformers"),
+        "TORCH_HOME": str(INSTALL / "cache/torch"),
+        "TMPDIR": str(RUN_ROOT / "cache/tmp"),
+        "WANDB_MODE": "disabled",
+        "HF_HUB_DISABLE_TELEMETRY": "1",
+        "DO_NOT_TRACK": "1",
+    }
+)
+if MPS_SHIM_DIR:
+    env["PYTHONPATH"] = (
+        f"{MPS_SHIM_DIR}:{existing_pythonpath}"
+        if existing_pythonpath
+        else str(MPS_SHIM_DIR)
+    )
+
+for job in jobs:
+    completed_ids = {
+        item["job_id"] for item in [*state["completed"], *state["returning"]]
+    }
+    if job["job_id"] in completed_ids:
+        print(f"ALREADY COMPLETE {job['job_id']}", flush=True)
+        continue
+
+    final = Path(job["output_dir"]) / "pytorch_lora_weights.safetensors"
+    log_path = LOG_ROOT / f"{job['job_id']}.log"
+    state["current"] = job["job_id"]
+    state["current_started_at"] = int(time.time())
+    state["failed"] = [item for item in state["failed"] if item["job_id"] != job["job_id"]]
+    write_status(state)
+    update_scheduler_state(job["job_id"], "running", "training")
+
+    if args.mode == "package-only" and not final_is_valid(final):
+        raise SystemExit(
+            f"PACKAGE REFUSED {job['job_id']}: final LoRA is missing or invalid"
+        )
+
+    if args.mode != "package-only" and not final_is_valid(final):
+        print(
+            f"START {job['index']}/{len(jobs)} {job['job_id']} "
+            f"({job['image_count']} paired captions)",
+            flush=True,
+        )
+        attempt_history = []
+        returncode = None
+        for attempt in range(1, MAX_TRAIN_ATTEMPTS + 1):
+            attempt_started_at = int(time.time())
+            print(
+                f"TRAIN ATTEMPT {attempt}/{MAX_TRAIN_ATTEMPTS} {job['job_id']}",
+                flush=True,
+            )
+            with log_path.open("a") as log:
+                log.write(
+                    f"\n=== TRAIN ATTEMPT {attempt}/{MAX_TRAIN_ATTEMPTS} "
+                    f"started_at={attempt_started_at} ===\n"
+                )
+                log.flush()
+                process = subprocess.Popen(
+                    [str(VENV_BIN / "simpletuner"), "train"],
+                    cwd=job["config_dir"],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                assert process.stdout is not None
+                for line in process.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    log.write(line)
+                    log.flush()
+                returncode = process.wait()
+            output_valid = final_is_valid(final)
+            attempt_history.append(
+                {
+                    "attempt": attempt,
+                    "returncode": returncode,
+                    "output_valid": output_valid,
+                    "started_at": attempt_started_at,
+                    "finished_at": int(time.time()),
+                }
+            )
+            state["current_attempts"] = attempt_history
+            write_status(state)
+            if returncode == 0 and output_valid:
+                break
+            if attempt < MAX_TRAIN_ATTEMPTS:
+                delay = attempt * 10
+                print(
+                    f"RETRYING {job['job_id']} in {delay}s after "
+                    f"returncode={returncode} output_valid={output_valid}",
+                    flush=True,
+                )
+                time.sleep(delay)
+        if returncode != 0 or not final_is_valid(final):
+            state["failed"].append(
+                {
+                    "job_id": job["job_id"],
+                    "returncode": returncode,
+                    "attempts": attempt_history,
+                    "log": str(log_path),
+                    "failed_at": int(time.time()),
+                }
+            )
+            write_status(state)
+            update_durable_job_state("failed", {
+                "target": job["job_id"],
+                "phase": "training",
+                "returncode": returncode,
+            })
+            update_scheduler_state(job["job_id"], "failed", "training-failed", {
+                "returncode": returncode,
+            })
+            raise SystemExit(f"FAILED {job['job_id']} returncode={returncode}")
+    else:
+        print(f"VALID EXISTING NEW-RUN OUTPUT {job['job_id']}", flush=True)
+
+    update_scheduler_state(job["job_id"], "running", "packaging")
+    try:
+        packet = package_return_packet(job, log_path)
+        update_scheduler_state(job["job_id"], "running", "returning", {
+            "packet": str(packet),
+            "packet_sha256": sha256(packet),
+        })
+        package_return = automatically_return_packet(job, packet)
+    except Exception as error:
+        update_durable_job_state("failed", {
+            "target": job["job_id"],
+            "phase": "package_return",
+            "error": str(error),
+        })
+        update_scheduler_state(job["job_id"], "failed", "package-return-failed", {
+            "error": str(error),
+        })
+        raise
+    record = {
+        "job_id": job["job_id"],
+        "source": job["source"],
+        "sha256": sha256(final),
+        "packet": str(packet),
+        "packet_sha256": package_return["sha256"],
+        "package_return_state": package_return["state"],
+        "package_return_artifact_id": package_return["artifact_id"],
+        "completed_at": int(time.time()),
+    }
+    if package_return["state"] == "receipt-confirmed":
+        state["completed"].append(record)
+    else:
+        state["returning"] = [
+            item for item in state["returning"] if item["job_id"] != job["job_id"]
+        ]
+        state["returning"].append(record)
+    state["current"] = None
+    state.pop("current_started_at", None)
+    state.pop("current_attempts", None)
+    write_status(state)
+    terminal_state = "completed" if package_return["state"] == "receipt-confirmed" else "returning"
+    terminal_phase = "receipt-confirmed" if terminal_state == "completed" else "returning"
+    update_durable_job_state(terminal_state, {
+        "target": job["job_id"],
+        "phase": terminal_phase,
+        "packet": str(packet),
+        "packet_sha256": package_return["sha256"],
+        "package_return_state": package_return["state"],
+        "package_return_artifact_id": package_return["artifact_id"],
+    })
+    update_scheduler_state(job["job_id"], terminal_state, terminal_phase, {
+        "packet": str(packet),
+        "packet_sha256": package_return["sha256"],
+        "package_return_artifact_id": package_return["artifact_id"],
+    })
+    cleanup_candidates = RUN_ROOT / "cleanup-candidates.json"
+    existing_cleanup = (
+        json.loads(cleanup_candidates.read_text())
+        if cleanup_candidates.exists()
+        else {"schema_version": 1, "candidates": []}
+    )
+    existing_cleanup["candidates"] = [
+        entry
+        for entry in existing_cleanup["candidates"]
+        if entry.get("job_id") != job["job_id"]
+    ]
+    existing_cleanup["candidates"].append(
+        {
+            "job_id": job["job_id"],
+            "reason": "Regenerable VAE/text caches after successful packaging; deletion requires the owner's approval.",
+            "paths": [
+                str(RUN_ROOT / "cache/vae" / job["job_id"]),
+                str(RUN_ROOT / "cache/text" / job["job_id"]),
+            ],
+            "recorded_at": int(time.time()),
+            "deletion_authorized": False,
+        }
+    )
+    cleanup_candidates.write_text(json.dumps(existing_cleanup, indent=2) + "\n")
+    print(f"COMPLETE {job['job_id']} packet={packet}", flush=True)
+
+state["current"] = None
+state["finished_at"] = int(time.time())
+write_status(state)
+if args.mode == "full":
+    print(f"ALL COMPLETE {len(state['completed'])}/{len(jobs)}", flush=True)
+elif args.mode == "package-only":
+    print(f"PACKAGE ONLY COMPLETE {len(state['completed'])}/{len(jobs)}", flush=True)
+else:
+    print(f"TRAIN AND RETURN FINISHED {len(state['completed'])}/{len(jobs)}", flush=True)

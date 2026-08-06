@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+import argparse
+import json
+from pathlib import Path
+
+from safetensors import safe_open
+
+
+LORA_MARKERS = ("lora_down", "lora_up", "lora_a", "lora_b")
+LOHA_MARKERS = ("hada_w1_a", "hada_w1_b", "hada_w2_a", "hada_w2_b")
+
+
+def inspect_adapter(path: Path) -> dict:
+    with safe_open(path, framework="numpy", device="cpu") as archive:
+        keys = list(archive.keys())
+        normalized = [key.lower() for key in keys]
+        lora_keys = [key for key in normalized if any(marker in key for marker in LORA_MARKERS)]
+        loha_keys = [key for key in normalized if any(marker in key for marker in LOHA_MARKERS)]
+        empty_tensors = []
+        for key in keys:
+            shape = archive.get_slice(key).get_shape()
+            if any(dimension == 0 for dimension in shape):
+                empty_tensors.append(key)
+
+    adapter_type = "loha" if loha_keys else "lora" if lora_keys else None
+    valid = bool(keys) and not empty_tensors and adapter_type is not None
+    return {
+        "valid": valid,
+        "adapter_type": adapter_type,
+        "tensor_count": len(keys),
+        "adapter_tensor_count": len(loha_keys or lora_keys),
+        "empty_tensor_count": len(empty_tensors),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Validate a LoRA or LyCORIS/LoHa safetensors adapter.")
+    parser.add_argument("path", type=Path)
+    args = parser.parse_args()
+
+    try:
+        result = inspect_adapter(args.path)
+    except Exception as error:
+        print(json.dumps({"valid": False, "error": str(error)}))
+        return 1
+
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["valid"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

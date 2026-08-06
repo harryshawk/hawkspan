@@ -42,7 +42,16 @@ assert.match(mediaReadme, /only audible soundtrack[\s\S]*synthesized from tone g
 assert.match(mediaReadme, /No third-party stock\s+images, stock video, music, sound samples, fonts, or logos are embedded/);
 const calls = [];
 const surface = await startLocalControlSurface(
-  { enabled: true, host: "127.0.0.1", port: 0 },
+  {
+    enabled: true,
+    host: "127.0.0.1",
+    port: 0,
+    allowed_tools: [
+      "link_status", "application_plugin_status",
+      "list_application_presets", "preview_application_preset",
+      "apply_application_preset", "reset_application_preset",
+    ],
+  },
   async (toolName, argumentsValue, caller) => {
     calls.push({ toolName, argumentsValue, caller });
     return { online: true };
@@ -57,7 +66,10 @@ try {
   const configuration = html.match(/<section class="tab-panel" id="panel-configuration"[\s\S]*?<\/section>\s*<section class="tab-panel" id="panel-help"/)?.[0];
   const help = html.match(/<section class="tab-panel" id="panel-help"[\s\S]*?<\/main>/)?.[0];
   assert.ok(dashboard?.includes("Inspect HawkSpan"));
-  assert.ok(configuration?.includes("Behavior and compatibility"));
+  assert.ok(configuration?.includes("Application quick starts"));
+  assert.ok(configuration?.includes('id="connections-heading"'));
+  assert.ok(configuration?.match(/aria-labelledby="connections-heading" hidden/));
+  assert.ok(configuration?.match(/aria-labelledby="profiles-heading" hidden/));
   assert.ok(help?.includes("Video guides"));
   assert.ok(help?.includes("From cables to SimpleTuner"));
   assert.ok(help?.includes("sample transfer, LoRA checkpoints, and verified results returned from the headless worker"));

@@ -106,6 +106,9 @@ function page(token, configuration) {
   ];
   const connectionManagementEnabled = !configuration.allowed_tools ||
     connectionToolNames.every((name) => configuration.allowed_tools.includes(name));
+  const detailedConfigurationEnabled = !configuration.allowed_tools ||
+    ["get_configuration", "update_configuration", "reset_configuration"]
+      .every((name) => configuration.allowed_tools.includes(name));
   const routeLabels = JSON.stringify({
     primary: configuration.route_labels?.primary || "Primary",
     fallback: configuration.route_labels?.fallback || "Fallback",
@@ -186,7 +189,6 @@ input:focus,textarea:focus{border-color:rgba(113,183,255,.68);box-shadow:0 0 0 3
       <div class="card-body">
         <label>Quick checks <span class="help" tabindex="0" data-tip="These shortcuts fill in the tool name and safe default arguments for you.">?</span></label>
         <div class="quick">
-          <button class="tool-choice" data-tool="mcp_status" type="button" title="Confirm that this HawkSpan MCP service is responding.">MCP status</button>
           <button class="tool-choice" data-tool="link_status" type="button" title="Check both configured connections, the active route, and queue counts.">Connection status</button>
           <button class="tool-choice" data-tool="application_plugin_status" type="button" title="See which application plugins are installed and available.">Plugin status</button>
           <button class="tool-choice" data-tool="list_messages" data-args='{"limit":10}' type="button" title="Show the ten most recent durable messages.">Messages</button>
@@ -214,11 +216,11 @@ input:focus,textarea:focus{border-color:rgba(113,183,255,.68);box-shadow:0 0 0 3
   <section class="tab-panel" id="panel-configuration" role="tabpanel" aria-labelledby="tab-configuration" data-panel="configuration" hidden>
     <section class="card config-card">
       <div class="card-head config-intro">
-        <div><p class="eyebrow">Configuration</p><h2>Behavior and compatibility</h2><p>Current HawkSpan behavior remains the default. Change only the capabilities you intend to restore or restrict.</p></div>
-        <div class="config-actions"><button class="secondary" id="reload-config" type="button" title="Discard unsaved screen changes and reload the active HawkSpan configuration.">Reload</button><button class="save-config" id="save-config" type="button" title="Validate and save the individual role and capability controls shown below.">Save changes</button></div>
+        <div><p class="eyebrow">Packages</p><h2>Application quick starts</h2><p>Apply operation selections supplied by installed, reviewed HawkSpan packages.</p></div>
+        <div class="config-actions" ${detailedConfigurationEnabled ? "" : "hidden"}><button class="secondary" id="reload-config" type="button" title="Discard unsaved screen changes and reload the active HawkSpan configuration.">Reload</button><button class="save-config" id="save-config" type="button" title="Validate and save the individual role and capability controls shown below.">Save changes</button></div>
       </div>
       <div class="card-body">
-        <section class="connection-manager" aria-labelledby="connections-heading">
+        <section class="connection-manager" aria-labelledby="connections-heading" ${connectionManagementEnabled ? "" : "hidden"}>
           <h3 id="connections-heading">Connections <span class="help" tabindex="0" role="note" aria-label="Help: Configure one or two ways for HawkSpan to reach the other Mac. At least one connection must remain enabled." data-tip="Configure one or two ways for HawkSpan to reach the other Mac. At least one connection must remain enabled.">?</span></h3>
           <p>Use either connection by itself, or enable both for automatic primary-to-fallback routing.</p>
           <div class="connection-grid">
@@ -240,7 +242,7 @@ input:focus,textarea:focus{border-color:rgba(113,183,255,.68);box-shadow:0 0 0 3
           <p class="connection-summary" id="connection-summary" aria-live="polite">Loading connection settings…</p>
           <button class="save-config" id="save-connections" type="button" title="Review and confirm before saving connection availability, names, or addresses.">Save connection settings</button>
         </section>
-        <section class="profile-manager" aria-labelledby="profiles-heading">
+        <section class="profile-manager" aria-labelledby="profiles-heading" ${profileManagementEnabled ? "" : "hidden"}>
           <h3 id="profiles-heading">Configuration profiles <span class="help" tabindex="0" role="note" aria-label="Help: Profiles contain only HawkSpan role and capability choices. They never replace peer addresses, SSH identity, paths, plugins, tokens, or local-control settings." data-tip="Profiles contain only HawkSpan role and capability choices. They never replace peer addresses, SSH identity, paths, plugins, tokens, or local-control settings.">?</span></h3>
           <p>Start from a reviewed use case or save this Mac’s current settings under your own name.</p>
           <div class="profile-picker">
@@ -267,7 +269,7 @@ input:focus,textarea:focus{border-color:rgba(113,183,255,.68);box-shadow:0 0 0 3
             <button class="danger" id="reset-application-preset" type="button" title="After confirmation, reset the selected preset’s role, capability, and operation restrictions to inherited defaults." disabled>Reset quick start</button>
           </div>
         </section>
-        <p class="config-state" id="config-state" aria-live="polite">Loading the effective configuration…</p>
+        <p class="config-state" id="config-state" aria-live="polite" ${detailedConfigurationEnabled ? "" : "hidden"}>Loading the effective configuration…</p>
         <div class="config-groups" id="config-groups" hidden></div>
       </div>
     </section>
@@ -278,17 +280,17 @@ input:focus,textarea:focus{border-color:rgba(113,183,255,.68);box-shadow:0 0 0 3
         <div class="video-guides-head"><p class="eyebrow">Video guides</p><h2 id="video-guides-title">See HawkSpan in action</h2><p>Five quick guides explain the essentials. Pause or replay any section as needed.</p></div>
         <div class="video-guide-grid">
           <article class="video-guide"><h3>What HawkSpan does</h3><p>See how HawkSpan creates a private control point for your paired Macs.</p><video controls preload="metadata" title="What HawkSpan does video guide" aria-label="What HawkSpan does video guide"><source src="/media/help/what-hawkspan-does.mp4" type="video/mp4">Your browser does not support HTML5 video.</video></article>
-          <article class="video-guide"><h3>The four profiles</h3><p>Choose a reviewed starting point for the way your two Macs work together.</p><video controls preload="metadata" title="HawkSpan profiles video guide" aria-label="HawkSpan profiles video guide"><source src="/media/help/hawkspan-profiles.mp4" type="video/mp4">Your browser does not support HTML5 video.</video></article>
-          <article class="video-guide"><h3>Detailed configuration</h3><p>Understand roles, capabilities, authorization, automation, and transport controls.</p><video controls preload="metadata" title="HawkSpan detailed configuration video guide" aria-label="HawkSpan detailed configuration video guide"><source src="/media/help/hawkspan-detailed-configuration.mp4" type="video/mp4">Your browser does not support HTML5 video.</video></article>
-          <article class="video-guide"><h3>Connections and fallback</h3><p>Use Thunderbolt or Ethernet alone, or enable both for automatic redundancy.</p><video controls preload="metadata" title="HawkSpan connections and fallback video guide" aria-label="HawkSpan connections and fallback video guide"><source src="/media/help/hawkspan-connections.mp4" type="video/mp4">Your browser does not support HTML5 video.</video></article>
+          <article class="video-guide" ${profileManagementEnabled ? "" : "hidden"}><h3>The four profiles</h3><p>Choose a reviewed starting point for the way your two Macs work together.</p><video controls preload="metadata" title="HawkSpan profiles video guide" aria-label="HawkSpan profiles video guide"><source src="/media/help/hawkspan-profiles.mp4" type="video/mp4">Your browser does not support HTML5 video.</video></article>
+          <article class="video-guide" ${detailedConfigurationEnabled ? "" : "hidden"}><h3>Detailed configuration</h3><p>Understand roles, capabilities, authorization, automation, and transport controls.</p><video controls preload="metadata" title="HawkSpan detailed configuration video guide" aria-label="HawkSpan detailed configuration video guide"><source src="/media/help/hawkspan-detailed-configuration.mp4" type="video/mp4">Your browser does not support HTML5 video.</video></article>
+          <article class="video-guide" ${connectionManagementEnabled ? "" : "hidden"}><h3>Connections and fallback</h3><p>Use Thunderbolt or Ethernet alone, or enable both for automatic redundancy.</p><video controls preload="metadata" title="HawkSpan connections and fallback video guide" aria-label="HawkSpan connections and fallback video guide"><source src="/media/help/hawkspan-connections.mp4" type="video/mp4">Your browser does not support HTML5 video.</video></article>
           <article class="video-guide"><h3>From cables to SimpleTuner</h3><p>See the complete bottom-up path: two network routes, HawkSpan and MCP controls, sample transfer, LoRA checkpoints, and verified results returned from the headless worker.</p><video controls preload="metadata" title="HawkSpan and SimpleTuner bottom-up workflow video guide" aria-label="HawkSpan and SimpleTuner bottom-up workflow video guide"><source src="/media/help/hawkspan-bottom-up-workflow.mp4" type="video/mp4">Your browser does not support HTML5 video.</video></article>
         </div>
       </section>
       <section class="card guide"><p class="eyebrow">Help</p><h2>Getting started</h2><ol><li><strong>Check the connection</strong> to confirm each enabled route.</li><li>Use the other shortcuts to inspect <strong>plugins and activity</strong>.</li><li>Read the plain-language explanation, with the original technical result below it.</li></ol></section>
       <section class="card safety"><div class="safety-title"><span class="dot"></span> Private by design</div><p>Requests stay on this Mac and use the same guarded HawkSpan handlers as agent tools. Hover or focus any <strong>?</strong> for help.</p></section>
-      <section class="card help-copy"><p class="eyebrow">Configuration help</p><h2>Profiles and flags</h2><p>Built-in profiles are reviewed starting points for common two-Mac arrangements. A named profile records only role and approved feature settings, so it cannot overwrite connection or installation details.</p><ul><li><strong>Apply</strong> replaces the active role and feature choices after confirmation.</li><li><strong>Reset</strong> returns flags to inherited symmetric defaults after confirmation.</li><li><strong>Save changes</strong> writes individual controls shown on the Configuration tab.</li></ul></section>
-      <section class="card help-copy"><p class="eyebrow">More detail</p><h2>Understanding each option</h2><p>Hover or keyboard-focus the <strong>?</strong> beside any option for a concise explanation. The repository’s <code>docs/CONFIGURATION-FLAGS.md</code> provides the full reference for agents, installers, and manual administrators.</p></section>
-      <section class="card help-copy"><p class="eyebrow">Connection help</p><h2>One connection or automatic fallback</h2><p>Enable only the route that exists, or enable both to try the primary route first and automatically fall back to the second. At least one enabled route must have a host or address. Connection settings are never changed by behavioral profiles.</p></section>
+      <section class="card help-copy"><p class="eyebrow">Package help</p><h2>Packages and quick starts</h2><p>Reviewed packages add application operations. Their quick starts select only which operations are enabled and do not replace HawkSpan-D control behavior.</p></section>
+      <section class="card help-copy"><p class="eyebrow">Configuration</p><h2>Machine-local settings</h2><p>Peer addresses, paths, and the local web port belong in the protected <code>hawkspan.env</code> file. Package presets never overwrite them.</p></section>
+      <section class="card help-copy"><p class="eyebrow">Later additions</p><h2>Retained feature inventory</h2><p>Role profiles, browser connection editing, and richer trainer controls are documented in <code>docs/DEFERRED-FEATURES.md</code> and are not active in this build.</p></section>
     </div>
   </section>
 </main>
@@ -455,7 +457,7 @@ async function loadConnectionConfiguration(){
   const summary=document.querySelector("#connection-summary");
   const save=document.querySelector("#save-connections");
   if(!connectionManagementEnabled){
-    summary.textContent="Connection editing needs an allowlist update. Add the two connection-configuration tools documented in docs/CONNECTIONS.md, then restart HawkSpan.";
+    summary.textContent="Connection editing is deferred in this build; use the protected HawkSpan environment file.";
     save.disabled=true;
     document.querySelectorAll(".connection-route input").forEach(input=>{input.disabled=true});
     return;

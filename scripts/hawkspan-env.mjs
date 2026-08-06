@@ -6,31 +6,26 @@ export const HAWKSPAN_ENV_NAMES = Object.freeze([
   "HAWKSPAN_CONFIG",
   "HAWKSPAN_CONFIG_PATH",
   "HAWKSPAN_NODE_ID",
-  "HAWKSPAN_PLUGIN_ROOT",
+  "HAWKSPAN_ACTIVE_RELEASE_ROOT",
   "HAWKSPAN_APPLICATION_PLUGIN_ROOT",
   "HAWKSPAN_PEER_NODE_ID",
-  "HAWKSPAN_PEER_PRIMARY_HOST",
-  "HAWKSPAN_PEER_FALLBACK_HOST",
   "HAWKSPAN_PEER_USER",
   "HAWKSPAN_PEER_THREAD_ID",
   "HAWKSPAN_REMOTE_NODE",
-  "HAWKSPAN_REMOTE_PLUGIN_ROOT",
-  "HAWKSPAN_REMOTE_CALL_TOOL",
   "HAWKSPAN_PRIMARY_ENABLED",
   "HAWKSPAN_PRIMARY_LABEL",
+  "HAWKSPAN_PRIMARY_LOCAL_HOST",
   "HAWKSPAN_PRIMARY_HOST",
   "HAWKSPAN_FALLBACK_ENABLED",
   "HAWKSPAN_FALLBACK_LABEL",
+  "HAWKSPAN_FALLBACK_LOCAL_HOST",
   "HAWKSPAN_FALLBACK_HOST",
   "HAWKSPAN_SSH_IDENTITY",
   "HAWKSPAN_REMOTE_INBOX",
   "HAWKSPAN_REMOTE_ARTIFACTS",
   "HAWKSPAN_REMOTE_AUDIT",
   "HAWKSPAN_LOCAL_CONTROL_PORT",
-  "HAWKSPAN_LOCAL_CONTROL_URL",
   "HAWKSPAN_REPOSITORY_DIR",
-  "HAWKSPAN_REMOTE_CONFIG_PATH",
-  "HAWKSPAN_REMOTE_REPOSITORY_DIR",
   "HAWKSPAN_REMOTE_STATE_DIR",
   "HAWKSPAN_STATE_DIR",
   "HAWKSPAN_WORKLOAD_INBOX_ROOT",
@@ -45,20 +40,79 @@ export const HAWKSPAN_ENV_NAMES = Object.freeze([
   "HAWKSPAN_LOCAL_TRAINER_START_SCRIPT",
   "HAWKSPAN_LOCAL_TRAINER_STOP_SCRIPT",
   "HAWKSPAN_LOCAL_TRAINER_PACKAGE_SCRIPT",
-  "HAWKSPAN_REAL_PAIR_FALLBACK_EVIDENCE",
+  "HAWKSPAN_READINESS_LOCAL_CONFIG_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_PEER_PING_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_SSH_PORT_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_SSH_LOGIN_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_AGENT_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_TRAINER_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_TOTAL_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_RETRY_DELAYS_MS",
+  "HAWKSPAN_QUEUE_SUPERVISOR_ENABLED",
+  "HAWKSPAN_QUEUE_SUPERVISOR_POLL_INTERVAL_MS",
+  "HAWKSPAN_QUEUE_WORKER_RESTART_DELAYS_MS",
+  "HAWKSPAN_QUEUE_ITEM_LEASE_MS",
+  "HAWKSPAN_QUEUE_MAX_ITEMS_PER_WORKER",
+  "HAWKSPAN_QUEUE_DEFAULT_MAXIMUM_ATTEMPTS",
+  "HAWKSPAN_QUEUE_DEFAULT_MAX_PENDING_ITEMS",
+  "HAWKSPAN_QUEUE_DEFAULT_MAX_PAYLOAD_BYTES",
+  "HAWKSPAN_QUEUE_RETRY_JITTER",
+  "HAWKSPAN_PACKAGE_RETURN_LOCK_WAIT_MS",
+  "HAWKSPAN_SIMPLETUNER_STATE_LOCK_WAIT_MS",
+  "HAWKSPAN_LINK_OPERATION_RETRY_DELAYS_MS",
+  "HAWKSPAN_LINK_OPERATION_ATTEMPT_TIMEOUT_MS",
+  "HAWKSPAN_LINK_CONNECT_TIMEOUT_MS",
+  "HAWKSPAN_LINK_CYCLE_TIMEOUT_MS",
+  "HAWKSPAN_LINK_SERVER_ALIVE_INTERVAL_SECONDS",
+  "HAWKSPAN_LINK_SERVER_ALIVE_COUNT_MAX",
+  "HAWKSPAN_LINK_PRIMARY_REPROBE_MS",
 ]);
 
 const allowed = new Set(HAWKSPAN_ENV_NAMES);
 
-const BOOLEAN_NAMES = new Set(["HAWKSPAN_PRIMARY_ENABLED", "HAWKSPAN_FALLBACK_ENABLED"]);
+const BOOLEAN_NAMES = new Set([
+  "HAWKSPAN_PRIMARY_ENABLED", "HAWKSPAN_FALLBACK_ENABLED",
+  "HAWKSPAN_QUEUE_SUPERVISOR_ENABLED",
+  "HAWKSPAN_QUEUE_RETRY_JITTER",
+]);
 const EMPTY_STRING_NAMES = new Set(["HAWKSPAN_PRIMARY_LABEL", "HAWKSPAN_FALLBACK_LABEL"]);
+const INTEGER_NAMES = new Set([
+  "HAWKSPAN_READINESS_LOCAL_CONFIG_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_PEER_PING_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_SSH_PORT_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_SSH_LOGIN_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_AGENT_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_TRAINER_TIMEOUT_MS",
+  "HAWKSPAN_READINESS_TOTAL_TIMEOUT_MS",
+  "HAWKSPAN_QUEUE_SUPERVISOR_POLL_INTERVAL_MS",
+  "HAWKSPAN_QUEUE_ITEM_LEASE_MS",
+  "HAWKSPAN_LINK_CONNECT_TIMEOUT_MS",
+  "HAWKSPAN_LINK_CYCLE_TIMEOUT_MS",
+  "HAWKSPAN_LINK_OPERATION_ATTEMPT_TIMEOUT_MS",
+  "HAWKSPAN_LINK_PRIMARY_REPROBE_MS",
+]);
+const LARGE_INTEGER_NAMES = new Set([
+  "HAWKSPAN_PACKAGE_RETURN_LOCK_WAIT_MS",
+  "HAWKSPAN_SIMPLETUNER_STATE_LOCK_WAIT_MS",
+  "HAWKSPAN_QUEUE_DEFAULT_MAX_PAYLOAD_BYTES",
+]);
+const COUNT_INTEGER_NAMES = new Set(["HAWKSPAN_QUEUE_DEFAULT_MAX_PENDING_ITEMS"]);
+const SMALL_INTEGER_NAMES = new Set([
+  "HAWKSPAN_QUEUE_MAX_ITEMS_PER_WORKER",
+  "HAWKSPAN_QUEUE_DEFAULT_MAXIMUM_ATTEMPTS",
+  "HAWKSPAN_LINK_SERVER_ALIVE_INTERVAL_SECONDS",
+  "HAWKSPAN_LINK_SERVER_ALIVE_COUNT_MAX",
+]);
+const DELAY_LIST_NAMES = new Set([
+  "HAWKSPAN_READINESS_RETRY_DELAYS_MS",
+  "HAWKSPAN_QUEUE_WORKER_RESTART_DELAYS_MS",
+  "HAWKSPAN_LINK_OPERATION_RETRY_DELAYS_MS",
+]);
 const ABSOLUTE_PATH_NAMES = new Set([
-  "HAWKSPAN_CONFIG", "HAWKSPAN_CONFIG_PATH", "HAWKSPAN_PLUGIN_ROOT",
-  "HAWKSPAN_APPLICATION_PLUGIN_ROOT", "HAWKSPAN_REMOTE_NODE",
-  "HAWKSPAN_REMOTE_PLUGIN_ROOT", "HAWKSPAN_REMOTE_CALL_TOOL", "HAWKSPAN_SSH_IDENTITY",
+  "HAWKSPAN_CONFIG", "HAWKSPAN_CONFIG_PATH", "HAWKSPAN_ACTIVE_RELEASE_ROOT",
+  "HAWKSPAN_APPLICATION_PLUGIN_ROOT", "HAWKSPAN_REMOTE_NODE", "HAWKSPAN_SSH_IDENTITY",
   "HAWKSPAN_REMOTE_INBOX", "HAWKSPAN_REMOTE_ARTIFACTS", "HAWKSPAN_REMOTE_AUDIT",
-  "HAWKSPAN_REPOSITORY_DIR", "HAWKSPAN_REMOTE_CONFIG_PATH",
-  "HAWKSPAN_REMOTE_REPOSITORY_DIR", "HAWKSPAN_REMOTE_STATE_DIR", "HAWKSPAN_STATE_DIR",
+  "HAWKSPAN_REPOSITORY_DIR", "HAWKSPAN_REMOTE_STATE_DIR", "HAWKSPAN_STATE_DIR",
   "HAWKSPAN_WORKLOAD_INBOX_ROOT", "HAWKSPAN_WORKLOAD_DATASET_ROOT",
   "HAWKSPAN_WORKLOAD_RECIPE_ROOT", "HAWKSPAN_WORKLOAD_OUTPUT_ROOT",
   "HAWKSPAN_WORKLOAD_STATE_ROOT", "HAWKSPAN_WORKLOAD_DISK_ROOT",
@@ -66,7 +120,6 @@ const ABSOLUTE_PATH_NAMES = new Set([
   "HAWKSPAN_SIMPLETUNER_ROOT",
   "HAWKSPAN_LOCAL_TRAINER_START_SCRIPT", "HAWKSPAN_LOCAL_TRAINER_STOP_SCRIPT",
   "HAWKSPAN_LOCAL_TRAINER_PACKAGE_SCRIPT",
-  "HAWKSPAN_REAL_PAIR_FALLBACK_EVIDENCE",
 ]);
 
 function validateValue(name, value) {
@@ -80,13 +133,19 @@ function validateValue(name, value) {
     throw new Error(`${name} must be true or false`);
   }
   if (name === "HAWKSPAN_LOCAL_CONTROL_PORT") integerValue({ [name]: value }, name, 0, 65535);
+  if (INTEGER_NAMES.has(name)) integerValue({ [name]: value }, name, 1000, 600000);
+  if (LARGE_INTEGER_NAMES.has(name)) integerValue({ [name]: value }, name, 1000, 16777216);
+  if (COUNT_INTEGER_NAMES.has(name)) integerValue({ [name]: value }, name, 1, 1000000);
+  if (SMALL_INTEGER_NAMES.has(name)) integerValue({ [name]: value }, name, 1, 1000);
+  if (DELAY_LIST_NAMES.has(name)) {
+    const delays = value.split(",").map((item) => item.trim());
+    if (delays.length < 1 || delays.length > 16 || delays.some((item) => !/^\d+$/.test(item))) {
+      throw new Error(`${name} must be a comma-separated list of 1 to 16 millisecond integers`);
+    }
+    for (const item of delays) integerValue({ [name]: item }, name, 100, 60000);
+  }
   if (ABSOLUTE_PATH_NAMES.has(name) && !path.isAbsolute(value)) {
     throw new Error(`${name} must be an absolute path`);
-  }
-  if (name === "HAWKSPAN_LOCAL_CONTROL_URL") {
-    let parsed;
-    try { parsed = new URL(value); } catch { throw new Error(`${name} must be a valid URL`); }
-    if (!new Set(["http:", "https:"]).has(parsed.protocol)) throw new Error(`${name} must use http or https`);
   }
 }
 
@@ -155,7 +214,6 @@ export function applyHawkspanEnv(configuration, values) {
     if (Object.hasOwn(values, name)) target[key] = values[name];
   };
   assign(next, "node_id", "HAWKSPAN_NODE_ID");
-  assign(next, "plugin_root", "HAWKSPAN_PLUGIN_ROOT");
   next.application_plugins = { ...(next.application_plugins || {}) };
   if (values.HAWKSPAN_APPLICATION_PLUGIN_ROOT) {
     next.application_plugins.roots = [values.HAWKSPAN_APPLICATION_PLUGIN_ROOT];
@@ -163,6 +221,13 @@ export function applyHawkspanEnv(configuration, values) {
   next.local_control = { ...(next.local_control || {}) };
   const port = integerValue(values, "HAWKSPAN_LOCAL_CONTROL_PORT", 0, 65535);
   if (port !== undefined) next.local_control.port = port;
+  next.training = { ...(next.training || {}) };
+  for (const [key, name] of [
+    ["simpletuner_root", "HAWKSPAN_SIMPLETUNER_ROOT"],
+    ["start_script", "HAWKSPAN_LOCAL_TRAINER_START_SCRIPT"],
+    ["stop_script", "HAWKSPAN_LOCAL_TRAINER_STOP_SCRIPT"],
+    ["package_script", "HAWKSPAN_LOCAL_TRAINER_PACKAGE_SCRIPT"],
+  ]) assign(next.training, key, name);
   const peerEnvironmentNames = HAWKSPAN_ENV_NAMES.filter((name) =>
     name.startsWith("HAWKSPAN_PEER_") || name.startsWith("HAWKSPAN_REMOTE_") ||
     name.startsWith("HAWKSPAN_PRIMARY_") || name.startsWith("HAWKSPAN_FALLBACK_") ||
@@ -173,12 +238,13 @@ export function applyHawkspanEnv(configuration, values) {
   for (const [key, name] of [
     ["node_id", "HAWKSPAN_PEER_NODE_ID"], ["user", "HAWKSPAN_PEER_USER"],
     ["thread_id", "HAWKSPAN_PEER_THREAD_ID"], ["remote_node", "HAWKSPAN_REMOTE_NODE"],
-    ["remote_plugin_root", "HAWKSPAN_REMOTE_PLUGIN_ROOT"],
-    ["remote_call_tool", "HAWKSPAN_REMOTE_CALL_TOOL"],
-    ["primary_label", "HAWKSPAN_PRIMARY_LABEL"], ["primary_host", "HAWKSPAN_PRIMARY_HOST"],
-    ["fallback_label", "HAWKSPAN_FALLBACK_LABEL"], ["fallback_host", "HAWKSPAN_FALLBACK_HOST"],
+    ["primary_label", "HAWKSPAN_PRIMARY_LABEL"], ["primary_local_host", "HAWKSPAN_PRIMARY_LOCAL_HOST"],
+    ["primary_host", "HAWKSPAN_PRIMARY_HOST"],
+    ["fallback_label", "HAWKSPAN_FALLBACK_LABEL"], ["fallback_local_host", "HAWKSPAN_FALLBACK_LOCAL_HOST"],
+    ["fallback_host", "HAWKSPAN_FALLBACK_HOST"],
     ["ssh_identity", "HAWKSPAN_SSH_IDENTITY"], ["remote_inbox", "HAWKSPAN_REMOTE_INBOX"],
     ["remote_artifacts", "HAWKSPAN_REMOTE_ARTIFACTS"], ["remote_audit", "HAWKSPAN_REMOTE_AUDIT"],
+    ["remote_state_dir", "HAWKSPAN_REMOTE_STATE_DIR"],
   ]) assign(peer, key, name);
   for (const [key, name] of [
     ["primary_enabled", "HAWKSPAN_PRIMARY_ENABLED"],
@@ -187,6 +253,60 @@ export function applyHawkspanEnv(configuration, values) {
     const value = booleanValue(values, name);
     if (value !== undefined) peer[key] = value;
   }
+  next.readiness = { ...(next.readiness || {}) };
+  for (const [key, name] of [
+    ["local_config_timeout_ms", "HAWKSPAN_READINESS_LOCAL_CONFIG_TIMEOUT_MS"],
+    ["peer_ping_timeout_ms", "HAWKSPAN_READINESS_PEER_PING_TIMEOUT_MS"],
+    ["ssh_port_timeout_ms", "HAWKSPAN_READINESS_SSH_PORT_TIMEOUT_MS"],
+    ["ssh_login_timeout_ms", "HAWKSPAN_READINESS_SSH_LOGIN_TIMEOUT_MS"],
+    ["agent_timeout_ms", "HAWKSPAN_READINESS_AGENT_TIMEOUT_MS"],
+    ["trainer_timeout_ms", "HAWKSPAN_READINESS_TRAINER_TIMEOUT_MS"],
+    ["total_timeout_ms", "HAWKSPAN_READINESS_TOTAL_TIMEOUT_MS"],
+  ]) {
+    const value = integerValue(values, name, 1000, 600000);
+    if (value !== undefined) next.readiness[key] = value;
+  }
+  if (Object.hasOwn(values, "HAWKSPAN_READINESS_RETRY_DELAYS_MS")) {
+    next.readiness.retry_delays_ms = values.HAWKSPAN_READINESS_RETRY_DELAYS_MS
+      .split(",")
+      .map((item) => Number(item.trim()));
+  }
+  next.queue_supervisor = { ...(next.queue_supervisor || {}) };
+  for (const [key, name, minimum, maximum] of [
+    ["poll_interval_ms", "HAWKSPAN_QUEUE_SUPERVISOR_POLL_INTERVAL_MS", 1000, 600000],
+    ["item_lease_ms", "HAWKSPAN_QUEUE_ITEM_LEASE_MS", 1000, 600000],
+    ["max_items_per_worker", "HAWKSPAN_QUEUE_MAX_ITEMS_PER_WORKER", 1, 1000],
+    ["default_maximum_attempts", "HAWKSPAN_QUEUE_DEFAULT_MAXIMUM_ATTEMPTS", 1, 100],
+    ["default_maximum_pending_items", "HAWKSPAN_QUEUE_DEFAULT_MAX_PENDING_ITEMS", 1, 1000000],
+    ["default_maximum_payload_bytes", "HAWKSPAN_QUEUE_DEFAULT_MAX_PAYLOAD_BYTES", 1024, 16777216],
+  ]) {
+    const value = integerValue(values, name, minimum, maximum);
+    if (value !== undefined) next.queue_supervisor[key] = value;
+  }
+  const supervisorEnabled = booleanValue(values, "HAWKSPAN_QUEUE_SUPERVISOR_ENABLED");
+  if (supervisorEnabled !== undefined) next.queue_supervisor.enabled = supervisorEnabled;
+  const retryJitter = booleanValue(values, "HAWKSPAN_QUEUE_RETRY_JITTER");
+  if (retryJitter !== undefined) next.queue_supervisor.retry_jitter = retryJitter;
+  if (Object.hasOwn(values, "HAWKSPAN_QUEUE_WORKER_RESTART_DELAYS_MS")) {
+    next.queue_supervisor.worker_restart_delays_ms = values.HAWKSPAN_QUEUE_WORKER_RESTART_DELAYS_MS
+      .split(",").map((item) => Number(item.trim()));
+  }
+  next.link = { ...(next.link || {}) };
+  for (const [key, name, minimum, maximum] of [
+    ["connect_timeout_ms", "HAWKSPAN_LINK_CONNECT_TIMEOUT_MS", 1000, 600000],
+    ["cycle_timeout_ms", "HAWKSPAN_LINK_CYCLE_TIMEOUT_MS", 1000, 600000],
+    ["operation_attempt_timeout_ms", "HAWKSPAN_LINK_OPERATION_ATTEMPT_TIMEOUT_MS", 1000, 600000],
+    ["server_alive_interval_seconds", "HAWKSPAN_LINK_SERVER_ALIVE_INTERVAL_SECONDS", 1, 1000],
+    ["server_alive_count_max", "HAWKSPAN_LINK_SERVER_ALIVE_COUNT_MAX", 1, 1000],
+    ["primary_reprobe_ms", "HAWKSPAN_LINK_PRIMARY_REPROBE_MS", 1000, 600000],
+  ]) {
+    const value = integerValue(values, name, minimum, maximum);
+    if (value !== undefined) next.link[key] = value;
+  }
+  if (Object.hasOwn(values, "HAWKSPAN_LINK_OPERATION_RETRY_DELAYS_MS")) {
+    next.link.operation_retry_delays_ms = values.HAWKSPAN_LINK_OPERATION_RETRY_DELAYS_MS
+      .split(",").map((item) => Number(item.trim()));
+  }
   return next;
 }
 
@@ -194,7 +314,7 @@ export function redactedHawkspanEnv(values) {
   return Object.fromEntries(Object.keys(values).map((name) => [name, "[configured]" ]));
 }
 
-export function writeHawkspanEnv(filePath, values) {
+export function serializeHawkspanEnv(values) {
   for (const name of Object.keys(values)) {
     if (!allowed.has(name)) throw new Error(`unsupported HawkSpan environment name: ${name}`);
     validateValue(name, values[name]);
@@ -209,17 +329,23 @@ export function writeHawkspanEnv(filePath, values) {
     .filter((name) => Object.hasOwn(values, name))
     .map((name) => `${name}=${quoteLiteral(values[name])}`)
     .join("\n")}\n`;
+  const roundTrip = parseHawkspanEnv(body);
+  if (
+    Object.keys(values).length !== Object.keys(roundTrip).length ||
+    Object.entries(values).some(([name, value]) => roundTrip[name] !== value)
+  ) {
+    throw new Error("hawkspan.env serialization did not round-trip exactly");
+  }
+  return body;
+}
+
+export function writeHawkspanEnv(filePath, values) {
+  const body = serializeHawkspanEnv(values);
   const temporary = `${filePath}.tmp-${process.pid}`;
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
   try {
     fs.writeFileSync(temporary, body, { mode: 0o600, flag: "wx" });
-    const roundTrip = readHawkspanEnv(temporary);
-    if (
-      Object.keys(values).length !== Object.keys(roundTrip).length ||
-      Object.entries(values).some(([name, value]) => roundTrip[name] !== value)
-    ) {
-      throw new Error("hawkspan.env serialization did not round-trip exactly");
-    }
+    readHawkspanEnv(temporary);
     fs.renameSync(temporary, filePath);
     fs.chmodSync(filePath, 0o600);
   } finally {

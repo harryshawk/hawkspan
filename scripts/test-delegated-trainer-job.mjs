@@ -1,0 +1,273 @@
+#!/usr/bin/env node
+
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "delegated-trainer-job-"));
+const invocationLog = path.join(root, "trainer-invocations.log");
+const adapter = path.join(root, "trainer-adapter.sh");
+const activeMarker = path.join(root, "trainer-active");
+const schedulerRoot = path.join(root, "lora-scheduler");
+const schedulerJobs = path.join(schedulerRoot, "lora-jobs.json");
+const schedulerState = path.join(schedulerRoot, "lora-scheduler-state.json");
+const schedulerControls = path.join(schedulerRoot, "jobs");
+const fakePs = path.join(root, "fake-ps.sh");
+fs.mkdirSync(schedulerControls, { recursive: true });
+fs.writeFileSync(adapter, `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(invocationLog)}
+if [ -e ${JSON.stringify(activeMarker)} ]; then
+  rm -f ${JSON.stringify(activeMarker)}
+else
+  : > ${JSON.stringify(activeMarker)}
+fi
+printf '{"ok":true}\\n'
+`, { mode: 0o755 });
+fs.writeFileSync(fakePs, `#!/bin/sh
+if [ ! -e ${JSON.stringify(activeMarker)} ]; then
+  exit 0
+fi
+cat <<'OUT'
+12100 1 12100 /usr/bin/python3 /release/scripts/run_captioned_loras.py.managed --only-job robot-test --mode train-and-return
+OUT
+`, { mode: 0o755 });
+fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({
+  schema_version: 1,
+  node_id: "worker-test",
+  database_path: path.join(root, "state.sqlite"),
+  artifact_root: path.join(root, "artifacts"),
+  inbox_root: path.join(root, "inbox"),
+  outbox_root: path.join(root, "outbox"),
+  audit_root: path.join(root, "audit"),
+  local_control: { enabled: false },
+  training: {
+    allow_start: true,
+    allow_stop: true,
+    allow_package: true,
+    start_script: adapter,
+    stop_script: adapter,
+    package_script: adapter,
+  },
+  lora_automation: {
+    scheduler_root: schedulerRoot,
+    scheduler_jobs_path: schedulerJobs,
+    scheduler_state_path: schedulerState,
+    scheduler_queue_control_path: path.join(schedulerRoot, "queue-control.json"),
+    scheduler_job_control_root: schedulerControls,
+  },
+}, null, 2));
+
+const server = path.join(path.dirname(fileURLToPath(import.meta.url)), "mcp-server.mjs");
+const child = spawn(process.execPath, [server], {
+  env: {
+    ...process.env,
+    HAWKSPAN_STATE_DIR: root,
+    HAWKSPAN_CALL_ORIGIN: "peer",
+    HAWKSPAN_PS: fakePs,
+  },
+  stdio: ["pipe", "pipe", "inherit"],
+});
+let sequence = 0;
+let buffer = "";
+const pending = new Map();
+child.stdout.setEncoding("utf8");
+child.stdout.on("data", (chunk) => {
+  buffer += chunk;
+  let newline;
+  while ((newline = buffer.indexOf("\n")) >= 0) {
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    if (!line.trim()) continue;
+    const response = JSON.parse(line);
+    const waiter = pending.get(response.id);
+    if (waiter) {
+      pending.delete(response.id);
+      waiter(response);
+    }
+  }
+});
+function request(method, params = {}) {
+  const id = ++sequence;
+  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+  return new Promise((resolve, reject) => {
+    pending.set(id, resolve);
+    setTimeout(() => {
+      if (pending.delete(id)) reject(new Error(`timeout waiting for ${method}`));
+    }, 10000);
+  });
+}
+const tool = (name, args = {}) => request("tools/call", { name, arguments: args });
+await request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+
+const jobId = "job-delegated-training-test";
+const context = {
+  id: jobId,
+  created_at: "2026-08-04T00:00:00.000Z",
+  updated_at: "2026-08-04T00:01:00.000Z",
+  creator: "controller-test",
+  assignee: "worker-test",
+  kind: "training",
+  title: "Delegated training lifecycle",
+  description: "Exact identity must cross the peer boundary.",
+  state: "authorized",
+  authorization_state: "recorded",
+  authorization_evidence: "Active user instruction.",
+  metadata: { target: "robot-test" },
+};
+
+const started = await tool("trainer_start_authorized_job", {
+  job_id: jobId,
+  target: "robot-test",
+  expected_revision_fingerprint: "a".repeat(64),
+  _delegated_job: context,
+});
+assert.equal(started.result.isError, false, started.result.content?.[0]?.text);
+assert.match(fs.readFileSync(invocationLog, "utf8"), new RegExp(`--job-id ${jobId}.*--target robot-test`));
+let jobs = await tool("list_jobs");
+assert.equal(jobs.result.structuredContent[0].id, jobId);
+assert.equal(jobs.result.structuredContent[0].creator, "controller-test");
+
+const stopped = await tool("trainer_stop_authorized_job", {
+  job_id: jobId,
+  target: "robot-test",
+  _delegated_job: { ...context, state: "running" },
+});
+assert.equal(stopped.result.isError, false, stopped.result.content?.[0]?.text);
+assert.equal(stopped.result.structuredContent.queue_control.state, "paused");
+jobs = await tool("list_jobs", { job_id: jobId });
+assert.equal(jobs.result.structuredContent[0].state, "paused");
+assert.equal(jobs.result.structuredContent[0].metadata.phase, "stopped");
+
+fs.writeFileSync(schedulerJobs, `${JSON.stringify({
+  schema_version: 2,
+  jobs: [{
+    job_id: "queue-robot-test",
+    target: "robot-test",
+    authorization_job_id: jobId,
+    revision_fingerprint: "revision-robot-test",
+    authorized: true,
+    priority: 10,
+  }],
+}, null, 2)}\n`);
+
+const refusedUnboundResume = await tool("trainer_start_authorized_job", {
+  job_id: jobId,
+  target: "robot-test",
+  expected_revision_fingerprint: "a".repeat(64),
+});
+assert.equal(refusedUnboundResume.result.isError, true);
+assert.match(refusedUnboundResume.result.content[0].text, /job state paused is not allowed/);
+const refusedUnrecordedResume = await tool("trainer_queue_control", {
+  action: "resume-job",
+  target: "robot-test",
+});
+assert.equal(refusedUnrecordedResume.result.isError, true);
+assert.match(refusedUnrecordedResume.result.content[0].text, /requires a reason/);
+const controlsBackup = `${schedulerControls}.backup`;
+fs.renameSync(schedulerControls, controlsBackup);
+fs.writeFileSync(schedulerControls, "blocks scheduler control write\n");
+const failedSchedulerMutation = await tool("trainer_queue_control", {
+  action: "resume-job",
+  target: "robot-test",
+  reason: "force scheduler mutation failure",
+});
+assert.equal(failedSchedulerMutation.result.isError, true);
+fs.unlinkSync(schedulerControls);
+fs.renameSync(controlsBackup, schedulerControls);
+jobs = await tool("list_jobs", { job_id: jobId });
+assert.equal(
+  jobs.result.structuredContent[0].state,
+  "paused",
+  "failed scheduler mutation must roll the durable authorization back",
+);
+const resumedEligibility = await tool("trainer_queue_control", {
+  action: "resume-job",
+  target: "robot-test",
+  reason: "explicit bounded-test resume",
+});
+assert.equal(resumedEligibility.result.isError, false, resumedEligibility.result.content?.[0]?.text);
+assert.equal(resumedEligibility.result.structuredContent.authorization_job_id, jobId);
+const resumed = await tool("trainer_start_authorized_job", {
+  job_id: jobId,
+  target: "robot-test",
+  expected_revision_fingerprint: "a".repeat(64),
+});
+assert.equal(resumed.result.isError, false, resumed.result.content?.[0]?.text);
+assert.match(fs.readFileSync(invocationLog, "utf8"), /--expected-revision-fingerprint a{64}/);
+jobs = await tool("list_jobs", { job_id: jobId });
+assert.equal(jobs.result.structuredContent[0].state, "running");
+
+const schedulerControlBeforeInvalidResume = fs.readFileSync(
+  path.join(schedulerControls, "robot-test.json"), "utf8",
+);
+const invalidSecondResume = await tool("trainer_queue_control", {
+  action: "resume-job",
+  target: "robot-test",
+  reason: "must be rejected before scheduler mutation",
+});
+assert.equal(invalidSecondResume.result.isError, true);
+assert.match(invalidSecondResume.result.content[0].text, /job state running is not allowed/);
+assert.equal(
+  fs.readFileSync(path.join(schedulerControls, "robot-test.json"), "utf8"),
+  schedulerControlBeforeInvalidResume,
+);
+
+fs.writeFileSync(schedulerJobs, `${JSON.stringify({
+  schema_version: 2,
+  jobs: [{
+    job_id: "queue-robot-test",
+    target: "robot-test",
+    authorization_job_id: jobId,
+    revision_fingerprint: "revision-robot-test",
+    authorized: true,
+    priority: 10,
+  }],
+}, null, 2)}\n`);
+fs.writeFileSync(schedulerState, `${JSON.stringify({
+  schema_version: 1,
+  current: "robot-test",
+  jobs: { "queue-robot-test": { state: "running", phase: "training", attempts: 1 } },
+}, null, 2)}\n`);
+fs.writeFileSync(path.join(schedulerControls, "robot-test.json"), `${JSON.stringify({
+  schema_version: 1,
+  target: "robot-test",
+  state: "running",
+  authorization_job_id: jobId,
+}, null, 2)}\n`);
+const pausedQueue = await tool("trainer_queue_control", {
+  action: "pause-queue",
+  reason: "bounded whole-queue test",
+});
+assert.equal(pausedQueue.result.isError, false, pausedQueue.result.content?.[0]?.text);
+assert.equal(pausedQueue.result.structuredContent.state, "paused");
+assert.equal(pausedQueue.result.structuredContent.stopped_jobs.length, 1);
+jobs = await tool("list_jobs", { job_id: jobId });
+assert.equal(jobs.result.structuredContent[0].state, "paused");
+assert.equal(
+  JSON.parse(fs.readFileSync(path.join(schedulerControls, "robot-test.json"))).state,
+  "paused",
+);
+const resumedQueue = await tool("trainer_queue_control", {
+  action: "resume-queue",
+  reason: "bounded whole-queue test complete",
+});
+assert.equal(resumedQueue.result.isError, false, resumedQueue.result.content?.[0]?.text);
+assert.equal(resumedQueue.result.structuredContent.state, "running");
+jobs = await tool("list_jobs", { job_id: jobId });
+assert.equal(jobs.result.structuredContent[0].state, "paused");
+
+const mismatch = await tool("trainer_stop_authorized_job", {
+  job_id: jobId,
+  target: "robot-test",
+  _delegated_job: { ...context, id: "job-wrong-id", state: "running" },
+});
+assert.equal(mismatch.result.isError, true);
+assert.match(mismatch.result.content[0].text, /identity does not match/);
+
+child.stdin.end();
+await new Promise((resolve) => child.once("exit", resolve));
+fs.rmSync(root, { recursive: true, force: true });
+process.stdout.write("delegated trainer job tests passed\n");

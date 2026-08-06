@@ -1,0 +1,879 @@
+#!/usr/bin/env python3
+"""Build verified, new-only M4 SimpleTuner LoRA return packets."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import datetime as dt
+import glob
+import hashlib
+import json
+import os
+import platform
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+CAPTION_EXTS = {".txt", ".caption"}
+REQUIRED = {
+    "RUN_SUMMARY.md",
+    "CONFIG",
+    "ENVIRONMENT",
+    "DATASET",
+    "LOGS",
+    "OUTPUTS",
+    "VALIDATION_SAMPLES",
+    "EVALUATION_NOTES.md",
+}
+RELEVANT_TRAINING_ENV = (
+    "PYTHONPATH",
+    "PYTORCH_MPS_HIGH_WATERMARK_RATIO",
+    "PYTORCH_ENABLE_MPS_FALLBACK",
+    "TOKENIZERS_PARALLELISM",
+    "CONFIG_PATH",
+    "SIMPLETUNER_ROOT",
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "TRANSFORMERS_CACHE",
+    "TORCH_HOME",
+    "TMPDIR",
+    "WANDB_MODE",
+    "HF_HUB_DISABLE_TELEMETRY",
+    "DO_NOT_TRACK",
+)
+PINNED_DIAGNOSTIC_PREFLIGHT_SHA256 = (
+    "699855f3f87c2af84cac080fbe5f484158853981288f3503e257544847775e1a"
+)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def safe_name(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
+    return value.strip("-") or "unnamed"
+
+
+def visible_files(root: Path):
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and not path.name.startswith("._"):
+            yield path
+
+
+def atomic_json(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", dir=path.parent, delete=False, encoding="utf-8"
+    ) as handle:
+        json.dump(data, handle, indent=2)
+        handle.write("\n")
+        temporary = Path(handle.name)
+    temporary.replace(path)
+
+
+def command_output(command: list[str], cwd: Path | None = None) -> str:
+    result = subprocess.run(
+        command, cwd=cwd, capture_output=True, text=True, check=False
+    )
+    return (result.stdout + result.stderr).strip()
+
+
+def load_config(config_dir: Path) -> dict:
+    config = config_dir / "config.json"
+    if not config.exists():
+        return {}
+    return json.loads(config.read_text())
+
+
+def resolve_preflight_summary(spec: dict, config_dir: Path) -> tuple[Path | None, str | None]:
+    """Resolve explicit or batch-local preflight evidence for an older in-memory spec."""
+    explicit = spec.get("preflight_summary")
+    if explicit and Path(explicit).is_file():
+        path = Path(explicit)
+        return path, sha256(path)
+    candidates: list[Path] = []
+    for ancestor in (config_dir, *config_dir.parents):
+        manifest_root = ancestor / "automation-manifests"
+        if manifest_root.is_dir():
+            candidates.extend(
+                manifest_root.glob("all-datasets-*-preflight-summary.json")
+            )
+    unique = sorted(
+        set(candidates), key=lambda path: path.stat().st_mtime, reverse=True
+    )
+    for path in unique:
+        digest = sha256(path)
+        if digest == PINNED_DIAGNOSTIC_PREFLIGHT_SHA256:
+            return path, digest
+    if unique:
+        return unique[0], sha256(unique[0])
+    return None, None
+
+
+def classify_run(preflight_path: Path | None) -> tuple[str, list[str]]:
+    if not preflight_path:
+        return "candidate; controlled validation pending", [
+            "No batch preflight summary was available to the packet builder."
+        ]
+    try:
+        preflight = json.loads(preflight_path.read_text())
+    except Exception as exc:
+        return "diagnostic/rerun candidate", [
+            f"Preflight evidence could not be parsed: {exc}"
+        ]
+    results = preflight.get("results", [])
+    defects: list[str] = []
+    if results:
+        total = len(results)
+        caption_ready = sum(
+            bool(row.get("caption_structure_ready")) for row in results
+        )
+        config_ready = sum(bool(row.get("config_ready")) for row in results)
+        if caption_ready < total:
+            defects.append(
+                f"Only {caption_ready}/{total} jobs passed six-field caption preflight."
+            )
+        if config_ready < total:
+            defects.append(
+                f"Only {config_ready}/{total} jobs passed fixed-validation-config preflight."
+            )
+    return (
+        ("diagnostic/rerun candidate" if defects else
+         "candidate; controlled validation pending"),
+        defects,
+    )
+
+
+def validate_lora(path: Path, python_bin: str) -> tuple[int, int]:
+    if not path.exists() or path.stat().st_size < 1_000_000:
+        raise RuntimeError(f"Missing or implausibly small LoRA: {path}")
+    code = (
+        "from safetensors import safe_open; import json,sys; "
+        "f=safe_open(sys.argv[1],framework='pt',device='cpu'); "
+        "print(json.dumps({'tensors':len(list(f.keys()))}))"
+    )
+    result = subprocess.run(
+        [python_bin, "-c", code, str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"Invalid safetensors {path}: {result.stderr}")
+    return path.stat().st_size, json.loads(result.stdout)["tensors"]
+
+
+def resolve_logs(patterns: list[str]) -> list[Path]:
+    paths: set[Path] = set()
+    for pattern in patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            paths.update(Path(match) for match in matches if Path(match).is_file())
+        elif Path(pattern).is_file():
+            paths.add(Path(pattern))
+    return sorted(paths)
+
+
+def copy_tree_filtered(source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in visible_files(source):
+        relative = path.relative_to(source)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
+def copy_output_tree_deduplicated(source: Path, destination: Path) -> dict:
+    """Copy outputs while including each preserved checkpoint exactly once."""
+    destination.mkdir(parents=True, exist_ok=True)
+    root_checkpoints = {
+        path.name
+        for path in source.glob("checkpoint-*")
+        if path.is_dir()
+    }
+    omitted_preserved_duplicates: set[str] = set()
+    recovered_pruned_checkpoints: set[str] = set()
+
+    for path in visible_files(source):
+        relative = path.relative_to(source)
+        target_relative = relative
+        if (
+            len(relative.parts) >= 2
+            and relative.parts[0] == "PRESERVED_CHECKPOINTS"
+            and relative.parts[1].startswith("checkpoint-")
+        ):
+            checkpoint = relative.parts[1]
+            if checkpoint in root_checkpoints:
+                omitted_preserved_duplicates.add(checkpoint)
+                continue
+            recovered_pruned_checkpoints.add(checkpoint)
+            target_relative = Path(checkpoint, *relative.parts[2:])
+
+        target = destination / target_relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            raise RuntimeError(
+                f"Checkpoint preservation collision at {target_relative}"
+            )
+        shutil.copy2(path, target)
+
+    report = {
+        "policy": (
+            "Each checkpoint is included once. A root checkpoint takes "
+            "precedence over its byte-identical PRESERVED_CHECKPOINTS clone; "
+            "a preserved checkpoint missing from the root is restored at the "
+            "OUTPUTS root."
+        ),
+        "root_checkpoints": sorted(root_checkpoints),
+        "omitted_duplicate_preserved_checkpoints": sorted(
+            omitted_preserved_duplicates
+        ),
+        "recovered_pruned_root_checkpoints": sorted(
+            recovered_pruned_checkpoints
+        ),
+    }
+    (destination / "CHECKPOINT_PRESERVATION_MAP.json").write_text(
+        json.dumps(report, indent=2) + "\n"
+    )
+    return report
+
+
+def write_dataset_inventory(data_dir: Path, destination: Path, config: dict) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    files = list(visible_files(data_dir))
+    images = [p for p in files if p.suffix.lower() in IMAGE_EXTS]
+    captions = [p for p in files if p.suffix.lower() in CAPTION_EXTS]
+    excluded = sorted(
+        str(p.relative_to(data_dir))
+        for p in data_dir.rglob("*")
+        if p.is_file() and p.name.startswith("._")
+    )
+    summary = {
+        "source_set_path": str(data_dir),
+        "image_count": len(images),
+        "caption_count": len(captions),
+        "file_count": len(files),
+        "max_train_steps": config.get("max_train_steps"),
+        "num_train_epochs": config.get("num_train_epochs"),
+        "repeats": config.get("repeats", 0),
+    }
+    (destination / "dataset_manifest.json").write_text(
+        json.dumps(summary, indent=2) + "\n"
+    )
+    with (destination / "sha256_inventory.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["relative_path", "size_bytes", "sha256"])
+        for path in files:
+            writer.writerow(
+                [path.relative_to(data_dir), path.stat().st_size, sha256(path)]
+            )
+    (destination / "excluded_files.txt").write_text(
+        ("\n".join(excluded) + "\n") if excluded else "None\n"
+    )
+    caption_root = destination / "captions"
+    caption_root.mkdir(parents=True, exist_ok=True)
+    for caption in captions:
+        target = caption_root / caption.relative_to(data_dir)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(caption, target)
+
+
+def copy_validation_prompt_library(config_dir: Path, destination: Path) -> Path:
+    candidates = [
+        config_dir / "validation-prompts.json",
+        config_dir / "validation-prompt-library.json",
+    ]
+    policy_path = config_dir / "TRAINING_READINESS_POLICY.json"
+    if policy_path.exists():
+        policy = json.loads(policy_path.read_text())
+        configured = policy.get("validation_prompt_library")
+        if configured:
+            candidates.insert(0, Path(configured))
+    source = next((path for path in candidates if path.is_file()), None)
+    if source is None:
+        raise RuntimeError(
+            "Job configuration does not provide a validation prompt library"
+        )
+    library = json.loads(source.read_text())
+    prompts = library.get("prompts")
+    if not isinstance(prompts, list) or not prompts:
+        raise RuntimeError("Validation prompt library has no prompts")
+    if any(not str(entry.get("id", "")).strip() for entry in prompts):
+        raise RuntimeError("Every validation prompt must have a non-empty id")
+    target = destination / "validation-prompt-library.json"
+    shutil.copy2(source, target)
+    return target
+
+
+def copy_validation_inputs(
+    validation_library: Path, data_dir: Path, destination: Path
+) -> list[Path]:
+    library = json.loads(validation_library.read_text())
+    if library.get("controls_are_relative_to") != "dataset":
+        raise RuntimeError(
+            "Validation controls must declare controls_are_relative_to=dataset"
+        )
+    dataset_root = data_dir.parent
+    copied: list[Path] = []
+    for prompt in library["prompts"]:
+        for key in ("control_image", "source_target"):
+            relative = Path(str(prompt.get(key, "")))
+            if (
+                not str(relative)
+                or relative.is_absolute()
+                or ".." in relative.parts
+            ):
+                raise RuntimeError(
+                    f"Validation prompt {prompt['id']} has invalid {key}"
+                )
+            source = dataset_root / relative
+            if not source.is_file() or source.suffix.lower() not in IMAGE_EXTS:
+                raise RuntimeError(
+                    f"Validation prompt {prompt['id']} is missing {key}: {source}"
+                )
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                shutil.copy2(source, target)
+                copied.append(target)
+    return copied
+
+
+def validation_seeds(library: dict) -> list[int]:
+    settings = library.get("fixed_settings") or library.get(
+        "fixed_generation_policy"
+    ) or {}
+    seeds = settings.get("seeds")
+    if not isinstance(seeds, list) or not seeds:
+        match = re.search(
+            r"\bseed\s+(\d+)\b", str(library.get("seed_policy", "")), re.I
+        )
+        seeds = [int(match.group(1))] if match else []
+    if not seeds or any(
+        isinstance(seed, bool) or not isinstance(seed, int) for seed in seeds
+    ):
+        raise RuntimeError("Validation prompt library has no valid fixed seeds")
+    return seeds
+
+
+def controlled_validation_samples(
+    output_dir: Path, destination: Path, validation_library: Path
+) -> list[Path]:
+    result_path = output_dir / "validation-result.json"
+    if not result_path.is_file():
+        raise RuntimeError("Final packet requires output/validation-result.json")
+    library = json.loads(validation_library.read_text())
+    result = json.loads(result_path.read_text())
+    prompts = {str(prompt["id"]) for prompt in library["prompts"]}
+    expected = {
+        (prompt_id, seed)
+        for prompt_id in prompts
+        for seed in validation_seeds(library)
+    }
+    renders = result.get("renders")
+    if not isinstance(renders, list):
+        raise RuntimeError("Validation result must contain a renders array")
+    destination.mkdir(parents=True, exist_ok=True)
+    seen: set[tuple[str, int]] = set()
+    copied: list[Path] = []
+    portable_renders: list[dict] = []
+    output_root = output_dir.resolve()
+    for index, render in enumerate(renders):
+        prompt_id = str(render.get("prompt_id", ""))
+        seed = render.get("seed")
+        key = (
+            (prompt_id, seed)
+            if isinstance(seed, int) and not isinstance(seed, bool)
+            else None
+        )
+        if key not in expected or key in seen:
+            raise RuntimeError(
+                f"Validation render {index} has an unexpected or duplicate prompt/seed"
+            )
+        if (
+            not isinstance(render.get("live_metadata"), dict)
+            or not render["live_metadata"]
+        ):
+            raise RuntimeError(f"Validation render {index} has no live metadata")
+        if isinstance(render.get("score"), bool) or not isinstance(
+            render.get("score"), (int, float)
+        ):
+            raise RuntimeError(f"Validation render {index} has no numeric score")
+        image_value = str(render.get("image_path", "")).strip()
+        source = Path(image_value)
+        if not source.is_absolute():
+            source = output_dir / source
+        source = source.resolve()
+        try:
+            source.relative_to(output_root)
+        except ValueError as error:
+            raise RuntimeError(
+                f"Validation render {index} is outside the output directory"
+            ) from error
+        if not source.is_file() or source.suffix.lower() not in IMAGE_EXTS:
+            raise RuntimeError(f"Validation render {index} image is missing or invalid")
+        target = (
+            destination
+            / f"{safe_name(prompt_id)}--seed-{seed}{source.suffix.lower()}"
+        )
+        shutil.copy2(source, target)
+        portable = dict(render)
+        portable["image_path"] = f"VALIDATION_SAMPLES/{target.name}"
+        portable_renders.append(portable)
+        copied.append(target)
+        seen.add(key)
+    if seen != expected:
+        missing = sorted(expected - seen)
+        raise RuntimeError(
+            f"Validation result is missing required prompt/seed renders: {missing}"
+        )
+    portable_result = dict(result)
+    portable_result["renders"] = portable_renders
+    atomic_json(destination / "validation-result.json", portable_result)
+    return copied
+
+
+def copy_validation_samples(output_dir: Path, destination: Path) -> list[Path]:
+    destination.mkdir(parents=True, exist_ok=True)
+    samples: list[Path] = []
+    for path in visible_files(output_dir):
+        lowered = "/".join(part.lower() for part in path.parts)
+        if path.suffix.lower() in IMAGE_EXTS and (
+            "validation" in lowered or "sample" in lowered
+        ):
+            target = destination / path.name
+            if target.exists():
+                target = destination / f"{len(samples):03d}-{path.name}"
+            shutil.copy2(path, target)
+            samples.append(target)
+    if not samples:
+        (destination / "NO_VALIDATION_SAMPLES.txt").write_text(
+            "No validation/sample images were produced by this run.\n"
+        )
+    return samples
+
+
+def packet_output_inventory(output_root: Path) -> None:
+    rows = []
+    for path in visible_files(output_root):
+        rows.append(
+            [
+                path.relative_to(output_root),
+                path.stat().st_size,
+                dt.datetime.fromtimestamp(
+                    path.stat().st_mtime, dt.timezone.utc
+                ).isoformat(),
+                sha256(path),
+            ]
+        )
+    with (output_root / "FILE_INVENTORY_SHA256.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["relative_path", "size_bytes", "mtime_utc", "sha256"])
+        writer.writerows(rows)
+
+
+def zip_packet(folder: Path, target: Path) -> None:
+    temporary = target.with_suffix(target.suffix + ".partial")
+    if temporary.exists():
+        temporary.unlink()
+    with zipfile.ZipFile(
+        temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1,
+        allowZip64=True
+    ) as archive:
+        for path in visible_files(folder):
+            archive.write(path, Path(folder.name) / path.relative_to(folder))
+    temporary.replace(target)
+
+
+def verify_zip(
+    path: Path, python_bin: str, require_validation_samples: bool = False
+) -> None:
+    with zipfile.ZipFile(path) as archive:
+        bad = archive.testzip()
+        if bad:
+            raise RuntimeError(f"Corrupt ZIP member: {bad}")
+        names = archive.namelist()
+        if any(Path(name).name.startswith("._") for name in names):
+            raise RuntimeError("AppleDouble member found")
+        roots = {name.split("/", 1)[0] for name in names}
+        if len(roots) != 1:
+            raise RuntimeError("Packet must contain exactly one root folder")
+        root = next(iter(roots))
+        top = {
+            name[len(root) + 1 :].split("/", 1)[0]
+            for name in names
+            if name.startswith(root + "/")
+        }
+        missing = REQUIRED - top
+        if missing:
+            raise RuntimeError(f"Missing packet entries: {sorted(missing)}")
+        required_members = (
+            f"{root}/CONFIG/validation-prompt-library.json",
+            f"{root}/DATASET/dataset_manifest.json",
+            f"{root}/DATASET/sha256_inventory.csv",
+        )
+        for member in required_members:
+            if member not in names:
+                raise RuntimeError(f"Missing packet member: {member}")
+        validation = json.loads(
+            archive.read(f"{root}/CONFIG/validation-prompt-library.json")
+        )
+        for prompt in validation["prompts"]:
+            for key in ("control_image", "source_target"):
+                relative = Path(str(prompt.get(key, "")))
+                if (
+                    not str(relative)
+                    or relative.is_absolute()
+                    or ".." in relative.parts
+                ):
+                    raise RuntimeError(
+                        f"Validation prompt {prompt['id']} has invalid {key}"
+                    )
+                member = f"{root}/DATASET/{relative.as_posix()}"
+                if member not in names:
+                    raise RuntimeError(
+                        f"Missing mapped validation input for {prompt['id']}: {member}"
+                    )
+        sample_names = [
+            name for name in names
+            if name.startswith(f"{root}/VALIDATION_SAMPLES/")
+            and Path(name).suffix.lower() in IMAGE_EXTS
+        ]
+        if require_validation_samples:
+            result_member = f"{root}/VALIDATION_SAMPLES/validation-result.json"
+            if result_member not in names:
+                raise RuntimeError("Final packet requires validation-result.json")
+            result = json.loads(archive.read(result_member))
+            expected = {
+                (str(prompt["id"]), seed)
+                for prompt in validation["prompts"]
+                for seed in validation_seeds(validation)
+            }
+            actual: set[tuple[str, int]] = set()
+            for index, render in enumerate(result.get("renders", [])):
+                key = (str(render.get("prompt_id", "")), render.get("seed"))
+                if key not in expected or key in actual:
+                    raise RuntimeError(
+                        f"Validation result render {index} has an unexpected or duplicate prompt/seed"
+                    )
+                image_path = str(render.get("image_path", ""))
+                if image_path.startswith("/") or ".." in Path(image_path).parts:
+                    raise RuntimeError(
+                        f"Validation result render {index} has an unsafe image path"
+                    )
+                image_member = f"{root}/{image_path}"
+                if (
+                    image_member not in names
+                    or Path(image_member).suffix.lower() not in IMAGE_EXTS
+                ):
+                    raise RuntimeError(
+                        f"Validation result render {index} image is absent"
+                    )
+                if (
+                    not isinstance(render.get("live_metadata"), dict)
+                    or not render["live_metadata"]
+                ):
+                    raise RuntimeError(
+                        f"Validation result render {index} has no live metadata"
+                    )
+                if isinstance(render.get("score"), bool) or not isinstance(
+                    render.get("score"), (int, float)
+                ):
+                    raise RuntimeError(
+                        f"Validation result render {index} has no numeric score"
+                    )
+                actual.add(key)
+            if actual != expected or len(sample_names) < len(expected):
+                raise RuntimeError(
+                    "Final packet does not contain the complete fixed validation matrix"
+                )
+        if not any(
+            name.startswith(f"{root}/DATASET/captions/")
+            and Path(name).suffix.lower() in CAPTION_EXTS
+            for name in names
+        ):
+            raise RuntimeError("Packet does not include caption sidecars")
+        final_names = [
+            name for name in names
+            if name.startswith(f"{root}/OUTPUTS/")
+            and name.endswith("pytorch_lora_weights.safetensors")
+            and "/checkpoint-" not in name
+        ]
+        if len(final_names) != 1:
+            raise RuntimeError("Expected one final LoRA in OUTPUTS")
+        with tempfile.TemporaryDirectory() as temp:
+            extracted = Path(archive.extract(final_names[0], temp))
+            validate_lora(extracted, python_bin)
+
+
+def build_one(
+    spec: dict, output_root: Path, ledger_path: Path, ledger: dict,
+    python_bin: str, include_existing: bool
+) -> dict | None:
+    for key in ("run_name", "set_name", "config_dir", "data_dir", "output_dir"):
+        if not spec.get(key):
+            raise RuntimeError(f"Run spec missing {key}")
+    config_dir = Path(spec["config_dir"])
+    data_dir = Path(spec["data_dir"])
+    source_output = Path(spec["output_dir"])
+    for path in (config_dir, data_dir, source_output):
+        if not path.exists():
+            raise RuntimeError(f"Required path does not exist: {path}")
+    final = source_output / "pytorch_lora_weights.safetensors"
+    final_size, tensor_count = validate_lora(final, python_bin)
+    final_hash = sha256(final)
+    identity = f"{spec['run_name']}:{final_hash}"
+    prior = next(
+        (entry for entry in ledger["packets"] if entry["identity"] == identity),
+        None,
+    )
+    if prior and not include_existing:
+        print(f"SKIP EXISTING {spec['run_name']} {prior['packet_path']}")
+        return None
+
+    today = dt.date.today().isoformat()
+    folder_name = (
+        f"{safe_name(spec['run_name'])}__{safe_name(spec['set_name'])}"
+        f"__{today}__M4-return-packet"
+    )
+    folder = output_root / folder_name
+    packet = output_root / f"{folder_name}.zip"
+    if folder.exists():
+        shutil.rmtree(folder)
+    if packet.exists() and not prior:
+        raise RuntimeError(f"Refusing to overwrite untracked packet: {packet}")
+    folder.mkdir(parents=True)
+    for name in ("CONFIG", "ENVIRONMENT", "DATASET", "LOGS", "OUTPUTS",
+                 "VALIDATION_SAMPLES"):
+        (folder / name).mkdir()
+
+    copy_tree_filtered(config_dir, folder / "CONFIG")
+    launcher = spec.get("launcher_command", "simpletuner train")
+    reproducible_launcher = (
+        f"cd {shlex.quote(str(config_dir))} && {launcher}"
+        if not launcher.lstrip().startswith("cd ")
+        else launcher
+    )
+    (folder / "CONFIG" / "launcher-command.txt").write_text(
+        reproducible_launcher + "\n"
+    )
+    (folder / "CONFIG" / "working-directory.txt").write_text(
+        str(config_dir) + "\n"
+    )
+    captured_env = {
+        key: os.environ[key]
+        for key in RELEVANT_TRAINING_ENV
+        if key in os.environ
+    }
+    env_vars = {**captured_env, **spec.get("environment_variables", {})}
+    (folder / "CONFIG" / "environment-variables.json").write_text(
+        json.dumps(env_vars, indent=2) + "\n"
+    )
+    config = load_config(config_dir)
+    validation_library = copy_validation_prompt_library(
+        config_dir, folder / "CONFIG"
+    )
+
+    simpletuner_root = config_dir
+    while simpletuner_root != simpletuner_root.parent:
+        if (simpletuner_root / ".git").exists():
+            break
+        simpletuner_root = simpletuner_root.parent
+    environment = {
+        "machine": platform.platform(),
+        "python": sys.version,
+        "simpletuner_git_commit": command_output(
+            ["git", "rev-parse", "HEAD"], simpletuner_root
+        ) if (simpletuner_root / ".git").exists() else "unknown",
+        "torch_and_mps": command_output(
+            [python_bin, "-c",
+             "import torch; print('torch='+torch.__version__); "
+             "print('mps_built='+str(torch.backends.mps.is_built())); "
+             "print('mps_available='+str(torch.backends.mps.is_available()))"]
+        ),
+    }
+    (folder / "ENVIRONMENT" / "environment.json").write_text(
+        json.dumps(environment, indent=2) + "\n"
+    )
+    (folder / "ENVIRONMENT" / "pip-freeze.txt").write_text(
+        command_output([python_bin, "-m", "pip", "freeze"]) + "\n"
+    )
+
+    write_dataset_inventory(data_dir, folder / "DATASET", config)
+    copy_validation_inputs(validation_library, data_dir, folder / "DATASET")
+    preflight_summary, preflight_sha256 = resolve_preflight_summary(
+        spec, config_dir
+    )
+    quality_classification, quality_defects = classify_run(preflight_summary)
+    preflight_status = "not available"
+    diagnostic_only = quality_classification == "diagnostic/rerun candidate"
+    if preflight_summary:
+        shutil.copy2(
+            preflight_summary,
+            folder / "DATASET" / "all-datasets-preflight-summary.json",
+        )
+        preflight = json.loads(preflight_summary.read_text())
+        job_count = int(preflight.get("job_count", 0))
+        caption_ready = int(preflight.get("caption_structure_ready", 0))
+        config_ready = int(preflight.get("config_ready", 0))
+        preflight_status = (
+            f"{caption_ready}/{job_count} six-field caption-ready; "
+            f"{config_ready}/{job_count} fixed-validation-config-ready; "
+            f"SHA-256 {preflight_sha256}"
+        )
+    logs = resolve_logs(spec.get("log_files", []))
+    warning_lines: list[str] = []
+    for log in logs:
+        shutil.copy2(log, folder / "LOGS" / log.name)
+        for line in log.read_text(errors="replace").splitlines():
+            if re.search(r"warning|error|exception|traceback", line, re.I):
+                warning_lines.append(f"{log.name}: {line}")
+    (folder / "LOGS" / "warnings-errors.txt").write_text(
+        ("\n".join(warning_lines) + "\n") if warning_lines else "None found\n"
+    )
+
+    copy_output_tree_deduplicated(source_output, folder / "OUTPUTS")
+    packet_output_inventory(folder / "OUTPUTS")
+    if spec.get("require_validation_samples"):
+        samples = controlled_validation_samples(
+            source_output, folder / "VALIDATION_SAMPLES", validation_library
+        )
+    else:
+        samples = copy_validation_samples(source_output, folder / "VALIDATION_SAMPLES")
+
+    start = min((p.stat().st_mtime for p in logs), default=final.stat().st_ctime)
+    end = final.stat().st_mtime
+    training_zip = spec.get("training_zip", "not recorded")
+    summary = (
+        "# RUN_SUMMARY\n\n"
+        f"- Run name: {spec['run_name']}\n"
+        f"- Set/concept name: {spec['set_name']}\n"
+        "- Machine: M4 Mac\n"
+        f"- Start time: {dt.datetime.fromtimestamp(start).astimezone().isoformat()}\n"
+        f"- End time: {dt.datetime.fromtimestamp(end).astimezone().isoformat()}\n"
+        "- Status: completed\n"
+        f"- Quality classification: {quality_classification}\n"
+        f"- Batch preflight: {preflight_status}\n"
+        f"- Quality defects: {'; '.join(quality_defects) if quality_defects else 'None'}\n"
+        f"- Output folder on M4: {source_output}\n"
+        f"- Training ZIP used: {training_zip}\n"
+        f"- Dataset subfolder used: {data_dir}\n"
+        f"- Base model: {config.get('pretrained_model_name_or_path', 'unknown')}\n"
+        f"- LoRA type/rank/alpha: LoRA / {config.get('lora_rank', 'unknown')} / "
+        f"{config.get('lora_alpha', 'unknown')}\n"
+        f"- Steps / epochs / repeats: {config.get('max_train_steps', 'unknown')} / "
+        f"{config.get('num_train_epochs', 'unknown')} / "
+        f"{config.get('repeats', 0)}\n"
+        f"- Final LoRA bytes/tensors/SHA256: {final_size} / {tensor_count} / "
+        f"{final_hash}\n"
+        f"- Notes/errors: {spec.get('notes', 'No fatal errors recorded.')}\n"
+    )
+    (folder / "RUN_SUMMARY.md").write_text(summary)
+    trigger = spec.get("trigger", "not recorded")
+    eval_notes = (
+        "# EVALUATION_NOTES\n\n"
+        f"**Quality classification:** {quality_classification}.\n\n"
+        + (
+            "The batch preflight did not pass the required structured-caption "
+            "and fixed-validation configuration gates. Preserve this output for "
+            "comparison, but do not treat it as the definitive captioned rerun.\n\n"
+            if diagnostic_only else
+            "The batch preflight passed the structured-caption and fixed-validation gates.\n\n"
+        )
+        +
+        "## Best checkpoint to test first\n\n"
+        "Test the final LoRA first. If it appears overfit, compare checkpoint-1000.\n\n"
+        "## Validation samples\n\n"
+        "| Sample file | Checkpoint | Prompt name | Notes |\n"
+        "|---|---:|---|---|\n"
+        + (
+            "\n".join(f"| {p.name} | unknown | unknown | Generated by run |"
+                      for p in samples)
+            if samples else
+            "| None | — | — | No validation samples were produced |"
+        )
+        + "\n\n## Known failures\n\n"
+        + ("No validation samples were produced; visual quality is unverified.\n"
+           if not samples else "None recorded.\n")
+        + "\n## Does this supersede an older LoRA?\n\n"
+        "Not established; treat as a new candidate unless separately documented.\n\n"
+        "## Suggested Draw Things test settings\n\n"
+        f"- Base model: {config.get('pretrained_model_name_or_path', 'SDXL')}\n"
+        "- LoRA strength range: 0.6–1.0\n"
+        "- Steps: 24–35\n"
+        "- CFG: 5–7\n"
+        "- Sampler: DPM++ 2M Karras\n"
+        f"- Trigger phrase: {trigger}\n"
+    )
+    (folder / "EVALUATION_NOTES.md").write_text(eval_notes)
+
+    zip_packet(folder, packet)
+    verify_zip(
+        packet,
+        python_bin,
+        require_validation_samples=bool(spec.get("require_validation_samples")),
+    )
+    packet_hash = sha256(packet)
+    record = {
+        "identity": identity,
+        "run_name": spec["run_name"],
+        "set_name": spec["set_name"],
+        "final_lora_sha256": final_hash,
+        "packet_sha256": packet_hash,
+        "packet_path": str(packet),
+        "packaged_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "status": "packaged",
+    }
+    ledger["packets"] = [
+        entry for entry in ledger["packets"] if entry["identity"] != identity
+    ]
+    ledger["packets"].append(record)
+    atomic_json(ledger_path, ledger)
+    shutil.rmtree(folder)
+    print(f"PACKAGED {spec['run_name']} {packet}")
+    return record
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--spec", required=True, type=Path)
+    parser.add_argument("--output-root", required=True, type=Path)
+    parser.add_argument("--ledger", required=True, type=Path)
+    parser.add_argument("--python-bin", default=sys.executable)
+    parser.add_argument("--include-existing", action="store_true")
+    args = parser.parse_args()
+    specs = json.loads(args.spec.read_text())
+    ledger = (
+        json.loads(args.ledger.read_text())
+        if args.ledger.exists() else {"version": 1, "packets": []}
+    )
+    args.output_root.mkdir(parents=True, exist_ok=True)
+    built = 0
+    for spec in specs:
+        if build_one(
+            spec, args.output_root, args.ledger, ledger, args.python_bin,
+            args.include_existing
+        ):
+            built += 1
+    print(f"DONE built={built} total_specs={len(specs)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

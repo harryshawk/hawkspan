@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "node_id": "m2-codex",
+  "peer": {
+    "node_id": "m4-codex",
+    "user": "workeruser",
+    "thread_id": "replace-with-peer-task-id",
+    "codex_command": "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "allow_remote_wake": true,
+    "remote_node": "/Users/workeruser/.local/bin/node",
+    "primary_host": "192.0.2.11",
+    "fallback_host": "198.51.100.11",
+    "ssh_identity": "/Users/controlleruser/.ssh/hawkspan_peer",
+    "remote_inbox": "/Users/workeruser/.hawkspan/inbox",
+    "remote_artifacts": "/Users/workeruser/.hawkspan/artifacts",
+    "remote_audit": "/Users/workeruser/.hawkspan/audit"
+  },
+  "training": {
+    "process_match": "simpletuner|train.py|accelerate launch",
+    "allow_start": false,
+    "allow_stop": false,
+    "minimum_checkpoint_retention": 10
+  },
+  "packet_receiver": {
+    "staging_root": "/Users/controlleruser/HawkSpan/Incoming",
+    "destination_root": "/Volumes/ExternalVolume/HawkSpan/Artifacts",
+    "allow_remove_verified_staging": true,
+    "authorization_evidence": "The owner authorized verified artifact intake and removal of verified staging copies."
+  }
+}

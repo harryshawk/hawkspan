@@ -1,0 +1,4 @@
+interface:
+  display_name: "HawkSpan Link Logs"
+  short_description: "Review live HawkSpan link and route evidence"
+  default_prompt: "Use $hawkspan-link-logs to review the live Thunderbolt and Ethernet connection logs."

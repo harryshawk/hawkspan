@@ -109,15 +109,10 @@ explicit authorization it would require through a core HawkSpan command.
 
 ## Reviewed application quick starts
 
-An installed plugin may declare named `presets` in its manifest. These are
-sanitized quick starts, not application configuration. A preset may contain
-only `role_profile`, `node_role`, approved HawkSpan `features`, and an explicit
-`enabled_operations` list drawn from that same manifest. If it restricts peer
-tools, every tool must be an explicit generated tool belonging to that plugin.
-A preset cannot enable HawkSpan's broad command tool. Its peer-tool lists may
-contain same-plugin operations plus only HawkSpan's fixed safe core coordination
-subset: `create_job`, `update_job_status`, `list_jobs`, and
-`receive_artifacts`. Arbitrary core tools are rejected before plugin activation.
+An installed plugin may declare named `presets` in its manifest. In the first
+release these quick starts contain only an explicit `enabled_operations` list
+drawn from that same manifest. They select package operations; they do not
+replace or reconfigure HawkSpan-D control behavior.
 
 Presets can never contain or change connections, credentials, paths, tokens,
 local-control settings, plugin configuration, another plugin's entry, or
@@ -132,11 +127,9 @@ Use the four MCP tools in this order:
 2. `preview_application_preset({"preset_id":"plugin-id/preset-id"})` shows
    the exact approved changes and preserved categories without writing.
 3. `apply_application_preset({"preset_id":"plugin-id/preset-id","confirm":true})`
-   atomically replaces role/capability overrides and narrows that plugin's
-   enabled operations. Restart HawkSpan afterward.
+   stores that plugin's enabled operations. Restart HawkSpan afterward.
 4. `reset_application_preset({"preset_id":"plugin-id/preset-id","confirm":true})`
-   removes role/capability overrides and that plugin's operation restriction,
-   returning those settings to inherited defaults. It preserves private and
+   removes that plugin's operation restriction. It preserves private and
    installation data and also requires a restart.
 
 Preset IDs remain stable while the plugin keeps its manifest ID and preset ID

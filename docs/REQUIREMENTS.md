@@ -1,37 +1,21 @@
 # Requirements register
 
-## Explicit product requirements
+## First integration
 
-- R1: Preserve agent-to-agent coordination as a core mode.
-- R2: Preserve one agent controlling software on the peer as a core mode.
-- R3: Prefer Thunderbolt Bridge and fall back to private Ethernet.
-- R4: State the same-owner, high-trust security posture candidly.
-- R5: Distinguish implemented security from optional hardening.
-- R6: Treat inference offload as a use case, not the product definition.
-- R7: Retain durable messages, acknowledgements, jobs, wakeups, and verified
-  artifacts.
-- R8: Provide human-first and agent-first installation instructions.
-- R9: Provide Gherkin/BDD acceptance behavior, regression tests, and layered
-  parity, fault, security, and install/isolation checks.
-- R10: Use MIT License as the working license.
-- R11: Remove personal names, local paths, private addresses, hostnames, task
-  IDs, private workload data and configuration, and operational fingerprints.
-- R12: Preserve private-predecessor provenance without using the unauthorized clean-room
-  output as code or architecture input.
-- R13: Support generic optional application plugins without
-  application-specific behavior in the core.
-- R14: Preserve symmetric controller/worker behavior by default while allowing
-  configuration to narrow node roles, origins, operations, and feature flags.
-- R15: Enable the HTML client by default on `127.0.0.1` only, with a
-  user-configurable local port and disable switch.
-- R16: Keep namespace, state, service, SSH, install, and uninstall behavior
-  isolated from other peer-link software.
+- Preserve HawkSpan-D's durable messages, acknowledgements, jobs, wakeups,
+  universal command control, verified artifacts, SSH routing, trainer tools,
+  and tests.
+- Use HawkSpan's own sanitized state, configuration, examples, and public
+  namespace without changing HawkSpan-D behavior.
+- Add a loopback-only HTML surface that calls the same MCP tool map.
+- Add optional validated application packages and durable package-run status.
+- Limit first-release presets to selecting operations from their own package.
+- Keep peer addresses, paths, identities, and other machine settings in a
+  protected local environment file, never in the public repository.
+- Test HawkSpan-D compatibility once and test only HawkSpan's added environment,
+  package, preset, and web behavior.
 
-## Release constraints
+## Deferred
 
-- Private predecessor originals remain untouched.
-- The private baseline and evidence are not public-release artifacts.
-- No public push occurs until history and tree privacy scans pass.
-- Functional parity applies to the general coordination/control core. Sanitized
-  application plugins may ship publicly; installation-specific values,
-  credentials, datasets, models, state, and generated outputs do not.
+See `docs/DEFERRED-FEATURES.md`. Deferred behavior is not a first-integration
+requirement and must not be presented as implemented.
