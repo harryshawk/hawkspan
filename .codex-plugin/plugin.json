@@ -1,6 +1,6 @@
 {
   "name": "hawkspan",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Durable task messaging, artifact transfer, and training coordination between trusted Macs.",
   "author": {
     "name": "HawkSpan Contributors"

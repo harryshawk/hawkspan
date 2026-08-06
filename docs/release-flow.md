@@ -1,5 +1,15 @@
 # Release Flow
 
+## 2026-08-06 - HawkSpan 0.3.0 candidate
+
+- Request: Document operation with or without the optional Codex Personal plugin and preserve the existing standalone runtime behavior.
+- Source branch: `public-v0.3.0`, rooted directly at public `v0.2.0`.
+- Staging repository: `harryshawk/hawkspan-clean-staging`.
+- Production repository: `harryshawk/hawkspan`.
+- Production branch and proposed tag: `main`, `v0.3.0`.
+- Scope: Documentation, plugin version metadata, changelog, and this release-flow entry only; no runtime implementation changes.
+- Production approval: Pending explicit approval after staging verification.
+
 ## 2026-08-06 - HawkSpan 0.2.0 public release
 
 - Request: Publish the completed HawkSpan-D candidate as a new public version while preserving the original public release.

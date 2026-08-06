@@ -1,11 +1,12 @@
 # HawkSpan-D
 
-A Codex plugin for durable coordination between two trusted Macs.
+Durable coordination between two trusted Macs, usable either as standalone
+software or as an optional Codex Personal plugin.
 
-This source tree is HawkSpan 0.2.0. The original 0.1.0 release remains
+This source tree is HawkSpan 0.3.0. The original 0.1.0 release remains
 available under its existing `v0.1.0` tag. See [CHANGELOG.md](CHANGELOG.md).
 
-The plugin provides:
+HawkSpan provides:
 
 - SQLite-backed immutable message, job, artifact, and audit records;
 - acknowledged task messages;
@@ -35,6 +36,17 @@ The plugin provides:
   without blocking on macOS Documents privacy/FileProvider access;
 - five-minute autonomous M4 packet sending and M2 packet receiving that do not
   consume Codex heartbeats or tokens.
+
+## Run with or without the Codex plugin
+
+Both modes run the same HawkSpan release, services, queues, state, security
+checks, and MCP implementation. Standalone mode provides the command-line and
+local browser control surfaces without registering HawkSpan in Codex. The
+optional Personal plugin adds automatic Codex discovery of HawkSpan's MCP tools
+and bundled skills; it does not replace or reimplement the standalone runtime.
+
+See [Running HawkSpan with or without the Codex plugin](docs/CODEX-PLUGIN-OPTIONS.md)
+for setup choices, advantages, and tradeoffs.
 
 Runtime state defaults to `~/.hawkspan`. Configuration is read from
 `~/.hawkspan/config.json`. `~/.hawkspan/installed-revision.json` is the sole

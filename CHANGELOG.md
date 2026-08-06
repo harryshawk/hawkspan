@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 - 2026-08-06
+
+- Documented standalone HawkSpan operation and the optional Codex Personal
+  plugin mode, including their advantages, tradeoffs, and shared runtime.
+- Clarified that the Codex Personal plugin and HawkSpan application plugins are
+  separate extension mechanisms.
+
 ## 0.2.0 - 2026-08-06
 
 - Added one durable SimpleTuner lifecycle queue spanning training, packaging,
