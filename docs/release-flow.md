@@ -8,7 +8,7 @@
 - Production repository: `harryshawk/hawkspan`.
 - Production branch and proposed tag: `main`, `v0.3.0`.
 - Scope: Documentation, plugin version metadata, changelog, and this release-flow entry only; no runtime implementation changes.
-- Production approval: Pending explicit approval after staging verification.
+- Production approval: Explicitly granted in the controlling Codex task after staging commit `d3c2e04429c791fe4cfef20c9eab4505f93ecf71` passed the complete 27-test release gate from a fresh clone of the staging repository.
 
 ## 2026-08-06 - HawkSpan 0.2.0 public release
 
