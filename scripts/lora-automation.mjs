@@ -1705,7 +1705,7 @@ function drawThingsPlan(jobId) {
   fs.mkdirSync(root, { recursive: true });
   const planPath = path.join(root, `${jobId}-${Date.now()}-draw-things-plan.json`);
   atomicJson(planPath, plan);
-  return { plan_path: planPath, plan };
+  return { plan_path: planPath, plan_sha256: sha256(planPath), plan };
 }
 
 function safeFileStem(value) {
@@ -1715,7 +1715,7 @@ function safeFileStem(value) {
     .slice(0, 120) || "render";
 }
 
-function ingestControlledValidationResult(revision, result) {
+function ingestControlledValidationResult(revision, result, drawThingsPlanDocument) {
   if (!Array.isArray(result.renders)) return null;
   const validationPlanPath = path.resolve(String(result.validation_plan_path || ""));
   if (!validationPlanPath || !fs.existsSync(validationPlanPath)) {
@@ -1732,6 +1732,24 @@ function ingestControlledValidationResult(revision, result) {
     throw new Error("validation plan does not match this revision");
   }
   const fixed = plan.fixed_settings || {};
+  if (JSON.stringify(result.settings || null) !== JSON.stringify(fixed)) {
+    throw new Error("validation settings differ from the bound fixed settings");
+  }
+  if (drawThingsPlanDocument) {
+    if (result.checkpoint !== drawThingsPlanDocument.selected_checkpoint) {
+      throw new Error("validation checkpoint differs from the bound Draw Things plan");
+    }
+    if (path.resolve(String(result.lora_path || "")) !==
+        path.resolve(String(drawThingsPlanDocument.lora_path || "")) ||
+        result.lora_sha256 !== drawThingsPlanDocument.lora_sha256) {
+      throw new Error("validation LoRA differs from the bound Draw Things plan");
+    }
+    if (validationPlanPath !==
+        path.resolve(String(drawThingsPlanDocument.validation_plan_path || "")) ||
+        sha256(validationPlanPath) !== drawThingsPlanDocument.validation_plan_sha256) {
+      throw new Error("validation plan differs from the bound Draw Things plan");
+    }
+  }
   const seeds = Array.isArray(fixed.seeds) ? fixed.seeds.map(Number) : [];
   if (!seeds.length || seeds.some((seed) => !Number.isInteger(seed))) {
     throw new Error("validation plan has no fixed integer seeds");
@@ -1813,6 +1831,22 @@ function ingestDrawThings(args) {
   const result = readJson(resultPath, null);
   if (!result) throw new Error(`Draw Things result is missing or invalid: ${resultPath}`);
   const problems = [];
+  const drawThingsPlanPath = path.resolve(String(result.draw_things_plan_path || ""));
+  let drawThingsPlanDocument = null;
+  if (!path.isAbsolute(String(result.draw_things_plan_path || "")) ||
+      !fs.existsSync(drawThingsPlanPath) ||
+      !fs.statSync(drawThingsPlanPath).isFile()) {
+    problems.push("draw_things_plan_path must be an existing absolute file");
+  } else {
+    const actualPlanSha256 = sha256(drawThingsPlanPath);
+    if (actualPlanSha256 !== result.draw_things_plan_sha256) {
+      problems.push("Draw Things plan SHA-256 mismatch");
+    }
+    drawThingsPlanDocument = readJson(drawThingsPlanPath, null);
+    if (!drawThingsPlanDocument || drawThingsPlanDocument.job_id !== args.job_id) {
+      problems.push("Draw Things plan does not match job_id");
+    }
+  }
   const loraPath = path.resolve(String(result.lora_path || ""));
   if (!result.import_succeeded) problems.push("Draw Things import did not succeed");
   if (!String(result.imported_name || "").trim()) problems.push("missing imported_name");
@@ -1832,6 +1866,23 @@ function ingestDrawThings(args) {
   if (!String(result.application_version || "").trim()) {
     problems.push("missing Draw Things application_version");
   }
+  if (drawThingsPlanDocument) {
+    if (path.resolve(String(drawThingsPlanDocument.lora_path || "")) !== loraPath ||
+        drawThingsPlanDocument.lora_sha256 !== result.lora_sha256) {
+      problems.push("LoRA differs from the bound Draw Things plan");
+    }
+    if (result.imported_name !== drawThingsPlanDocument.import?.imported_name) {
+      problems.push("imported_name differs from the bound Draw Things plan");
+    }
+    if (result.base_model !== drawThingsPlanDocument.import?.expected_base_model) {
+      problems.push("base_model differs from the bound Draw Things plan");
+    }
+    if (path.resolve(String(result.validation_plan_path || "")) !==
+        path.resolve(String(drawThingsPlanDocument.validation_plan_path || "")) ||
+        result.validation_plan_sha256 !== drawThingsPlanDocument.validation_plan_sha256) {
+      problems.push("validation plan differs from the bound Draw Things plan");
+    }
+  }
   if (result.converted) {
     if (!String(result.conversion_tool || "").trim() ||
         !String(result.conversion_version || "").trim() ||
@@ -1845,6 +1896,8 @@ function ingestDrawThings(args) {
   }
   const entry = {
     result_path: resultPath,
+    draw_things_plan_path: drawThingsPlanPath,
+    draw_things_plan_sha256: result.draw_things_plan_sha256,
     imported_name: result.imported_name,
     application_version: result.application_version,
     base_model: result.base_model,
@@ -1866,7 +1919,11 @@ function ingestDrawThings(args) {
       item.imported_name !== entry.imported_name),
     entry,
   ];
-  const controlledValidation = ingestControlledValidationResult(revision, result);
+  const controlledValidation = ingestControlledValidationResult(
+    revision,
+    result,
+    drawThingsPlanDocument,
+  );
   if (controlledValidation) {
     revision.validation ||= [];
     revision.validation = [

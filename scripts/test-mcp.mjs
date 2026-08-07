@@ -722,12 +722,17 @@ assert.equal(
   "test-model",
 );
 const drawThingsPlanDoc = drawThingsPlanResult.result.structuredContent.plan;
+const drawThingsPlanPath = drawThingsPlanResult.result.structuredContent.plan_path;
+const drawThingsPlanSha256 = drawThingsPlanResult.result.structuredContent.plan_sha256;
 const drawThingsResultPath = path.join(testRoot, "draw-things-result.json");
-fs.writeFileSync(drawThingsResultPath, `${JSON.stringify({
+const drawThingsResult = {
   import_succeeded: true,
   imported_name: "cap-test checkpoint-400",
   application_version: "test-version",
-  base_model: "Sieddi/cyberrealistic-pony-v180-coreshift",
+  base_model: "test-model",
+  draw_things_plan_path: drawThingsPlanPath,
+  draw_things_plan_sha256: drawThingsPlanSha256,
+  checkpoint: drawThingsPlanDoc.selected_checkpoint,
   lora_path: drawThingsPlanDoc.lora_path,
   lora_sha256: drawThingsPlanDoc.lora_sha256,
   validation_plan_path: drawThingsPlanDoc.validation_plan_path,
@@ -744,13 +749,75 @@ fs.writeFileSync(drawThingsResultPath, `${JSON.stringify({
     }))),
   converted: false,
   notes: "synthetic direct import",
-})}\n`);
+};
+fs.writeFileSync(drawThingsResultPath, `${JSON.stringify(drawThingsResult)}\n`);
+const unboundDrawThingsResultPath = path.join(testRoot, "unbound-draw-things-result.json");
+fs.writeFileSync(
+  unboundDrawThingsResultPath,
+  `${JSON.stringify({ ...drawThingsResult, base_model: "wrong-model" })}\n`,
+);
+const unboundDrawThingsIngest = await tool("lora_automation", {
+  action: "draw-things-ingest",
+  job_id: "cap-test",
+  result_path: unboundDrawThingsResultPath,
+});
+assert.equal(unboundDrawThingsIngest.result.isError, true);
+assert.match(
+  unboundDrawThingsIngest.result.content[0].text,
+  /base_model differs from the bound Draw Things plan/,
+);
+const alternateLoraPath = path.join(testRoot, "alternate-lora.safetensors");
+fs.writeFileSync(alternateLoraPath, "self-consistent but unselected LoRA\n");
+const alternateLoraSha256 = crypto.createHash("sha256")
+  .update(fs.readFileSync(alternateLoraPath))
+  .digest("hex");
+const alternateLoraResultPath = path.join(testRoot, "alternate-lora-result.json");
+fs.writeFileSync(
+  alternateLoraResultPath,
+  `${JSON.stringify({
+    ...drawThingsResult,
+    lora_path: alternateLoraPath,
+    lora_sha256: alternateLoraSha256,
+  })}\n`,
+);
+const alternateLoraIngest = await tool("lora_automation", {
+  action: "draw-things-ingest",
+  job_id: "cap-test",
+  result_path: alternateLoraResultPath,
+});
+assert.equal(alternateLoraIngest.result.isError, true);
+assert.match(
+  alternateLoraIngest.result.content[0].text,
+  /LoRA differs from the bound Draw Things plan/,
+);
+const changedSettingsResultPath = path.join(testRoot, "changed-settings-result.json");
+fs.writeFileSync(
+  changedSettingsResultPath,
+  `${JSON.stringify({
+    ...drawThingsResult,
+    settings: { ...drawThingsResult.settings, seeds: [9999] },
+  })}\n`,
+);
+const changedSettingsIngest = await tool("lora_automation", {
+  action: "draw-things-ingest",
+  job_id: "cap-test",
+  result_path: changedSettingsResultPath,
+});
+assert.equal(changedSettingsIngest.result.isError, true);
+assert.match(
+  changedSettingsIngest.result.content[0].text,
+  /validation settings differ from the bound fixed settings/,
+);
 const drawThingsIngest = await tool("lora_automation", {
   action: "draw-things-ingest",
   job_id: "cap-test",
   result_path: drawThingsResultPath,
 });
-assert.equal(drawThingsIngest.result.isError, false);
+assert.equal(
+  drawThingsIngest.result.isError,
+  false,
+  JSON.stringify(drawThingsIngest.result),
+);
 assert.equal(drawThingsIngest.result.structuredContent.import_count, 1);
 assert.equal(drawThingsIngest.result.structuredContent.controlled_validation.render_count, 8);
 const drawThingsValidationResult = JSON.parse(
