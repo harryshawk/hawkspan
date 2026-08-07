@@ -60,7 +60,20 @@ function trainerRecordProcess(record, processes) {
 }
 
 function loadManifestByTarget() {
-  const config = readJson(configPath, {});
+  let config = readJson(configPath, {});
+  const pointerPath = path.resolve(
+    config.lora_automation?.active_runtime_pointer ||
+      path.join(path.dirname(configPath), "active-lora-runtime.json"),
+  );
+  const pointer = readJson(pointerPath, null);
+  if (pointer?.config_path) {
+    const runtimeConfig = path.resolve(pointer.config_path);
+    const runtimeRoot = pointer.runtime_root ? path.resolve(pointer.runtime_root) : null;
+    if (fs.existsSync(runtimeConfig) &&
+        (!runtimeRoot || runtimeConfig.startsWith(`${runtimeRoot}${path.sep}`))) {
+      config = readJson(runtimeConfig, config);
+    }
+  }
   const queueRoot = config.training?.queue_root || config.lora_automation?.queue_root;
   if (!queueRoot) return new Map();
   const manifest = readJson(path.join(queueRoot, "captioned-lora-manifest.json"), []);
@@ -79,7 +92,12 @@ function checkpointNamesForTarget(target, manifestByTarget) {
     .sort((a, b) => Number(a.slice(11)) - Number(b.slice(11)));
 }
 
-function reconcileTrainerControlRecords(bootTime, processes, applyChanges) {
+function reconcileTrainerControlRecords(
+  bootTime,
+  processes,
+  applyChanges,
+  durableJobsById,
+) {
   const manifestByTarget = loadManifestByTarget();
   if (!fs.existsSync(trainerControlRoot)) return [];
   const activeStates = new Set(["started", "running", "stop_requested"]);
@@ -99,6 +117,45 @@ function reconcileTrainerControlRecords(bootTime, processes, applyChanges) {
       continue;
     }
     if (!record?.target || !activeStates.has(record.state)) continue;
+    const durableJob = durableJobsById.get(record.durable_job_id);
+    const durableSettledStates = new Set([
+      "failed", "completed", "verified", "cancelled", "returning", "paused",
+    ]);
+    if (durableJob && durableSettledStates.has(durableJob.state)) {
+      const checkpoints = checkpointNamesForTarget(record.target, manifestByTarget);
+      const result = {
+        record_path: recordPath,
+        durable_job_id: record.durable_job_id,
+        target: record.target,
+        previous_state: record.state,
+        classification: `durable_${durableJob.state}`,
+        checkpoints,
+      };
+      if (applyChanges) {
+        atomicJson(recordPath, {
+          ...record,
+          state: durableJob.state,
+          reconciled_at: Math.floor(Date.now() / 1000),
+          reconciliation_reason: "durable_job_not_process_active",
+          recovery_checkpoints: checkpoints,
+        });
+        const config = readJson(configPath, {});
+        const schedulerRoot = config.lora_automation?.scheduler_root ||
+          path.join(stateRoot, "lora-scheduler");
+        atomicJson(path.join(schedulerRoot, "jobs", `${record.target}.json`), {
+          schema_version: 1,
+          target: record.target,
+          state: durableJob.state,
+          authorization_job_id: record.durable_job_id,
+          reason: "durable job is not process-active",
+          updated_at: Math.floor(Date.now() / 1000),
+          recovery_checkpoints: checkpoints,
+        });
+        result.applied_state = durableJob.state;
+      }
+      results.push(result);
+      continue;
+    }
     const process = trainerRecordProcess(record, processes);
     if (process) {
       results.push({
@@ -233,8 +290,11 @@ fs.mkdirSync(auditRoot, { recursive: true, mode: 0o700 });
 const db = new DatabaseSync(dbPath);
 const bootTime = readBootTime();
 const processes = readProcesses();
-const trainer_control = reconcileTrainerControlRecords(bootTime, processes, apply);
 const rows = db.prepare("SELECT * FROM jobs ORDER BY updated_at DESC").all();
+const durableJobsById = new Map(rows.map((job) => [job.id, job]));
+const trainer_control = reconcileTrainerControlRecords(
+  bootTime, processes, apply, durableJobsById,
+);
 const classified = rows.map((job) => ({ ...job, ...classify(job, bootTime, processes) }));
 const closable = classified.filter((job) => [
   "stale_after_boot",

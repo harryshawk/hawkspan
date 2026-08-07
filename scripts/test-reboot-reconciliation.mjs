@@ -13,9 +13,13 @@ const queue = path.join(root, "queue");
 const control = path.join(root, "trainer-control");
 const scheduler = path.join(root, "lora-scheduler");
 const recoverableOutput = path.join(root, "outputs", "recoverable");
+const runtimeQueue = path.join(root, "runtime-queue");
+const terminalOutput = path.join(root, "outputs", "terminal-package-failure");
 fs.mkdirSync(queue, { recursive: true });
 fs.mkdirSync(control, { recursive: true });
 fs.mkdirSync(path.join(recoverableOutput, "checkpoint-25"), { recursive: true });
+fs.mkdirSync(path.join(terminalOutput, "checkpoint-100"), { recursive: true });
+fs.mkdirSync(runtimeQueue, { recursive: true });
 
 fs.writeFileSync(path.join(queue, "captioned-lora-manifest.json"), JSON.stringify([
   { job_id: "no-checkpoint", output_dir: path.join(root, "outputs", "empty") },
@@ -27,6 +31,21 @@ fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({
   node_id: "reboot-test",
   training: { queue_root: queue, control_root: control },
   lora_automation: { scheduler_root: scheduler },
+}));
+fs.writeFileSync(path.join(runtimeQueue, "captioned-lora-manifest.json"), JSON.stringify([
+  { job_id: "no-checkpoint", output_dir: path.join(root, "outputs", "empty") },
+  { job_id: "recoverable", output_dir: recoverableOutput },
+  { job_id: "same-boot-missing", output_dir: path.join(root, "outputs", "same-boot") },
+  { job_id: "terminal-package-failure", output_dir: terminalOutput },
+]));
+const runtimeConfig = path.join(root, "runtime-config.json");
+fs.writeFileSync(runtimeConfig, JSON.stringify({
+  training: { queue_root: runtimeQueue },
+  lora_automation: { scheduler_root: scheduler },
+}));
+fs.writeFileSync(path.join(root, "active-lora-runtime.json"), JSON.stringify({
+  config_path: runtimeConfig,
+  runtime_root: root,
 }));
 
 for (const entry of [
@@ -48,6 +67,28 @@ for (const entry of [
     status_path: statusPath,
   }));
 }
+const terminalStatusPath = path.join(
+  control,
+  "job-package-failed--terminal-package-failure.status.json",
+);
+fs.writeFileSync(terminalStatusPath, JSON.stringify({
+  current: "terminal-package-failure",
+  failed: [{ job_id: "terminal-package-failure", phase: "package_return" }],
+}));
+fs.writeFileSync(
+  path.join(control, "job-package-failed--terminal-package-failure.json"),
+  JSON.stringify({
+    schema_version: 1,
+    durable_job_id: "job-package-failed",
+    target: "terminal-package-failure",
+    state: "started",
+    started_at: 1,
+    pid: process.pid,
+    process_group: process.pid,
+    runner: "/not/the/current/process",
+    status_path: terminalStatusPath,
+  }),
+);
 
 const database = new DatabaseSync(path.join(root, "spool.sqlite3"));
 database.exec(`
@@ -74,6 +115,7 @@ for (const [id, state] of [
   ["pending-authorized", "authorized"],
   ["pending-queued", "queued"],
   ["deliberately-paused", "paused"],
+  ["job-package-failed", "failed"],
 ]) {
   insertJob.run(
     id, new Date().toISOString(), new Date().toISOString(), "test", "test",
@@ -104,12 +146,20 @@ const recoverable = JSON.parse(fs.readFileSync(
 const sameBootMissing = JSON.parse(fs.readFileSync(
   path.join(control, "job-same-boot--same-boot-missing.json"),
 ));
+const terminalPackageFailure = JSON.parse(fs.readFileSync(
+  path.join(control, "job-package-failed--terminal-package-failure.json"),
+));
 assert.equal(noCheckpoint.state, "interrupted_no_checkpoint");
 assert.deepEqual(noCheckpoint.recovery_checkpoints, []);
 assert.equal(recoverable.state, "interrupted_recoverable");
 assert.deepEqual(recoverable.recovery_checkpoints, ["checkpoint-25"]);
 assert.equal(sameBootMissing.state, "interrupted_no_checkpoint");
 assert.equal(sameBootMissing.interruption_reason, "process_missing");
+assert.equal(terminalPackageFailure.state, "failed");
+assert.deepEqual(terminalPackageFailure.recovery_checkpoints, ["checkpoint-100"]);
+assert.deepEqual(JSON.parse(fs.readFileSync(terminalStatusPath)).failed, [
+  { job_id: "terminal-package-failure", phase: "package_return" },
+]);
 const reconciled = new DatabaseSync(path.join(root, "spool.sqlite3"));
 for (const [id, state] of [
   ["pending-authorized", "authorized"],
