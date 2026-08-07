@@ -3,6 +3,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -13,6 +14,8 @@ from pathlib import Path
 
 
 with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
+    node_path = os.environ.get("NODE") or shutil.which("node")
+    assert node_path, "test requires an explicit Node executable"
     root = Path(temporary)
     queue = root / "queue"
     queue.mkdir()
@@ -26,6 +29,7 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
             "queue_root": str(queue),
             "control_root": str(root / "control"),
             "simpletuner_root": str(root / "simpletuner"),
+            "node_path": node_path,
         },
         "lora_automation": {"scheduler_root": str(root / "scheduler")},
     }))
@@ -36,6 +40,7 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
             "queue_root": str(runtime_queue),
             "control_root": str(runtime_root / "ephemeral-control"),
             "simpletuner_root": str(root / "simpletuner"),
+            "node_path": node_path,
         },
         "lora_automation": {"scheduler_root": str(runtime_root / "scheduler")},
     }))

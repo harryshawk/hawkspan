@@ -178,6 +178,13 @@ export function validateLiveReleaseConfiguration(authority, { envValues, config,
   compare("config.json:training.runner_script", config.training?.runner_script, expected.trainer_runner);
   compare("config.json:training.automation_script", config.training?.automation_script, expected.trainer_automation);
   compare("config.json:training.packet_builder", config.training?.packet_builder, expected.packet_builder);
+  if (!path.isAbsolute(config.training?.node_path || "")) {
+    mismatches.push({
+      location: "config.json:training.node_path",
+      observed: config.training?.node_path ?? null,
+      expected: "absolute executable path",
+    });
+  }
   for (const name of ["HAWKSPAN_REMOTE_PLUGIN_ROOT", "HAWKSPAN_REMOTE_CALL_TOOL", "HAWKSPAN_REMOTE_REPOSITORY_DIR"]) {
     if (Object.hasOwn(envValues, name)) mismatches.push({ location: `hawkspan.env:${name}`, observed: envValues[name], expected: "absent" });
   }

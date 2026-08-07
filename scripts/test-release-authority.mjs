@@ -199,6 +199,7 @@ assert.equal(Object.hasOwn(envValues, "HAWKSPAN_REMOTE_PLUGIN_ROOT"), false);
 assert.equal(Object.hasOwn(envValues, "HAWKSPAN_REMOTE_CALL_TOOL"), false);
 const config = JSON.parse(fs.readFileSync(path.join(stateRoot, "config.json"), "utf8"));
 assert.equal(Object.hasOwn(config, "plugin_root"), false);
+assert.equal(config.training.node_path, process.execPath);
 assert.equal(Object.hasOwn(config.peer, "remote_plugin_root"), false);
 assert.equal(Object.hasOwn(config.peer, "remote_call_tool"), false);
 assert.deepEqual(config.packet_receiver, {

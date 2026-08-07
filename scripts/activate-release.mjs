@@ -51,6 +51,7 @@ const authority = prepareReleaseAuthority(stateRoot, {
   stableReleaseRoot: path.join(os.homedir(), ".local", "share", "hawkspan", "current"),
 });
 const derived = derivedReleasePaths(authority);
+const nodePath = path.resolve(process.env.HAWKSPAN_NODE || process.execPath);
 envValues.HAWKSPAN_ACTIVE_RELEASE_ROOT = derived.active_release_root;
 envValues.HAWKSPAN_REPOSITORY_DIR = derived.repository_dir;
 envValues.HAWKSPAN_LOCAL_TRAINER_START_SCRIPT = derived.trainer_start;
@@ -61,6 +62,7 @@ const envBody = serializeHawkspanEnv(envValues);
 delete config.plugin_root;
 config.training = {
   ...(config.training || {}),
+  node_path: nodePath,
   start_script: derived.trainer_start,
   stop_script: derived.trainer_stop,
   package_script: derived.trainer_package,
@@ -82,7 +84,7 @@ if (config.node_role === "controller") {
 }
 const renderedLaunchd = renderLaunchdPlistBodies(authority, {
   stateRoot,
-  nodePath: process.env.HAWKSPAN_NODE || process.execPath,
+  nodePath,
   launchAgentsRoot: process.env.HAWKSPAN_LAUNCH_AGENTS_DIR || path.join(os.homedir(), "Library", "LaunchAgents"),
 });
 

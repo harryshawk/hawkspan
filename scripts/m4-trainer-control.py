@@ -86,7 +86,9 @@ SCHEDULER_ROOT = Path(
     )
 ).expanduser()
 JOB_CONTROL_ROOT = SCHEDULER_ROOT / "jobs"
-NODE = Path(TRAINING.get("node_path", "/usr/local/bin/node"))
+if not TRAINING.get("node_path"):
+    raise SystemExit("HawkSpan training.node_path is missing; reactivate the installed release")
+NODE = Path(TRAINING["node_path"])
 AUTOMATION = Path(
     TRAINING.get(
         "automation_script",
