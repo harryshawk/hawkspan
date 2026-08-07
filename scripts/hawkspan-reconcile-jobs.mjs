@@ -28,14 +28,29 @@ function readBootTime() {
 }
 
 function readProcesses() {
-  const result = spawnSync("/bin/ps", ["axww", "-o", "pid=,ppid=,comm=,args="], {
+  const result = spawnSync("/bin/ps", ["axww", "-o", "pid=,ppid=,pgid=,comm=,args="], {
     encoding: "utf8",
     timeout: 5000,
   });
   if (result.error || result.status !== 0) {
     throw new Error(`unable to read process table: ${result.error?.message || result.stderr || `exit ${result.status}`}`);
   }
-  return result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  return result.stdout.split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)(?:\s+(.*))?$/);
+      if (!match) return null;
+      return {
+        pid: Number(match[1]),
+        ppid: Number(match[2]),
+        process_group: Number(match[3]),
+        command: match[4],
+        arguments: match[5] || "",
+        line,
+      };
+    })
+    .filter(Boolean);
 }
 
 function readJson(filePath, fallback = null) {
@@ -51,8 +66,22 @@ function atomicJson(filePath, value) {
 }
 
 function processLineForPid(processes, pid) {
-  const wanted = String(pid);
-  return processes.find((line) => line.split(/\s+/, 1)[0] === wanted) || null;
+  return processes.find((process) => process.pid === Number(pid)) || null;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function managedRunnerCommandMatches(process, runner, target, statusPath) {
+  if (!runner || !target || !statusPath) return false;
+  const exactInvocation = new RegExp(
+    `^\\S+\\s+${escapeRegExp(runner)}\\s+--only-job\\s+${escapeRegExp(target)}(?=\\s|$)`,
+  );
+  const exactStatus = new RegExp(
+    `(?:^|\\s)--status-file\\s+${escapeRegExp(statusPath)}(?=\\s|$)`,
+  );
+  return exactInvocation.test(process.arguments) && exactStatus.test(process.arguments);
 }
 
 function trainerRecordProcess(record, processes) {
@@ -60,9 +89,10 @@ function trainerRecordProcess(record, processes) {
   if (!process) return null;
   const runner = String(record.runner || "");
   const target = String(record.target || "");
-  return runner && target && process.includes(runner) && process.includes(target)
-    ? process
-    : null;
+  const statusPath = String(record.status_path || "");
+  const recordedGroup = Number(record.process_group || 0);
+  if (recordedGroup > 0 && process.process_group !== recordedGroup) return null;
+  return managedRunnerCommandMatches(process, runner, target, statusPath) ? process : null;
 }
 
 function loadManifestByTarget() {
@@ -123,6 +153,24 @@ function reconcileTrainerControlRecords(
       continue;
     }
     if (!record?.target || !activeStates.has(record.state)) continue;
+    const process = trainerRecordProcess(record, processes);
+    if (process) {
+      results.push({
+        record_path: recordPath,
+        durable_job_id: record.durable_job_id || null,
+        target: record.target,
+        previous_state: record.state,
+        classification: "real_active",
+        process: process.line,
+        process_identity: {
+          pid: process.pid,
+          process_group: process.process_group,
+          runner: record.runner,
+          target: record.target,
+        },
+      });
+      continue;
+    }
     const durableJob = durableJobsById.get(record.durable_job_id);
     const durableSettledStates = new Set([
       "failed", "completed", "verified", "cancelled", "returning", "paused",
@@ -160,18 +208,6 @@ function reconcileTrainerControlRecords(
         result.applied_state = durableJob.state;
       }
       results.push(result);
-      continue;
-    }
-    const process = trainerRecordProcess(record, processes);
-    if (process) {
-      results.push({
-        record_path: recordPath,
-        durable_job_id: record.durable_job_id || null,
-        target: record.target,
-        previous_state: record.state,
-        classification: "real_active",
-        process,
-      });
       continue;
     }
     const startedAt = Number(record.started_at || 0);
@@ -228,35 +264,62 @@ function reconcileTrainerControlRecords(
   return results;
 }
 
-function jobProcessEvidence(job, processes) {
+function jobProcessEvidence(job, processes, liveManagedByJobId) {
   const metadata = JSON.parse(job.metadata_json || "{}");
-  const pid = Number(metadata.pid || metadata.managed_pid || metadata.trainer_pid || 0);
-  if (pid > 0) {
-    const pidPrefix = String(pid);
-    const match = processes.find((line) => line.split(/\s+/, 1)[0] === pidPrefix);
-    if (match) return { live: true, reason: "pid_present", process: match };
+  const managedRecord = liveManagedByJobId.get(job.id);
+  if (managedRecord && (!metadata.target || metadata.target === managedRecord.target)) {
+    return {
+      live: true,
+      reason: "exact_managed_runner",
+      process: managedRecord.process,
+      process_identity: managedRecord.process_identity,
+    };
   }
-  const target = metadata.target;
-  if (target) {
-    const match = processes.find((line) => line.includes(target));
-    if (match) return { live: true, reason: "target_present", process: match };
+  const record = {
+    pid: metadata.pid || metadata.managed_pid || metadata.trainer_pid,
+    process_group: metadata.process_group,
+    runner: metadata.runner,
+    target: metadata.target,
+    status_path: metadata.status_path,
+  };
+  const process = trainerRecordProcess(record, processes);
+  if (process) {
+    return {
+      live: true,
+      reason: "exact_managed_runner_metadata",
+      process: process.line,
+      process_identity: {
+        pid: process.pid,
+        process_group: process.process_group,
+        runner: record.runner,
+        target: record.target,
+      },
+    };
   }
-  return { live: false, reason: "no_process_evidence" };
+  return { live: false, reason: "no_exact_managed_process_evidence" };
 }
 
-function classify(job, bootTime, processes) {
+function classify(job, bootTime, processes, liveManagedByJobId) {
   const metadata = JSON.parse(job.metadata_json || "{}");
-  const processEvidence = jobProcessEvidence(job, processes);
+  const processEvidence = jobProcessEvidence(job, processes, liveManagedByJobId);
   const updatedAt = new Date(job.updated_at);
   const preBoot = bootTime ? updatedAt < bootTime : false;
   const activeStates = new Set(["running", "started", "stop_requested", "cancel_requested"]);
   const pendingStates = new Set(["queued", "authorized"]);
   const terminalStates = new Set(["completed", "verified", "cancelled", "failed"]);
   if (terminalStates.has(job.state)) {
-    return { classification: "terminal", process_evidence: processEvidence, metadata };
+    return {
+      classification: processEvidence.live ? "settled_with_live_managed_process" : "terminal",
+      process_evidence: processEvidence,
+      metadata,
+    };
   }
   if (job.state === "paused") {
-    return { classification: "paused", process_evidence: processEvidence, metadata };
+    return {
+      classification: processEvidence.live ? "settled_with_live_managed_process" : "paused",
+      process_evidence: processEvidence,
+      metadata,
+    };
   }
   if (job.state === "returning") {
     const digest = metadata.packet_sha256;
@@ -301,7 +364,13 @@ const durableJobsById = new Map(rows.map((job) => [job.id, job]));
 const trainer_control = reconcileTrainerControlRecords(
   bootTime, processes, apply, durableJobsById,
 );
-const classified = rows.map((job) => ({ ...job, ...classify(job, bootTime, processes) }));
+const liveManagedByJobId = new Map(trainer_control
+  .filter((record) => record.classification === "real_active" && record.durable_job_id)
+  .map((record) => [record.durable_job_id, record]));
+const classified = rows.map((job) => ({
+  ...job,
+  ...classify(job, bootTime, processes, liveManagedByJobId),
+}));
 const closable = classified.filter((job) => [
   "stale_after_boot",
   "stale_no_process",

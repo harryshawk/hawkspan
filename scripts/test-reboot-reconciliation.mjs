@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
@@ -15,11 +15,27 @@ const scheduler = path.join(root, "lora-scheduler");
 const recoverableOutput = path.join(root, "outputs", "recoverable");
 const runtimeQueue = path.join(root, "runtime-queue");
 const terminalOutput = path.join(root, "outputs", "terminal-package-failure");
+const liveTarget = "settled-but-live";
+const unrelatedTarget = "target-mentioned-by-status-command";
+const managedRunner = path.join(root, "managed-runner.mjs");
+const liveStatusPath = path.join(control, `job-settled-live--${liveTarget}.status.json`);
 fs.mkdirSync(queue, { recursive: true });
 fs.mkdirSync(control, { recursive: true });
 fs.mkdirSync(path.join(recoverableOutput, "checkpoint-25"), { recursive: true });
 fs.mkdirSync(path.join(terminalOutput, "checkpoint-100"), { recursive: true });
 fs.mkdirSync(runtimeQueue, { recursive: true });
+fs.writeFileSync(managedRunner, "setInterval(() => {}, 1000);\n");
+const liveRunner = spawn(
+  process.execPath,
+  [managedRunner, "--only-job", liveTarget, "--status-file", liveStatusPath],
+  { detached: true, stdio: "ignore" },
+);
+const unrelatedCommand = spawn(
+  process.execPath,
+  ["-e", "setInterval(() => {}, 1000);", unrelatedTarget],
+  { detached: true, stdio: "ignore" },
+);
+await new Promise((resolve) => setTimeout(resolve, 100));
 
 fs.writeFileSync(path.join(queue, "captioned-lora-manifest.json"), JSON.stringify([
   { job_id: "no-checkpoint", output_dir: path.join(root, "outputs", "empty") },
@@ -89,6 +105,20 @@ fs.writeFileSync(
     status_path: terminalStatusPath,
   }),
 );
+fs.writeFileSync(
+  path.join(control, `job-settled-live--${liveTarget}.json`),
+  JSON.stringify({
+    schema_version: 1,
+    durable_job_id: "job-settled-live",
+    target: liveTarget,
+    state: "started",
+    started_at: 1,
+    pid: liveRunner.pid,
+    process_group: liveRunner.pid,
+    runner: managedRunner,
+    status_path: liveStatusPath,
+  }),
+);
 
 const database = new DatabaseSync(path.join(root, "spool.sqlite3"));
 database.exec(`
@@ -116,11 +146,21 @@ for (const [id, state] of [
   ["pending-queued", "queued"],
   ["deliberately-paused", "paused"],
   ["job-package-failed", "failed"],
+  ["job-settled-live", "failed"],
+  ["job-pid-reused", "running"],
+  ["job-unrelated-target", "running"],
 ]) {
+  const metadata = id === "job-pid-reused"
+    ? { pid: process.pid, target: "pid-reuse-target" }
+    : id === "job-unrelated-target"
+      ? { target: unrelatedTarget }
+      : id === "job-settled-live"
+        ? { target: liveTarget }
+        : {};
   insertJob.run(
     id, new Date().toISOString(), new Date().toISOString(), "test", "test",
     "training", id, "", state, state === "authorized" ? "recorded" : "not_required",
-    state === "authorized" ? "test authorization" : null, "{}",
+    state === "authorized" ? "test authorization" : null, JSON.stringify(metadata),
   );
 }
 database.close();
@@ -160,6 +200,20 @@ assert.deepEqual(terminalPackageFailure.recovery_checkpoints, ["checkpoint-100"]
 assert.deepEqual(JSON.parse(fs.readFileSync(terminalStatusPath)).failed, [
   { job_id: "terminal-package-failure", phase: "package_return" },
 ]);
+const settledLiveRecord = JSON.parse(fs.readFileSync(
+  path.join(control, `job-settled-live--${liveTarget}.json`),
+));
+assert.equal(settledLiveRecord.state, "started");
+const summary = JSON.parse(result.stdout);
+const settledLiveControl = summary.trainer_control.find(
+  (entry) => entry.durable_job_id === "job-settled-live",
+);
+assert.equal(settledLiveControl.classification, "real_active");
+assert.equal(settledLiveControl.process_identity.pid, liveRunner.pid);
+assert.equal(
+  summary.jobs.find((job) => job.id === "job-settled-live").classification,
+  "settled_with_live_managed_process",
+);
 const reconciled = new DatabaseSync(path.join(root, "spool.sqlite3"));
 for (const [id, state] of [
   ["pending-authorized", "authorized"],
@@ -168,7 +222,14 @@ for (const [id, state] of [
 ]) {
   assert.equal(reconciled.prepare("SELECT state FROM jobs WHERE id=?").get(id).state, state);
 }
+assert.equal(reconciled.prepare("SELECT state FROM jobs WHERE id=?").get("job-pid-reused").state, "failed");
+assert.equal(
+  reconciled.prepare("SELECT state FROM jobs WHERE id=?").get("job-unrelated-target").state,
+  "failed",
+);
 reconciled.close();
 
+process.kill(-liveRunner.pid, "SIGTERM");
+process.kill(-unrelatedCommand.pid, "SIGTERM");
 fs.rmSync(root, { recursive: true, force: true });
 process.stdout.write("HawkSpan reboot reconciliation tests passed\n");
