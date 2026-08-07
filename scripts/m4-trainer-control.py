@@ -96,6 +96,10 @@ AUTOMATION = Path(
     )
 )
 TARGET_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+REVISION_FINGERPRINT_PATTERN = re.compile(r"^[A-Fa-f0-9]{64}$")
+STOP_TERM_TIMEOUT_SECONDS = 30.0
+STOP_KILL_TIMEOUT_SECONDS = 5.0
+STOP_POLL_SECONDS = 0.1
 
 
 def parse_args() -> argparse.Namespace:
@@ -178,6 +182,12 @@ def readiness_request(target: str) -> dict:
 
 
 def start(job_id: str, target: str, expected_revision_fingerprint: str | None = None) -> None:
+    if not expected_revision_fingerprint or not REVISION_FINGERPRINT_PATTERN.fullmatch(
+        expected_revision_fingerprint
+    ):
+        raise SystemExit(
+            "start requires a valid exact expected revision fingerprint"
+        )
     load_target(target)
     active = training_processes()
     if active:
@@ -206,10 +216,7 @@ def start(job_id: str, target: str, expected_revision_fingerprint: str | None = 
             "start refused because the versioned training readiness gate failed:\n"
             + json.dumps(readiness, indent=2)
         )
-    if (
-        expected_revision_fingerprint
-        and readiness.get("revision_fingerprint") != expected_revision_fingerprint
-    ):
+    if readiness.get("revision_fingerprint") != expected_revision_fingerprint:
         raise SystemExit(
             "start refused because dataset/config revision changed after authorization: "
             f"expected {expected_revision_fingerprint}, "
@@ -334,7 +341,73 @@ def start(job_id: str, target: str, expected_revision_fingerprint: str | None = 
     print(json.dumps(record))
 
 
-def find_running_record(job_id: str, target: str) -> tuple[Path, dict]:
+def process_snapshot() -> list[dict]:
+    result = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,pgid=,lstart=,command="],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    processes = []
+    for line in result.stdout.splitlines():
+        fields = line.strip().split(None, 8)
+        if len(fields) != 9:
+            continue
+        processes.append(
+            {
+                "pid": int(fields[0]),
+                "ppid": int(fields[1]),
+                "pgid": int(fields[2]),
+                "started_at": " ".join(fields[3:8]),
+                "command": fields[8],
+            }
+        )
+    return processes
+
+
+def command_matches_record(command: str, record: dict) -> bool:
+    recorded_runner = Path(str(record.get("runner", ""))).expanduser()
+    status_path = str(record.get("status_path", ""))
+    target = str(record.get("target", ""))
+    if not recorded_runner.is_absolute() or not recorded_runner.is_file() or not status_path:
+        return False
+
+    def has_exact_argument(flag: str, value: str) -> bool:
+        marker = f"{flag} {value}"
+        offset = command.find(marker)
+        while offset >= 0:
+            end = offset + len(marker)
+            if end == len(command) or command[end].isspace():
+                return True
+            offset = command.find(marker, offset + 1)
+        return False
+
+    return (
+        str(recorded_runner) in command
+        and has_exact_argument("--only-job", target)
+        and has_exact_argument("--status-file", status_path)
+    )
+
+
+def root_process_matches(record: dict, process: dict) -> bool:
+    return (
+        process["pid"] == int(record["pid"])
+        and process["pgid"] == int(record["process_group"])
+        and command_matches_record(process["command"], record)
+    )
+
+
+def process_identity(process: dict) -> tuple[int, str, str]:
+    return process["pgid"], process["started_at"], process["command"]
+
+
+def find_running_record(
+    job_id: str,
+    target: str,
+    snapshot: list[dict] | None = None,
+) -> tuple[Path, dict]:
+    snapshot = process_snapshot() if snapshot is None else snapshot
+    by_pid = {process["pid"]: process for process in snapshot}
     candidates = sorted(
         CONTROL_ROOT.glob(f"*--{target}.json"),
         key=lambda item: item.stat().st_mtime,
@@ -346,40 +419,14 @@ def find_running_record(job_id: str, target: str) -> tuple[Path, dict]:
             continue
         if record.get("durable_job_id") != job_id or record.get("target") != target:
             continue
-        recorded_runner = Path(str(record.get("runner", ""))).expanduser()
-        if not recorded_runner.is_absolute() or not recorded_runner.is_file():
-            continue
-        pid = int(record["pid"])
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            continue
-        command = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True,
-            text=True,
-        ).stdout
-        if str(recorded_runner) in command and target in command:
+        process = by_pid.get(int(record["pid"]))
+        if process and root_process_matches(record, process):
             return candidate, record
     raise SystemExit(f"no adapter-managed running process found for {target}")
 
 
-def process_tree(root_pid: int) -> list[dict[str, int]]:
-    result = subprocess.run(
-        ["ps", "-axo", "pid=,ppid=,pgid="],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    processes = []
-    for line in result.stdout.splitlines():
-        fields = line.split()
-        if len(fields) != 3:
-            continue
-        processes.append(
-            {"pid": int(fields[0]), "ppid": int(fields[1]), "pgid": int(fields[2])}
-        )
-
+def process_tree(root_pid: int, processes: list[dict] | None = None) -> list[dict]:
+    processes = process_snapshot() if processes is None else processes
     descendants = []
     parents = {root_pid}
     while parents:
@@ -392,18 +439,99 @@ def process_tree(root_pid: int) -> list[dict[str, int]]:
     return ([root] if root else []) + descendants
 
 
+def refresh_managed_processes(
+    record: dict,
+    known_identities: dict[int, tuple[int, str, str]],
+) -> list[dict]:
+    snapshot = process_snapshot()
+    by_pid = {process["pid"]: process for process in snapshot}
+    managed = {}
+
+    root = by_pid.get(int(record["pid"]))
+    if root and root_process_matches(record, root):
+        managed[root["pid"]] = root
+
+    for pid, identity in known_identities.items():
+        process = by_pid.get(pid)
+        if process and process_identity(process) == identity:
+            managed[pid] = process
+
+    while managed:
+        managed_pids = set(managed)
+        managed_groups = {process["pgid"] for process in managed.values()}
+        additions = [
+            process
+            for process in snapshot
+            if process["pid"] not in managed
+            and (
+                process["ppid"] in managed_pids
+                or process["pgid"] in managed_groups
+            )
+        ]
+        if not additions:
+            break
+        for process in additions:
+            managed[process["pid"]] = process
+
+    for process in managed.values():
+        known_identities[process["pid"]] = process_identity(process)
+    return list(managed.values())
+
+
+def signal_managed_processes(processes: list[dict], requested_signal: int) -> None:
+    own_group = os.getpgrp()
+    groups = {
+        process["pgid"]
+        for process in processes
+        if process["pgid"] > 0 and process["pgid"] != own_group
+    }
+    for process_group in sorted(groups, reverse=True):
+        try:
+            os.killpg(process_group, requested_signal)
+        except ProcessLookupError:
+            pass
+    for process in processes:
+        if process["pgid"] in groups:
+            continue
+        try:
+            os.kill(process["pid"], requested_signal)
+        except ProcessLookupError:
+            pass
+
+
+def wait_for_managed_exit(
+    record: dict,
+    known_identities: dict[int, tuple[int, str, str]],
+    timeout_seconds: float,
+) -> list[dict]:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        survivors = refresh_managed_processes(record, known_identities)
+        if not survivors or time.monotonic() >= deadline:
+            return survivors
+        time.sleep(STOP_POLL_SECONDS)
+
+
 def stop(job_id: str, target: str) -> None:
     load_target(target)
     CONTROL_ROOT.mkdir(parents=True, exist_ok=True)
-    candidate, record = find_running_record(job_id, target)
-    tracked_processes = process_tree(int(record["pid"]))
-    tracked_pids = {item["pid"] for item in tracked_processes}
-    tracked_groups = {item["pgid"] for item in tracked_processes}
-    for process_group in sorted(tracked_groups, reverse=True):
-        try:
-            os.killpg(process_group, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+    snapshot = process_snapshot()
+    candidate, record = find_running_record(job_id, target, snapshot)
+    root = next(
+        (
+            process
+            for process in snapshot
+            if process["pid"] == int(record["pid"])
+            and root_process_matches(record, process)
+        ),
+        None,
+    )
+    if not root:
+        raise SystemExit("adapter-managed root process identity changed before stop")
+    tracked_processes = process_tree(root["pid"], snapshot)
+    known_identities = {
+        process["pid"]: process_identity(process) for process in tracked_processes
+    }
     record.update(
         {
             "stop_authorization_job_id": job_id,
@@ -413,38 +541,45 @@ def stop(job_id: str, target: str) -> None:
         }
     )
     candidate.write_text(json.dumps(record, indent=2) + "\n")
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        survivors = []
-        for pid in tracked_pids:
-            try:
-                os.kill(pid, 0)
-                survivors.append(pid)
-            except ProcessLookupError:
-                pass
-        if not survivors:
-            record.update({"stopped_at": int(time.time()), "state": "stopped"})
-            candidate.write_text(json.dumps(record, indent=2) + "\n")
-            write_job_control(
-                target,
-                "stopped",
-                job_id,
-                reason="authorized stop of this job only; queue may advance",
-            )
-            update_active_runtime_pointer(
-                training_authorized=False,
-                training_started=False,
-                authorization_job_id=job_id,
-                target=target,
-                stopped_at=int(time.time()),
-            )
-            print(json.dumps(record))
-            return
-        time.sleep(0.5)
-    raise SystemExit(
-        "SIGTERM was sent, but adapter-managed processes remain: "
-        + ", ".join(str(pid) for pid in survivors)
+    signal_managed_processes(tracked_processes, signal.SIGTERM)
+    survivors = wait_for_managed_exit(
+        record, known_identities, STOP_TERM_TIMEOUT_SECONDS
     )
+    if survivors:
+        signal_managed_processes(survivors, signal.SIGKILL)
+        survivors = wait_for_managed_exit(
+            record, known_identities, STOP_KILL_TIMEOUT_SECONDS
+        )
+    if survivors:
+        survivor_pids = sorted(process["pid"] for process in survivors)
+        record.update(
+            {
+                "state": "stop_failed",
+                "stop_failed_at": int(time.time()),
+                "stop_survivors": survivor_pids,
+            }
+        )
+        candidate.write_text(json.dumps(record, indent=2) + "\n")
+        raise SystemExit(
+            "adapter-managed processes remain after SIGKILL: "
+            + ", ".join(str(pid) for pid in survivor_pids)
+        )
+    record.update({"stopped_at": int(time.time()), "state": "stopped"})
+    candidate.write_text(json.dumps(record, indent=2) + "\n")
+    write_job_control(
+        target,
+        "stopped",
+        job_id,
+        reason="authorized stop of this job only; queue may advance",
+    )
+    update_active_runtime_pointer(
+        training_authorized=False,
+        training_started=False,
+        authorization_job_id=job_id,
+        target=target,
+        stopped_at=int(time.time()),
+    )
+    print(json.dumps(record))
 
 
 def package(

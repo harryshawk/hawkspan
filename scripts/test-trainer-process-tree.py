@@ -76,6 +76,14 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
     assert pointer["authorization_job_id"] == "test-job"
     assert pointer["target"] == "test-target"
 
+    for fingerprint in (None, "", "a" * 63, "g" * 64, "-" * 64):
+        try:
+            controller.start("test-job", "test-target", fingerprint)
+        except SystemExit as error:
+            assert "valid exact expected revision fingerprint" in str(error)
+        else:
+            raise AssertionError(f"invalid start fingerprint was accepted: {fingerprint!r}")
+
     scheduler_jobs = root / "scheduler" / "lora-jobs.json"
     scheduler_jobs.parent.mkdir()
     scheduler_jobs.write_text(json.dumps({"schema_version": 2, "jobs": [{
@@ -119,25 +127,42 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
         controller.training_processes = original_training_processes
         controller.load_target = original_load_target
 
-    child_pid_path = root / "child.pid"
     helper = root / "runner-helper.py"
     helper.write_text(
-        "import pathlib,subprocess,sys,time\n"
-        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(300)'],start_new_session=True)\n"
-        "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+        "import argparse,pathlib,signal,subprocess,sys,time\n"
+        "parser=argparse.ArgumentParser()\n"
+        "parser.add_argument('--only-job',required=True)\n"
+        "parser.add_argument('--mode',required=True)\n"
+        "parser.add_argument('--status-file',required=True)\n"
+        "parser.add_argument('--ignore-term',action='store_true')\n"
+        "args=parser.parse_args()\n"
+        "if args.ignore_term: signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+        "child_code='import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(300)' if args.ignore_term else 'import time;time.sleep(300)'\n"
+        "child=subprocess.Popen([sys.executable,'-c',child_code],start_new_session=True)\n"
+        "pathlib.Path(args.status_file).write_text(str(child.pid))\n"
         "time.sleep(300)\n"
     )
+    runner_status_path = root / "runner.status"
     runner = subprocess.Popen(
-        [sys.executable, str(helper), str(child_pid_path), "upgrade-test-target"],
+        [
+            sys.executable,
+            str(helper),
+            "--only-job",
+            "upgrade-test-target",
+            "--mode",
+            "train-and-return",
+            "--status-file",
+            str(runner_status_path),
+        ],
         start_new_session=True,
     )
     try:
         for _ in range(100):
-            if child_pid_path.exists():
+            if runner_status_path.exists():
                 break
             time.sleep(0.05)
-        assert child_pid_path.exists(), "separate-group child did not start"
-        child_pid = int(child_pid_path.read_text())
+        assert runner_status_path.exists(), "separate-group child did not start"
+        child_pid = int(runner_status_path.read_text())
         tree = controller.process_tree(runner.pid)
         by_pid = {entry["pid"]: entry for entry in tree}
         assert runner.pid in by_pid
@@ -149,15 +174,27 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
         old_release_runner = root / "old-release" / "run_captioned_loras.py.managed"
         old_release_runner.parent.mkdir()
         old_release_runner.symlink_to(helper)
+        old_status_path = root / "old-runner.status"
         old_runner = subprocess.Popen(
             [
                 sys.executable,
                 str(old_release_runner),
-                str(root / "old-child.pid"),
+                "--only-job",
                 "upgrade-test-target",
+                "--mode",
+                "train-and-return",
+                "--status-file",
+                str(old_status_path),
+                "--ignore-term",
             ],
             start_new_session=True,
         )
+        for _ in range(100):
+            if old_status_path.exists():
+                break
+            time.sleep(0.05)
+        assert old_status_path.exists(), "TERM-resistant descendant did not start"
+        old_child_pid = int(old_status_path.read_text())
         old_record_path = control / "upgrade-job--upgrade-test-target.json"
         old_record = {
             "schema_version": 1,
@@ -166,6 +203,7 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
             "pid": old_runner.pid,
             "process_group": os.getpgid(old_runner.pid),
             "runner": str(old_release_runner),
+            "status_path": str(old_status_path),
             "state": "started",
         }
         old_record_path.write_text(json.dumps(old_record))
@@ -174,6 +212,56 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
         )
         assert found_path == old_record_path
         assert found_record["runner"] == str(old_release_runner)
+
+        controller.load_target = lambda target: {"job_id": target}
+        controller.STOP_TERM_TIMEOUT_SECONDS = 0.2
+        controller.STOP_KILL_TIMEOUT_SECONDS = 1.0
+        controller.STOP_POLL_SECONDS = 0.02
+        controller.stop("upgrade-job", "upgrade-test-target")
+        old_runner.wait(timeout=5)
+        assert old_runner.returncode == -signal.SIGKILL
+        stopped_record = json.loads(old_record_path.read_text())
+        assert stopped_record["state"] == "stopped"
+        assert old_runner.pid in {item["pid"] for item in stopped_record["stop_processes"]}
+        assert old_child_pid in {item["pid"] for item in stopped_record["stop_processes"]}
+
+        lookalike_status_path = root / "lookalike.status"
+        lookalike = subprocess.Popen(
+            [
+                sys.executable,
+                str(old_release_runner),
+                "--only-job",
+                "upgrade-test-target",
+                "--mode",
+                "train-and-return",
+                "--status-file",
+                str(lookalike_status_path),
+            ],
+            start_new_session=True,
+        )
+        for _ in range(100):
+            if lookalike_status_path.exists():
+                break
+            time.sleep(0.05)
+        assert lookalike_status_path.exists(), "lookalike process did not start"
+        lookalike_record_path = control / "lookalike-job--upgrade-test-target.json"
+        lookalike_record_path.write_text(json.dumps({
+            "schema_version": 1,
+            "durable_job_id": "lookalike-job",
+            "target": "upgrade-test-target",
+            "pid": lookalike.pid,
+            "process_group": os.getpgid(lookalike.pid),
+            "runner": str(old_release_runner),
+            "status_path": str(root / "different-authorized.status"),
+            "state": "started",
+        }))
+        try:
+            controller.find_running_record("lookalike-job", "upgrade-test-target")
+        except SystemExit as error:
+            assert "no adapter-managed running process" in str(error)
+        else:
+            raise AssertionError("reused-PID lookalike was accepted as the managed root")
+        assert lookalike.poll() is None
     finally:
         for process_group in {entry["pgid"] for entry in locals().get("tree", [])}:
             try:
@@ -190,5 +278,11 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
             except ProcessLookupError:
                 pass
             old_runner.wait(timeout=5)
+        if "lookalike" in locals():
+            try:
+                os.killpg(os.getpgid(lookalike.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            lookalike.wait(timeout=5)
 
 print("trainer process tree tests passed")
