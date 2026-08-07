@@ -1826,8 +1826,9 @@ function trainerStatus() {
     .map((line) => line.trim());
   let logHeartbeat = null;
   try {
-    const queueRoot = configuredDirectory("queue_root");
-    const logRoot = configuredDirectory("log_root");
+    const effectiveTraining = activeRuntimeConfig()?.training || config.training;
+    const queueRoot = trainingDirectory(effectiveTraining, "queue_root");
+    const logRoot = trainingDirectory(effectiveTraining, "log_root");
     const statusPath = path.join(queueRoot, "captioned-lora-status.json");
     const status = fs.existsSync(statusPath)
       ? JSON.parse(fs.readFileSync(statusPath, "utf8"))
@@ -1889,7 +1890,11 @@ function jobIdSet(entries) {
 }
 
 function configuredDirectory(key, required = true) {
-  const value = config.training[key];
+  return trainingDirectory(config.training, key, required);
+}
+
+function trainingDirectory(training, key, required = true) {
+  const value = training?.[key];
   if (!value && required) throw new Error(`training.${key} is not configured`);
   return value ? path.resolve(value) : null;
 }
@@ -1904,7 +1909,8 @@ function assertWithin(candidate, roots) {
 }
 
 function trainerQueueStatus() {
-  const queueRoot = configuredDirectory("queue_root");
+  const effectiveTraining = activeRuntimeConfig()?.training || config.training;
+  const queueRoot = trainingDirectory(effectiveTraining, "queue_root");
   const entries = fs.existsSync(queueRoot)
     ? fs.readdirSync(queueRoot, { withFileTypes: true })
         .filter((entry) => !entry.name.startsWith("."))
@@ -1926,9 +1932,12 @@ function trainerQueueStatus() {
 const imageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp", ".heic", ".tif", ".tiff"]);
 
 function trainerValidateDataset(args) {
+  const runtimeTraining = activeRuntimeConfig()?.training || null;
   const roots = [
     configuredDirectory("queue_root", false),
     configuredDirectory("simpletuner_root", false),
+    trainingDirectory(runtimeTraining, "queue_root", false),
+    trainingDirectory(runtimeTraining, "simpletuner_root", false),
   ];
   const datasetPath = assertWithin(args.path, roots);
   if (!fs.statSync(datasetPath).isDirectory()) throw new Error("dataset path must be a directory");
@@ -1961,9 +1970,14 @@ function trainerValidateDataset(args) {
 }
 
 function trainerTailLog(args) {
-  const logRoot = configuredDirectory("log_root");
-  const controlRoot = configuredDirectory("control_root", false);
-  const logPath = assertWithin(args.path, [logRoot, controlRoot]);
+  const runtimeTraining = activeRuntimeConfig()?.training || null;
+  const roots = [
+    configuredDirectory("log_root"),
+    configuredDirectory("control_root", false),
+    trainingDirectory(runtimeTraining, "log_root", false),
+    trainingDirectory(runtimeTraining, "control_root", false),
+  ];
+  const logPath = assertWithin(args.path, roots);
   const lines = Math.min(Math.max(Number(args.lines || 100), 1), 2000);
   const result = spawnSync("tail", ["-n", String(lines), logPath], {
     encoding: "utf8",
@@ -2326,7 +2340,8 @@ function trainerRunStatus() {
 }
 
 function trainerQueueDetail() {
-  const queueRoot = configuredDirectory("queue_root");
+  const effectiveTraining = activeRuntimeConfig()?.training || config.training;
+  const queueRoot = trainingDirectory(effectiveTraining, "queue_root");
   const statusPath = path.join(queueRoot, "captioned-lora-status.json");
   const manifestPath = path.join(queueRoot, "captioned-lora-manifest.json");
   const status = fs.existsSync(statusPath)

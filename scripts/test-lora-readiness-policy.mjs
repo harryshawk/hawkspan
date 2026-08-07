@@ -158,6 +158,18 @@ assert.equal(bound.conditioning.control_image_count, 1);
 assert.equal(bound.conditioning.target_image_count, 1);
 const firstFingerprint = bound.revision_fingerprint;
 
+fs.writeFileSync(
+  path.join(conditioningDir, "aspect_ratio_bucket_metadata-policy-job.json"),
+  "{}\n",
+);
+fs.writeFileSync(path.join(conditioningDir, "robot.txt"), "generated cache sidecar\n");
+const afterGeneratedConditioningMetadata = readiness();
+assert.equal(
+  afterGeneratedConditioningMetadata.revision_fingerprint,
+  firstFingerprint,
+  "generated conditioning metadata must not change the revision-bound image set",
+);
+
 const queueSupervisor = spawn(process.execPath, [
   "-e", "setTimeout(() => {}, 60000)",
   "call-tool.mjs", "supervise_queue", "simpletuner-training",

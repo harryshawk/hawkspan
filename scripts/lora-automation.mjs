@@ -140,8 +140,13 @@ function directoryBytes(root) {
 
 function directoryRevisionSha256(root) {
   const target = path.resolve(root);
+  return fileSetRevisionSha256(target, walk(target));
+}
+
+function fileSetRevisionSha256(root, filePaths) {
+  const target = path.resolve(root);
   const digest = crypto.createHash("sha256");
-  for (const filePath of walk(target)) {
+  for (const filePath of [...filePaths].sort()) {
     const relative = path.relative(target, filePath);
     const stat = fs.statSync(filePath);
     digest.update(relative);
@@ -534,7 +539,7 @@ function trainingReadiness(args) {
         control_image_count: controlImages.length,
         revision_sha256: fs.existsSync(conditioningPath) &&
           fs.statSync(conditioningPath).isDirectory()
-          ? directoryRevisionSha256(conditioningPath)
+          ? fileSetRevisionSha256(conditioningPath, controlImages)
           : null,
       };
     } else if (configJson?.controlnet) {

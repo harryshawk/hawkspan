@@ -1381,6 +1381,11 @@ fs.writeFileSync(path.join(testRoot, "active-lora-runtime.json"), JSON.stringify
   config_path: activeRuntimeConfig,
   runtime_root: activeRuntimeRoot,
 }));
+const activeQueueStatus = await tool("trainer_queue_status");
+assert.equal(activeQueueStatus.result.structuredContent.queue_root, activeRuntimeQueue);
+const activeQueueDetail = await tool("trainer_queue_detail");
+assert.equal(activeQueueDetail.result.structuredContent.jobs[0].job_id, "cap-test");
+assert.equal(activeQueueDetail.result.structuredContent.jobs[0].state, "running");
 const directRunStatus = await tool("trainer_run_status");
 assert.equal(directRunStatus.result.structuredContent.current, "cap-test");
 assert.equal(directRunStatus.result.structuredContent.current_job.job_id, "cap-test");
