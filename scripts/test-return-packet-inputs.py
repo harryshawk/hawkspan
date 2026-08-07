@@ -2,6 +2,7 @@
 
 import importlib.machinery
 import importlib.util
+import hashlib
 import json
 import tempfile
 from pathlib import Path
@@ -128,6 +129,7 @@ with tempfile.TemporaryDirectory() as temporary:
                     "imported_name": "output final",
                     "lora_weight": 0.7,
                     "base_model": "test-model",
+                    "settings": {"seeds": [20260801]},
                     "control": {
                         "input_sha256": module.sha256(conditioning / "robot.png"),
                         "model": "synthetic-controlnet",
@@ -136,10 +138,21 @@ with tempfile.TemporaryDirectory() as temporary:
                         "end": 1.0,
                     },
                 },
+                "image_sha256": module.sha256(output / "render.png"),
                 "score": 8.5,
             }
         ],
     }
+    validation_result["render_matrix_sha256"] = hashlib.sha256(
+        json.dumps(
+            [{
+                "prompt_id": "robot",
+                "seed": 20260801,
+                "image_sha256": validation_result["renders"][0]["image_sha256"],
+            }],
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     result_path = output / "validation-result.json"
     result_path.write_text(json.dumps(validation_result))
     rendered = module.controlled_validation_samples(
@@ -161,9 +174,26 @@ with tempfile.TemporaryDirectory() as temporary:
         assert "wrong control input" in str(error)
     else:
         raise AssertionError("wrong ControlNet input was accepted")
+    wrong_live_settings = json.loads(json.dumps(validation_result))
+    wrong_live_settings["renders"][0]["live_metadata"]["settings"] = {
+        "seeds": [9999]
+    }
+    result_path.write_text(json.dumps(wrong_live_settings))
+    try:
+        module.controlled_validation_samples(output, samples, library, lora_sha256)
+    except RuntimeError as error:
+        assert "live settings differ" in str(error)
+    else:
+        raise AssertionError("mismatched live settings were accepted")
     result_path.write_text(json.dumps(validation_result))
     evidence_before = module.validation_evidence_sha256(output, lora_sha256)
     (output / "render.png").write_bytes(b"changed render")
+    try:
+        module.controlled_validation_samples(output, samples, library, lora_sha256)
+    except RuntimeError as error:
+        assert "image SHA-256 mismatch" in str(error)
+    else:
+        raise AssertionError("mutated render image was accepted")
     evidence_after = module.validation_evidence_sha256(output, lora_sha256)
     assert evidence_before != evidence_after
     try:

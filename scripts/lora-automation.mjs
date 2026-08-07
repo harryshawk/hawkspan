@@ -1715,6 +1715,25 @@ function safeFileStem(value) {
     .slice(0, 120) || "render";
 }
 
+function assertLiveSettingsMatchFixed(liveMetadata, fixed, index) {
+  if (JSON.stringify(liveMetadata.settings || null) !== JSON.stringify(fixed)) {
+    throw new Error(`validation render ${index} live settings differ from the bound fixed settings`);
+  }
+  const expectedControl = fixed.controlnet || fixed.control || null;
+  if (expectedControl) {
+    const actualControl = liveMetadata.control || {};
+    for (const [key, expectedValue] of Object.entries(expectedControl)) {
+      if (actualControl[key] !== expectedValue) {
+        throw new Error(`validation render ${index} ControlNet settings differ from the bound fixed settings`);
+      }
+    }
+  }
+  if (Object.hasOwn(fixed, "lora_weight") &&
+      Number(liveMetadata.lora_weight) !== Number(fixed.lora_weight)) {
+    throw new Error(`validation render ${index} LoRA weight differs from the bound fixed settings`);
+  }
+}
+
 function ingestControlledValidationResult(revision, result, drawThingsPlanDocument) {
   if (!Array.isArray(result.renders)) return null;
   const validationPlanPath = path.resolve(String(result.validation_plan_path || ""));
@@ -1761,11 +1780,9 @@ function ingestControlledValidationResult(revision, result, drawThingsPlanDocume
   const expected = new Set(
     [...promptIds].flatMap((promptId) => seeds.map((seed) => `${promptId}\0${seed}`)),
   );
-  const outputRoot = path.resolve(revision.output_path);
-  const renderRoot = path.join(outputRoot, "validation-renders");
-  fs.mkdirSync(renderRoot, { recursive: true });
   const seen = new Set();
-  const portableRenders = [];
+  const imageHashes = new Set();
+  const validatedRenders = [];
   for (const [index, render] of result.renders.entries()) {
     const promptId = String(render.prompt_id || "");
     const seed = render.seed;
@@ -1804,6 +1821,7 @@ function ingestControlledValidationResult(revision, result, drawThingsPlanDocume
         throw new Error(`validation render ${index} has incomplete ControlNet metadata`);
       }
     }
+    assertLiveSettingsMatchFixed(render.live_metadata, fixed, index);
     if (typeof render.score !== "number" || Number.isNaN(render.score)) {
       throw new Error(`validation render ${index} has no numeric score`);
     }
@@ -1812,13 +1830,12 @@ function ingestControlledValidationResult(revision, result, drawThingsPlanDocume
         !imageExtensions.has(path.extname(source).toLowerCase())) {
       throw new Error(`validation render ${index} image is missing or unsupported`);
     }
-    const targetName = `${safeFileStem(promptId)}--seed-${seed}${path.extname(source).toLowerCase()}`;
-    const target = path.join(renderRoot, targetName);
-    if (source !== target) fs.copyFileSync(source, target);
-    portableRenders.push({
-      ...render,
-      image_path: path.relative(outputRoot, target),
-    });
+    const imageSha256 = sha256(source);
+    if (imageHashes.has(imageSha256)) {
+      throw new Error(`validation render ${index} duplicates another render image`);
+    }
+    imageHashes.add(imageSha256);
+    validatedRenders.push({ render, promptId, seed, source, imageSha256 });
     seen.add(key);
   }
   if (seen.size !== expected.size) {
@@ -1828,6 +1845,45 @@ function ingestControlledValidationResult(revision, result, drawThingsPlanDocume
         return [promptId, Number(seed)];
       });
     throw new Error(`controlled validation result is missing renders: ${JSON.stringify(missing)}`);
+  }
+  const outputRoot = path.resolve(revision.output_path);
+  const renderParent = path.join(outputRoot, "validation-renders");
+  const matrixSha256 = crypto.createHash("sha256")
+    .update(JSON.stringify(validatedRenders.map(({ promptId, seed, imageSha256 }) => ({
+      prompt_id: promptId,
+      seed,
+      image_sha256: imageSha256,
+    }))))
+    .digest("hex");
+  const renderRoot = path.join(renderParent, matrixSha256);
+  const stagingRoot = `${renderRoot}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  const portableRenders = [];
+  if (!fs.existsSync(renderRoot)) {
+    fs.mkdirSync(stagingRoot, { recursive: true });
+  }
+  try {
+    for (const { render, promptId, seed, source, imageSha256 } of validatedRenders) {
+      const targetName = `${safeFileStem(promptId)}--seed-${seed}${path.extname(source).toLowerCase()}`;
+      const target = path.join(renderRoot, targetName);
+      const stagingTarget = path.join(stagingRoot, targetName);
+      if (!fs.existsSync(renderRoot)) {
+        fs.copyFileSync(source, stagingTarget);
+        if (sha256(stagingTarget) !== imageSha256) {
+          throw new Error(`copied validation render failed SHA-256 verification: ${targetName}`);
+        }
+      } else if (!fs.existsSync(target) || sha256(target) !== imageSha256) {
+        throw new Error(`immutable validation render set is incomplete or changed: ${targetName}`);
+      }
+      portableRenders.push({
+        ...render,
+        image_path: path.relative(outputRoot, target),
+        image_sha256: imageSha256,
+      });
+    }
+    if (!fs.existsSync(renderRoot)) fs.renameSync(stagingRoot, renderRoot);
+  } catch (error) {
+    fs.rmSync(stagingRoot, { recursive: true, force: true });
+    throw error;
   }
   const validationResult = {
     schema_version: 1,
@@ -1843,6 +1899,7 @@ function ingestControlledValidationResult(revision, result, drawThingsPlanDocume
     base_model: result.base_model,
     application_version: result.application_version,
     settings: result.settings || fixed,
+    render_matrix_sha256: matrixSha256,
     renders: portableRenders,
     notes: result.validation_notes || result.notes || "",
     generated_at: result.generated_at || new Date().toISOString(),

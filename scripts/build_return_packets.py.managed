@@ -431,6 +431,9 @@ def controlled_validation_samples(
         raise RuntimeError("Validation result must contain a renders array")
     destination.mkdir(parents=True, exist_ok=True)
     seen: set[tuple[str, int]] = set()
+    image_hashes: set[str] = set()
+    render_matrix: list[dict] = []
+    validated_renders: list[tuple[dict, Path, str, int]] = []
     copied: list[Path] = []
     portable_renders: list[dict] = []
     output_root = output_dir.resolve()
@@ -460,6 +463,11 @@ def controlled_validation_samples(
             raise RuntimeError(f"Validation render {index} has no numeric LoRA weight")
         if live_metadata.get("base_model") != result.get("base_model"):
             raise RuntimeError(f"Validation render {index} has the wrong base model")
+        fixed_settings = validation_plan.get("fixed_settings", {})
+        if live_metadata.get("settings") != fixed_settings:
+            raise RuntimeError(
+                f"Validation render {index} live settings differ from the bound fixed settings"
+            )
         bound_prompt = bound_prompts.get(prompt_id, {})
         if bound_prompt.get("control_image_path"):
             control = live_metadata.get("control")
@@ -479,6 +487,22 @@ def controlled_validation_samples(
                 raise RuntimeError(
                     f"Validation render {index} has incomplete ControlNet metadata"
                 )
+            expected_control = (
+                fixed_settings.get("controlnet") or fixed_settings.get("control")
+            )
+            if expected_control is not None and any(
+                control.get(key) != value for key, value in expected_control.items()
+            ):
+                raise RuntimeError(
+                    f"Validation render {index} ControlNet settings differ from the bound fixed settings"
+                )
+        if (
+            "lora_weight" in fixed_settings
+            and live_metadata.get("lora_weight") != fixed_settings["lora_weight"]
+        ):
+            raise RuntimeError(
+                f"Validation render {index} LoRA weight differs from the bound fixed settings"
+            )
         if isinstance(render.get("score"), bool) or not isinstance(
             render.get("score"), (int, float)
         ):
@@ -496,6 +520,30 @@ def controlled_validation_samples(
             ) from error
         if not source.is_file() or source.suffix.lower() not in IMAGE_EXTS:
             raise RuntimeError(f"Validation render {index} image is missing or invalid")
+        image_sha256 = sha256(source)
+        if render.get("image_sha256") != image_sha256:
+            raise RuntimeError(f"Validation render {index} image SHA-256 mismatch")
+        if image_sha256 in image_hashes:
+            raise RuntimeError(f"Validation render {index} duplicates another render image")
+        image_hashes.add(image_sha256)
+        render_matrix.append({
+            "prompt_id": prompt_id,
+            "seed": seed,
+            "image_sha256": image_sha256,
+        })
+        validated_renders.append((render, source, prompt_id, seed))
+        seen.add(key)
+    if seen != expected:
+        missing = sorted(expected - seen)
+        raise RuntimeError(
+            f"Validation result is missing required prompt/seed renders: {missing}"
+        )
+    matrix_sha256 = hashlib.sha256(
+        json.dumps(render_matrix, separators=(",", ":")).encode()
+    ).hexdigest()
+    if result.get("render_matrix_sha256") != matrix_sha256:
+        raise RuntimeError("Validation result render-matrix SHA-256 mismatch")
+    for render, source, prompt_id, seed in validated_renders:
         target = (
             destination
             / f"{safe_name(prompt_id)}--seed-{seed}{source.suffix.lower()}"
@@ -505,12 +553,6 @@ def controlled_validation_samples(
         portable["image_path"] = f"VALIDATION_SAMPLES/{target.name}"
         portable_renders.append(portable)
         copied.append(target)
-        seen.add(key)
-    if seen != expected:
-        missing = sorted(expected - seen)
-        raise RuntimeError(
-            f"Validation result is missing required prompt/seed renders: {missing}"
-        )
     portable_result = dict(result)
     portable_result["renders"] = portable_renders
     atomic_json(destination / "validation-result.json", portable_result)

@@ -90,7 +90,17 @@ fs.writeFileSync(
   path.join(testQueue, "validation-prompts.json"),
   `${JSON.stringify({
     schema_version: 1,
-    fixed_settings: { seeds: [1234, 5678], base_model: "test-model" },
+    fixed_settings: {
+      seeds: [1234, 5678],
+      base_model: "test-model",
+      lora_weight: 0.7,
+      controlnet: {
+        model: "synthetic-controlnet",
+        weight: 1,
+        start: 0,
+        end: 1,
+      },
+    },
     controls_are_relative_to: "dataset",
     prompts: validationPromptIds.map((id) => ({
       id,
@@ -651,7 +661,8 @@ assert.equal(
   "awaiting_m2_draw_things_render",
 );
 const validationResultPath = path.join(testRoot, "validation-result.json");
-const validationImagePath = path.join(testRoot, "validation.png");
+const validationImagePathFor = (promptId, seed) =>
+  path.join(testRoot, `${promptId}--${seed}.png`);
 const checkpoint400LoraPath = path.join(
   testOutput,
   "checkpoint-400",
@@ -660,7 +671,14 @@ const checkpoint400LoraPath = path.join(
 const checkpoint400LoraSha256 = crypto.createHash("sha256")
   .update(fs.readFileSync(checkpoint400LoraPath))
   .digest("hex");
-fs.writeFileSync(validationImagePath, "synthetic validation image");
+for (const promptId of validationPromptIds) {
+  for (const seed of [1234, 5678]) {
+    fs.writeFileSync(
+      validationImagePathFor(promptId, seed),
+      `synthetic validation image ${promptId} ${seed}\n`,
+    );
+  }
+}
 fs.writeFileSync(
   validationResultPath,
   `${JSON.stringify({
@@ -676,9 +694,12 @@ fs.writeFileSync(
     score: 8.5,
     renders: validationPromptIds.flatMap((promptId) => [1234, 5678].map((seed) => ({
         prompt_id: promptId,
-        image_path: validationImagePath,
+        image_path: validationImagePathFor(promptId, seed),
         seed,
-        live_metadata: { lora_weight: 0.7 },
+        live_metadata: {
+          lora_weight: 0.7,
+          settings: automationValidationPlan.result.structuredContent.plan.fixed_settings,
+        },
         score: 8.5,
         notes: "synthetic validation",
       }))),
@@ -747,12 +768,13 @@ const drawThingsResult = {
   score: 8.5,
   renders: validationPromptIds.flatMap((promptId) => [1234, 5678].map((seed) => ({
       prompt_id: promptId,
-      image_path: validationImagePath,
+      image_path: validationImagePathFor(promptId, seed),
       seed,
       live_metadata: {
         lora_weight: 0.7,
         imported_name: "cap-test checkpoint-400",
         base_model: "test-model",
+        settings: drawThingsPlanDoc.validation_settings,
         control: {
           input_sha256: drawThingsPromptsById.get(promptId).control_image_sha256,
           model: "synthetic-controlnet",
@@ -825,6 +847,43 @@ assert.match(
   changedSettingsIngest.result.content[0].text,
   /validation settings differ from the bound fixed settings/,
 );
+const changedLiveSettingsResultPath = path.join(testRoot, "changed-live-settings-result.json");
+const changedLiveSettingsResult = structuredClone(drawThingsResult);
+changedLiveSettingsResult.renders[0].live_metadata.settings = {
+  ...changedLiveSettingsResult.renders[0].live_metadata.settings,
+  seeds: [9999],
+};
+fs.writeFileSync(
+  changedLiveSettingsResultPath,
+  `${JSON.stringify(changedLiveSettingsResult)}\n`,
+);
+const changedLiveSettingsIngest = await tool("lora_automation", {
+  action: "draw-things-ingest",
+  job_id: "cap-test",
+  result_path: changedLiveSettingsResultPath,
+});
+assert.equal(changedLiveSettingsIngest.result.isError, true);
+assert.match(
+  changedLiveSettingsIngest.result.content[0].text,
+  /live settings differ from the bound fixed settings/,
+);
+const duplicateRenderResultPath = path.join(testRoot, "duplicate-render-result.json");
+const duplicateRenderResult = structuredClone(drawThingsResult);
+duplicateRenderResult.renders[1].image_path = duplicateRenderResult.renders[0].image_path;
+fs.writeFileSync(
+  duplicateRenderResultPath,
+  `${JSON.stringify(duplicateRenderResult)}\n`,
+);
+const duplicateRenderIngest = await tool("lora_automation", {
+  action: "draw-things-ingest",
+  job_id: "cap-test",
+  result_path: duplicateRenderResultPath,
+});
+assert.equal(duplicateRenderIngest.result.isError, true);
+assert.match(
+  duplicateRenderIngest.result.content[0].text,
+  /duplicates another render image/,
+);
 const missingControlResultPath = path.join(testRoot, "missing-control-result.json");
 const missingControlResult = structuredClone(drawThingsResult);
 delete missingControlResult.renders[0].live_metadata.control;
@@ -858,10 +917,40 @@ const drawThingsValidationResult = JSON.parse(
   fs.readFileSync(path.join(testOutput, "validation-result.json"), "utf8"),
 );
 assert.equal(drawThingsValidationResult.renders.length, 8);
+assert.equal(drawThingsValidationResult.render_matrix_sha256.length, 64);
+assert.equal(drawThingsValidationResult.renders[0].image_sha256.length, 64);
 assert.equal(
   drawThingsValidationResult.renders[0].image_path.startsWith("validation-renders/"),
   true,
 );
+const acceptedRenderPath = path.join(
+  testOutput,
+  drawThingsValidationResult.renders[0].image_path,
+);
+const acceptedRenderSha256 = crypto.createHash("sha256")
+  .update(fs.readFileSync(acceptedRenderPath))
+  .digest("hex");
+const firstSourcePath = drawThingsResult.renders[0].image_path;
+const firstSourceBytes = fs.readFileSync(firstSourcePath);
+fs.writeFileSync(firstSourcePath, "changed source that must not replace accepted evidence\n");
+const failedReplacementResultPath = path.join(testRoot, "failed-replacement-result.json");
+const failedReplacementResult = structuredClone(drawThingsResult);
+failedReplacementResult.renders.at(-1).image_path = path.join(testRoot, "missing-render.png");
+fs.writeFileSync(
+  failedReplacementResultPath,
+  `${JSON.stringify(failedReplacementResult)}\n`,
+);
+const failedReplacementIngest = await tool("lora_automation", {
+  action: "draw-things-ingest",
+  job_id: "cap-test",
+  result_path: failedReplacementResultPath,
+});
+assert.equal(failedReplacementIngest.result.isError, true);
+assert.equal(
+  crypto.createHash("sha256").update(fs.readFileSync(acceptedRenderPath)).digest("hex"),
+  acceptedRenderSha256,
+);
+fs.writeFileSync(firstSourcePath, firstSourceBytes);
 const registryRefreshAfterDrawThings = await tool("lora_automation", {
   action: "registry-refresh",
 });

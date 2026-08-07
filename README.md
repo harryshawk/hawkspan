@@ -121,7 +121,10 @@ checkpoint/LoRA SHA-256, expected imported name and base model, unchanged fixed
 settings, common seed set, actual render files, scores, and live Draw Things
 metadata. Controlled prompts additionally require the exact planned control
 image SHA-256 and the recorded ControlNet model, weight, start, and end values.
-A different but internally valid LoRA, base model, or control input is rejected.
+Every render records its image SHA-256; duplicate images are rejected, and the
+complete matrix is preserved in an immutable content-addressed directory only
+after every required prompt/seed result passes. A different but internally
+valid LoRA, base model, control input, or live setting is rejected.
 The validated return-packet builder repeats these checks before copying any
 render evidence, so modifying the intermediate result after ingestion cannot
 produce a validated package.
