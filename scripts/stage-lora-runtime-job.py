@@ -19,6 +19,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-manifest", type=Path, required=True)
@@ -56,6 +59,22 @@ def inventory(root: Path) -> list[dict]:
     ]
 
 
+def training_input_files(root: Path, include_captions: bool) -> list[Path]:
+    allowed = IMAGE_SUFFIXES | ({".txt"} if include_captions else set())
+    return [path for path in files(root) if path.suffix.lower() in allowed]
+
+
+def training_input_inventory(root: Path, include_captions: bool) -> list[dict]:
+    return [
+        {
+            "relative_path": str(path.relative_to(root)),
+            "size_bytes": path.stat().st_size,
+            "sha256": sha256(path),
+        }
+        for path in training_input_files(root, include_captions)
+    ]
+
+
 def clone_tree(source: Path, destination: Path) -> None:
     if not source.is_dir():
         raise SystemExit(f"source directory is unavailable: {source}")
@@ -67,6 +86,16 @@ def clone_tree(source: Path, destination: Path) -> None:
     if result.returncode == 0:
         return
     shutil.copytree(source, destination, copy_function=shutil.copy2)
+
+
+def clone_training_inputs(source: Path, destination: Path, include_captions: bool) -> None:
+    if not source.is_dir():
+        raise SystemExit(f"source directory is unavailable: {source}")
+    destination.mkdir(parents=True)
+    for source_path in training_input_files(source, include_captions):
+        target = destination / source_path.relative_to(source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target)
 
 
 def atomic_json(path: Path, value) -> None:
@@ -125,10 +154,11 @@ def main() -> None:
     )
     if source_conditioning and not source_conditioning.is_dir():
         raise SystemExit(f"conditioning directory is unavailable: {source_conditioning}")
-    source_inventory = inventory(source_data)
+    source_inventory = training_input_inventory(source_data, include_captions=True)
     config_inventory = inventory(source_config)
     conditioning_inventory = (
-        inventory(source_conditioning) if source_conditioning else []
+        training_input_inventory(source_conditioning, include_captions=False)
+        if source_conditioning else []
     )
     overlay_job_root = None
     source_overlay_inventory = []
@@ -182,10 +212,12 @@ def main() -> None:
         data_dir = temporary_root / "dataset"
         config_dir = temporary_root / "config"
         conditioning_dir = temporary_root / "conditioning"
-        clone_tree(source_data, data_dir)
+        clone_training_inputs(source_data, data_dir, include_captions=True)
         clone_tree(source_config, config_dir)
         if source_conditioning:
-            clone_tree(source_conditioning, conditioning_dir)
+            clone_training_inputs(
+                source_conditioning, conditioning_dir, include_captions=False
+            )
         preserved_captions = temporary_root / "preserved-source-captions"
         preserved_captions.mkdir()
         for caption in sorted(data_dir.rglob("*.txt")):

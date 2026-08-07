@@ -61,10 +61,10 @@ Feature: HawkSpan-managed 100-step robot ControlNet LoRA lifecycle
 
     Examples:
       | target                              |
-      | hawkspan-robot-100-v6-d-queue-r20  |
       | hawkspan-robot-100-v9-d-queue-r23  |
       | hawkspan-robot-100-v10-d-queue-r24 |
       | hawkspan-robot-100-v11-d-queue-r25 |
+      | hawkspan-robot-100-v12-d-queue-r26 |
 
   Scenario: Pause one queued job while another job continues
     Given one exact target is training and another exact target is queued

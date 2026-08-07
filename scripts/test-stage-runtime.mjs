@@ -43,6 +43,9 @@ const image = Buffer.from(
 );
 fs.writeFileSync(path.join(dataset, "sample.png"), image);
 fs.writeFileSync(path.join(conditioning, "sample.png"), image);
+fs.writeFileSync(path.join(dataset, "aspect_ratio_bucket_metadata_old-job.json"), "{}\n");
+fs.writeFileSync(path.join(conditioning, "aspect_ratio_bucket_indices_old-job.json"), "{}\n");
+fs.writeFileSync(path.join(conditioning, "sample.txt"), "conditioning cache sidecar\n");
 const variants = ["literal", "sensual", "erotic", "clinical", "tags"].map(
   (mode) => [
     `Subject: testv2, ${mode}`,
@@ -259,6 +262,15 @@ assert.equal(
   fs.readFileSync(path.join(runtimeManifest[0].conditioning_dir, "sample.png"), "base64"),
   image.toString("base64"),
 );
+assert.equal(
+  fs.existsSync(path.join(runtimeManifest[0].data_dir, "aspect_ratio_bucket_metadata_old-job.json")),
+  false,
+);
+assert.equal(
+  fs.existsSync(path.join(runtimeManifest[0].conditioning_dir, "aspect_ratio_bucket_indices_old-job.json")),
+  false,
+);
+assert.equal(fs.existsSync(path.join(runtimeManifest[0].conditioning_dir, "sample.txt")), false);
 const stagedCaption = path.join(
   runtimeManifest[0].data_dir,
   "sample.txt",
@@ -324,6 +336,20 @@ const second = spawnSync("/usr/bin/python3", [
 ], { encoding: "utf8", timeout: 30000 });
 assert.equal(second.status, 0, second.stderr);
 assert.equal(JSON.parse(second.stdout).already_present, true);
+
+fs.writeFileSync(path.join(dataset, "aspect_ratio_bucket_indices_new-cache.json"), "{}\n");
+fs.writeFileSync(path.join(conditioning, "aspect_ratio_bucket_metadata_new-cache.json"), "{}\n");
+const afterSourceCacheMutation = spawnSync("/usr/bin/python3", [
+  stageScript,
+  "--source-manifest", path.join(queue, "captioned-lora-manifest.json"),
+  "--job-id", "cap-test-v2",
+  "--runtime-root", runtimeRoot,
+  "--base-link-config", configPath,
+  "--caption-overlay-root", overlayRoot,
+], { encoding: "utf8", timeout: 30000 });
+assert.equal(afterSourceCacheMutation.status, 0, afterSourceCacheMutation.stderr);
+assert.equal(JSON.parse(afterSourceCacheMutation.stdout).already_present, true);
+assert.equal(JSON.parse(afterSourceCacheMutation.stdout).runtime_job_root, JSON.parse(second.stdout).runtime_job_root);
 
 const stagedRoot = JSON.parse(second.stdout).runtime_job_root;
 fs.rmSync(path.join(stagedRoot, "STAGE-MANIFEST.json"));

@@ -9,6 +9,9 @@
 - Rejected duplicate scheduler targets and mismatched authorization targets.
 - Kept successfully launched trainers in truthful `running` telemetry instead
   of recording a premature finish time and exit code.
+- Restricted runtime staging and revision hashing to training images and target
+  captions, excluding generated cache metadata and conditioning sidecars from
+  prior runs.
 
 ## 0.3.1 - 2026-08-06
 

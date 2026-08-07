@@ -10,7 +10,11 @@ import { createQueueRegistry } from "./queue-registry.mjs";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "hawkspan-queue-registry-"));
 const db = new DatabaseSync(path.join(root, "registry.sqlite3"));
 db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;");
-const registry = createQueueRegistry(db, { retryDelaysMs: [100, 200], maximumAttempts: 2 });
+const registry = createQueueRegistry(db, {
+  retryDelaysMs: [100, 200],
+  maximumAttempts: 2,
+  retryJitter: false,
+});
 
 const created = registry.createQueue({
   queue_id: "renders",
