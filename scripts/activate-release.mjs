@@ -4,10 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readHawkspanEnv, serializeHawkspanEnv } from "./hawkspan-env.mjs";
+import { readHawkspanEnvForUpgrade, serializeHawkspanEnv } from "./hawkspan-env.mjs";
 import { assertProductSeparated } from "./product-separation.mjs";
 import {
-  atomicJson,
   atomicWrite,
   commitReleaseAuthority,
   derivedReleasePaths,
@@ -30,7 +29,8 @@ const revision = revisionIndex >= 0
 
 const separation = assertProductSeparated(releaseRoot);
 const envPath = path.join(stateRoot, "hawkspan.env");
-const envValues = { ...readHawkspanEnv(envPath) };
+const envUpgrade = readHawkspanEnvForUpgrade(envPath);
+const envValues = { ...envUpgrade.values };
 const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
 for (const name of ["remote_plugin_root", "remote_call_tool"]) {
   if (Object.hasOwn(config.peer || {}, name)) {
@@ -67,14 +67,43 @@ const renderedLaunchd = renderLaunchdPlistBodies(authority, {
   launchAgentsRoot: process.env.HAWKSPAN_LAUNCH_AGENTS_DIR || path.join(os.homedir(), "Library", "LaunchAgents"),
 });
 
+const publishTargets = [
+  { targetPath: envPath, body: envBody, mode: 0o600 },
+  { targetPath: configPath, body: `${JSON.stringify(config, null, 2)}\n`, mode: 0o600 },
+  ...renderedLaunchd.map(({ targetPath, rendered }) => ({ targetPath, body: rendered, mode: 0o644 })),
+];
+const snapshots = publishTargets.map(({ targetPath }) => ({
+  targetPath,
+  existed: fs.existsSync(targetPath),
+  body: fs.existsSync(targetPath) ? fs.readFileSync(targetPath) : null,
+  mode: fs.existsSync(targetPath) ? fs.statSync(targetPath).mode & 0o777 : null,
+}));
+const authorityPath = path.join(stateRoot, "installed-revision.json");
+const authoritySnapshot = {
+  existed: fs.existsSync(authorityPath),
+  body: fs.existsSync(authorityPath) ? fs.readFileSync(authorityPath) : null,
+  mode: fs.existsSync(authorityPath) ? fs.statSync(authorityPath).mode & 0o777 : null,
+};
+const stableSnapshot = fs.existsSync(authority.stable_release_root)
+  ? fs.readlinkSync(authority.stable_release_root)
+  : null;
+
 // installed-revision.json is the transaction commit marker. Everything it
 // names is fully validated and published before the authority becomes active.
-atomicWrite(envPath, envBody);
-atomicJson(configPath, config);
-for (const { targetPath, rendered } of renderedLaunchd) {
-  atomicWrite(targetPath, rendered, 0o644);
+try {
+  for (const { targetPath, body, mode } of publishTargets) atomicWrite(targetPath, body, mode);
+  commitReleaseAuthority(stateRoot, authority);
+} catch (error) {
+  for (const snapshot of snapshots.reverse()) {
+    if (snapshot.existed) atomicWrite(snapshot.targetPath, snapshot.body, snapshot.mode);
+    else if (fs.existsSync(snapshot.targetPath)) fs.unlinkSync(snapshot.targetPath);
+  }
+  if (authoritySnapshot.existed) atomicWrite(authorityPath, authoritySnapshot.body, authoritySnapshot.mode);
+  else if (fs.existsSync(authorityPath)) fs.unlinkSync(authorityPath);
+  if (fs.existsSync(authority.stable_release_root)) fs.unlinkSync(authority.stable_release_root);
+  if (stableSnapshot !== null) fs.symlinkSync(stableSnapshot, authority.stable_release_root);
+  throw error;
 }
-commitReleaseAuthority(stateRoot, authority);
 const launchdPaths = renderedLaunchd.map(({ targetPath }) => targetPath);
 
 process.stdout.write(`${JSON.stringify({
@@ -83,5 +112,6 @@ process.stdout.write(`${JSON.stringify({
   authority,
   config_path: configPath,
   env_path: envPath,
+  retired_environment_names: envUpgrade.retired_names,
   launchd_paths: launchdPaths,
 }, null, 2)}\n`);

@@ -69,6 +69,14 @@ export const HAWKSPAN_ENV_NAMES = Object.freeze([
 ]);
 
 const allowed = new Set(HAWKSPAN_ENV_NAMES);
+export const RETIRED_HAWKSPAN_ENV_NAMES = Object.freeze([
+  "HAWKSPAN_PLUGIN_ROOT",
+  "HAWKSPAN_LOCAL_CONTROL_URL",
+  "HAWKSPAN_REMOTE_PLUGIN_ROOT",
+  "HAWKSPAN_REMOTE_CALL_TOOL",
+  "HAWKSPAN_REMOTE_REPOSITORY_DIR",
+]);
+const retired = new Set(RETIRED_HAWKSPAN_ENV_NAMES);
 
 const BOOLEAN_NAMES = new Set([
   "HAWKSPAN_PRIMARY_ENABLED", "HAWKSPAN_FALLBACK_ENABLED",
@@ -149,7 +157,7 @@ function validateValue(name, value) {
   }
 }
 
-export function parseHawkspanEnv(text) {
+function parseHawkspanEnvInternal(text, { allowRetired = false } = {}) {
   if (typeof text !== "string" || Buffer.byteLength(text) > 64 * 1024) {
     throw new Error("hawkspan.env must be no larger than 64 KiB");
   }
@@ -159,7 +167,9 @@ export function parseHawkspanEnv(text) {
     const match = /^\s*([A-Z][A-Z0-9_]*)\s*=/.exec(raw);
     if (!match) throw new Error(`hawkspan.env line ${index + 1} must be NAME=value`);
     const name = match[1];
-    if (!allowed.has(name)) throw new Error(`hawkspan.env line ${index + 1} uses unsupported name: ${name}`);
+    if (!allowed.has(name) && !(allowRetired && retired.has(name))) {
+      throw new Error(`hawkspan.env line ${index + 1} uses unsupported name: ${name}`);
+    }
     if (Object.hasOwn(values, name)) throw new Error(`hawkspan.env contains duplicate name: ${name}`);
     let lineValues;
     try { lineValues = parseEnv(raw); } catch {
@@ -168,14 +178,18 @@ export function parseHawkspanEnv(text) {
     if (Object.keys(lineValues).length !== 1 || !Object.hasOwn(lineValues, name)) {
       throw new Error(`hawkspan.env line ${index + 1} must contain one NAME=value entry`);
     }
-    validateValue(name, lineValues[name]);
+    if (allowed.has(name)) validateValue(name, lineValues[name]);
     values[name] = lineValues[name];
   }
   return Object.freeze(values);
 }
 
-export function readHawkspanEnv(filePath) {
-  if (!fs.existsSync(filePath)) return Object.freeze({});
+export function parseHawkspanEnv(text) {
+  return parseHawkspanEnvInternal(text);
+}
+
+function readHawkspanEnvText(filePath) {
+  if (!fs.existsSync(filePath)) return null;
   const stat = fs.lstatSync(filePath);
   if (stat.isSymbolicLink() || !stat.isFile()) {
     throw new Error("hawkspan.env must be a regular non-symbolic-link file");
@@ -187,7 +201,24 @@ export function readHawkspanEnv(filePath) {
     throw new Error("hawkspan.env must be owned by the current user");
   }
   if (stat.size > 64 * 1024) throw new Error("hawkspan.env must be no larger than 64 KiB");
-  return parseHawkspanEnv(fs.readFileSync(filePath, "utf8"));
+  return fs.readFileSync(filePath, "utf8");
+}
+
+export function readHawkspanEnv(filePath) {
+  const text = readHawkspanEnvText(filePath);
+  return text === null ? Object.freeze({}) : parseHawkspanEnv(text);
+}
+
+export function readHawkspanEnvForUpgrade(filePath) {
+  const text = readHawkspanEnvText(filePath);
+  if (text === null) return Object.freeze({ values: Object.freeze({}), retired_names: Object.freeze([]) });
+  const parsed = parseHawkspanEnvInternal(text, { allowRetired: true });
+  const retiredNames = Object.keys(parsed).filter((name) => retired.has(name)).sort();
+  const values = Object.fromEntries(Object.entries(parsed).filter(([name]) => allowed.has(name)));
+  return Object.freeze({
+    values: Object.freeze(values),
+    retired_names: Object.freeze(retiredNames),
+  });
 }
 
 function booleanValue(values, name) {

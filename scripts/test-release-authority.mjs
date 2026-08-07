@@ -65,6 +65,10 @@ fs.mkdirSync(stateRoot, { recursive: true });
 writeHawkspanEnv(path.join(stateRoot, "hawkspan.env"), {
   HAWKSPAN_ACTIVE_RELEASE_ROOT: "/old/release",
 });
+fs.appendFileSync(
+  path.join(stateRoot, "hawkspan.env"),
+  'HAWKSPAN_PLUGIN_ROOT="/old/release"\nHAWKSPAN_LOCAL_CONTROL_URL="http://127.0.0.1:8765"\n',
+);
 fs.writeFileSync(path.join(stateRoot, "config.json"), `${JSON.stringify({
   peer: { user: "peer", remote_plugin_root: "/remote/old", remote_call_tool: "/remote/old/scripts/call-tool.mjs" },
   training: {},
@@ -86,6 +90,7 @@ const activation = spawnSync(process.execPath, [
 assert.notEqual(activation.status, 0);
 assert.match(activation.stderr, /static peer release path is unsupported/);
 assert.equal(fs.existsSync(path.join(stateRoot, "installed-revision.json")), false);
+assert.match(fs.readFileSync(path.join(stateRoot, "hawkspan.env"), "utf8"), /HAWKSPAN_PLUGIN_ROOT/);
 
 fs.writeFileSync(path.join(stateRoot, "config.json"), `${JSON.stringify({
   peer: { user: "peer" },
@@ -132,7 +137,12 @@ const cleanActivation = spawnSync(process.execPath, [
   },
 });
 assert.equal(cleanActivation.status, 0, cleanActivation.stderr);
-assert.equal(JSON.parse(cleanActivation.stdout).product_separation.valid, true);
+const cleanActivationReceipt = JSON.parse(cleanActivation.stdout);
+assert.equal(cleanActivationReceipt.product_separation.valid, true);
+assert.deepEqual(
+  cleanActivationReceipt.retired_environment_names,
+  ["HAWKSPAN_LOCAL_CONTROL_URL", "HAWKSPAN_PLUGIN_ROOT"],
+);
 const authority = readReleaseAuthority(stateRoot);
 assert.equal(authority.revision, "test-revision");
 assert.equal(authority.active_release_root, resolvedReleaseRoot);
@@ -141,6 +151,34 @@ assert.equal(
   path.join(homeRoot, ".local", "share", "hawkspan", "current"),
 );
 assert.equal(fs.realpathSync(authority.stable_release_root), resolvedReleaseRoot);
+
+const envBeforePublishFailure = fs.readFileSync(path.join(stateRoot, "hawkspan.env"));
+const configBeforePublishFailure = fs.readFileSync(path.join(stateRoot, "config.json"));
+const authorityBeforePublishFailure = fs.readFileSync(path.join(stateRoot, "installed-revision.json"));
+const stableTargetBeforePublishFailure = fs.readlinkSync(authority.stable_release_root);
+const blockedLaunchAgentsRoot = path.join(temporaryRoot, "blocked-launch-agents");
+fs.writeFileSync(blockedLaunchAgentsRoot, "not a directory\n");
+const failedPublish = spawnSync(process.execPath, [
+  path.join(sourceRoot, "scripts", "activate-release.mjs"),
+  "--release-root", releaseRoot,
+  "--revision", "failed-publish-revision",
+], {
+  encoding: "utf8",
+  env: {
+    ...process.env,
+    HOME: homeRoot,
+    HAWKSPAN_STATE_DIR: stateRoot,
+    HAWKSPAN_LAUNCH_AGENTS_DIR: blockedLaunchAgentsRoot,
+  },
+});
+assert.notEqual(failedPublish.status, 0);
+assert.deepEqual(fs.readFileSync(path.join(stateRoot, "hawkspan.env")), envBeforePublishFailure);
+assert.deepEqual(fs.readFileSync(path.join(stateRoot, "config.json")), configBeforePublishFailure);
+assert.deepEqual(
+  fs.readFileSync(path.join(stateRoot, "installed-revision.json")),
+  authorityBeforePublishFailure,
+);
+assert.equal(fs.readlinkSync(authority.stable_release_root), stableTargetBeforePublishFailure);
 
 const envValues = readHawkspanEnv(path.join(stateRoot, "hawkspan.env"));
 assert.equal(envValues.HAWKSPAN_ACTIVE_RELEASE_ROOT, resolvedReleaseRoot);
