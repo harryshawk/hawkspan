@@ -173,6 +173,7 @@ const automationScript = path.join(
 fs.writeFileSync(configPath, JSON.stringify({
   schema_version: 1,
   training: {
+    max_train_attempts: 7,
     queue_root: queue,
     output_root: path.join(root, "source-output"),
     log_root: path.join(queue, "logs"),
@@ -322,6 +323,7 @@ const activePointer = JSON.parse(
 assert.equal(activePointer.config_path, staged.runtime_config);
 assert.equal(activePointer.training_authorized, false);
 const runtimeLinkConfig = JSON.parse(fs.readFileSync(staged.runtime_config));
+assert.equal(runtimeLinkConfig.training.max_train_attempts, 7);
 assert.equal(runtimeLinkConfig.training.node_path, process.execPath);
 assert.equal(runtimeLinkConfig.training.automation_script, automationScript);
 assert.equal(runtimeLinkConfig.training.runner_script, undefined);

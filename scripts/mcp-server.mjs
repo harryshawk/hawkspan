@@ -70,6 +70,7 @@ const defaultConfig = {
     allow_start: false,
     allow_stop: false,
     allow_package: false,
+    max_train_attempts: 3,
     minimum_checkpoint_retention: 10,
     preservation_root: null,
     simpletuner_root: null,

@@ -6,8 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import {
   applyHawkspanEnv, HAWKSPAN_ENV_NAMES, HAWKSPAN_INTERNAL_ENV_NAMES,
-  HAWKSPAN_OPERATIONAL_ENV_DEFAULTS, minimalChildEnvironment, parseHawkspanEnv,
-  readHawkspanEnv, writeHawkspanEnv,
+  HAWKSPAN_INTERNAL_RUNTIME_ENV_NAMES, HAWKSPAN_OPERATIONAL_ENV_DEFAULTS,
+  minimalChildEnvironment, parseHawkspanEnv, readHawkspanEnv,
+  RETIRED_HAWKSPAN_ENV_NAMES, writeHawkspanEnv,
 } from "./hawkspan-env.mjs";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "hawkspan-env-"));
@@ -31,6 +32,7 @@ const values = {
   HAWKSPAN_WORKLOAD_OUTPUT_ROOT: path.join(root, "workload-output"),
   HAWKSPAN_SIMPLETUNER_ROOT: path.join(root, "simpletuner"),
   HAWKSPAN_LOCAL_TRAINER_START_SCRIPT: path.join(root, "trainer-start"),
+  HAWKSPAN_MAX_TRAIN_ATTEMPTS: "3",
   HAWKSPAN_TRAINER_STOP_TERM_TIMEOUT_MS: "30000",
   HAWKSPAN_TRAINER_STOP_KILL_TIMEOUT_MS: "5000",
   HAWKSPAN_TRAINER_STOP_POLL_INTERVAL_MS: "100",
@@ -72,6 +74,7 @@ assert.equal(applied.peer.remote_state_dir, path.join(root, "remote-state"));
 assert.equal(applied.local_control.port, 8765);
 assert.equal(applied.training.simpletuner_root, path.join(root, "simpletuner"));
 assert.equal(applied.training.start_script, path.join(root, "trainer-start"));
+assert.equal(applied.training.max_train_attempts, 3);
 assert.equal(applied.training.stop_term_timeout_ms, 30000);
 assert.equal(applied.training.stop_kill_timeout_ms, 5000);
 assert.equal(applied.training.stop_poll_interval_ms, 100);
@@ -129,6 +132,28 @@ for (const name of HAWKSPAN_ENV_NAMES) {
 for (const name of internalNames) {
   assert(HAWKSPAN_ENV_NAMES.includes(name), `${name} must remain in the supported schema`);
   assert.equal(Object.hasOwn(example, name), false, `${name} must remain internal`);
+}
+
+const classifiedNames = new Set([
+  ...HAWKSPAN_ENV_NAMES,
+  ...HAWKSPAN_INTERNAL_RUNTIME_ENV_NAMES,
+  ...RETIRED_HAWKSPAN_ENV_NAMES,
+]);
+const sourceRoot = path.join(path.dirname(new URL(import.meta.url).pathname));
+const sourceMetaNames = new Set([
+  "HAWKSPAN_ENV_NAMES",
+  "HAWKSPAN_INTERNAL_ENV_NAMES",
+  "HAWKSPAN_INTERNAL_RUNTIME_ENV_NAMES",
+  "HAWKSPAN_OPERATIONAL_ENV_DEFAULTS",
+]);
+for (const entry of fs.readdirSync(sourceRoot)) {
+  if (entry.startsWith("test-") || !/\.(?:mjs|py|sh)$/.test(entry)) continue;
+  const source = fs.readFileSync(path.join(sourceRoot, entry), "utf8");
+  for (const match of source.matchAll(/HAWKSPAN_[A-Z0-9_]+/g)) {
+    const name = match[0];
+    if (name.endsWith("_") || sourceMetaNames.has(name)) continue;
+    assert(classifiedNames.has(name), `${entry} uses unclassified environment value ${name}`);
+  }
 }
 assert.equal(Object.hasOwn(example, "HAWKSPAN_REMOTE_PLUGIN_ROOT"), false);
 assert.equal(Object.hasOwn(example, "HAWKSPAN_REMOTE_CALL_TOOL"), false);

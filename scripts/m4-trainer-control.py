@@ -279,6 +279,9 @@ def start(job_id: str, target: str, expected_revision_fingerprint: str | None = 
                 )
             ),
             "HAWKSPAN_LORA_MPS_SHIM_DIR": str(TRAINING.get("mps_shim_dir", "")),
+            "HAWKSPAN_MAX_TRAIN_ATTEMPTS": str(
+                TRAINING.get("max_train_attempts", 3)
+            ),
         }
     )
     process = subprocess.Popen(
