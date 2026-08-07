@@ -627,6 +627,14 @@ function trainingReadiness(args) {
   if (!validation) {
     problems.push({ issue: "missing_validation_prompt_library", file: validationPath });
   } else {
+    try {
+      validationFixedSettings(validation);
+    } catch (error) {
+      problems.push({
+        issue: "invalid_validation_fixed_settings",
+        detail: error.message,
+      });
+    }
     for (const promptId of requiredPromptIds) {
       if (!presentPromptIds.has(promptId)) {
         problems.push({ issue: "missing_required_validation_prompt", prompt_id: promptId });
@@ -1631,6 +1639,43 @@ function validationFixedSettings(validation) {
     throw new Error("validation library contains a non-integer fixed seed");
   }
   fixed.seeds = fixed.seeds.map(Number);
+  const requiredStrings = ["base_model", "sampler"];
+  for (const key of requiredStrings) {
+    if (!String(fixed[key] || "").trim()) {
+      throw new Error(`validation library fixed_settings.${key} must be a non-empty string`);
+    }
+  }
+  for (const key of ["width", "height", "steps"]) {
+    if (!Number.isInteger(fixed[key]) || fixed[key] <= 0) {
+      throw new Error(`validation library fixed_settings.${key} must be a positive integer`);
+    }
+  }
+  for (const key of ["guidance_scale", "lora_weight"]) {
+    if (typeof fixed[key] !== "number" || !Number.isFinite(fixed[key])) {
+      throw new Error(`validation library fixed_settings.${key} must be a finite number`);
+    }
+  }
+  const controlsDeclared = validation.prompts?.some((entry) => entry.control_image);
+  if (controlsDeclared) {
+    const control = fixed.controlnet;
+    if (!control || typeof control !== "object" || Array.isArray(control)) {
+      throw new Error("controlled validation requires fixed_settings.controlnet");
+    }
+    for (const key of ["model", "mode"]) {
+      if (!String(control[key] || "").trim()) {
+        throw new Error(
+          `controlled validation fixed_settings.controlnet.${key} must be a non-empty string`,
+        );
+      }
+    }
+    for (const key of ["weight", "start", "end"]) {
+      if (typeof control[key] !== "number" || !Number.isFinite(control[key])) {
+        throw new Error(
+          `controlled validation fixed_settings.controlnet.${key} must be a finite number`,
+        );
+      }
+    }
+  }
   return fixed;
 }
 

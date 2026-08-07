@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "trigger": "hawkspan robots",
+  "seed_policy": "Use seed 20260801 for every mapped prompt.",
+  "controls_are_relative_to": "dataset",
+  "fixed_settings": {
+    "seeds": [
+      20260801
+    ],
+    "base_model": "stabilityai/stable-diffusion-xl-base-1.0",
+    "width": 1024,
+    "height": 1024,
+    "steps": 25,
+    "sampler": "DPM++ 2M Karras",
+    "guidance_scale": 5.0,
+    "lora_weight": 0.81,
+    "controlnet": {
+      "model": "Canny Edge Map SDXL",
+      "mode": "Balanced",
+      "weight": 1.0,
+      "start": 0.0,
+      "end": 1.0
+    }
+  },
+  "prompts": [
+    {
+      "id": "retro-diner-duo",
+      "control_image": "conditioning/hawkspan-robot-v2-001.png",
+      "source_target": "targets/hawkspan-robot-v2-001.png",
+      "prompt": "hawkspan robots, exactly two robots outside a cheerful retro diner, left robot Hawk with a readable Hawk nameplate, right robot Span with a readable Span nameplate, one broad glowing segmented physical span visibly connecting them across the middle, colorful polished G-rated promotional 3D illustration"
+    },
+    {
+      "id": "forest-bridge-duo",
+      "control_image": "conditioning/hawkspan-robot-v2-004.png",
+      "source_target": "targets/hawkspan-robot-v2-004.png",
+      "prompt": "hawkspan robots, exactly two compact helper robots beside a woodland stream, left robot Hawk with a readable Hawk nameplate, right robot Span with a readable Span nameplate, one flexible physical span visibly linking them, warm sunbeams and friendly teamwork, premium G-rated storybook campaign art"
+    },
+    {
+      "id": "neon-street-duo",
+      "control_image": "conditioning/hawkspan-robot-v2-011.png",
+      "source_target": "targets/hawkspan-robot-v2-011.png",
+      "prompt": "hawkspan robots, exactly two boxy screen-faced robots on a rainy neon street, left robot Hawk with a readable Hawk nameplate, right robot Span with a readable Span nameplate, one bright horizontal physical span visibly joining them, vivid magenta and blue reflections, polished G-rated technology advertisement"
+    },
+    {
+      "id": "underwater-duo",
+      "control_image": "conditioning/hawkspan-robot-v2-020.png",
+      "source_target": "targets/hawkspan-robot-v2-020.png",
+      "prompt": "hawkspan robots, exactly two exploration robots above an underwater reef, left robot Hawk with a readable Hawk nameplate, right robot Span with a readable Span nameplate, one luminous segmented physical span visibly linking them, sun rays descending through clear blue water, joyful G-rated adventure poster"
+    }
+  ]
+}

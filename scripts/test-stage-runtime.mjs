@@ -74,6 +74,23 @@ const validationPath = path.join(configDir, "validation-prompt-library.json");
 fs.writeFileSync(validationPath, JSON.stringify({
   controls_are_relative_to: "dataset",
   seed_policy: "Use seed 20260801 for every mapped prompt at step 300.",
+  fixed_settings: {
+    seeds: [20260801],
+    base_model: "test-model",
+    width: 1024,
+    height: 1024,
+    steps: 25,
+    sampler: "test-sampler",
+    guidance_scale: 5,
+    lora_weight: 0.7,
+    controlnet: {
+      model: "synthetic-controlnet",
+      mode: "balanced",
+      weight: 1,
+      start: 0,
+      end: 1,
+    },
+  },
   prompts: [
     "subject-wide",
     "subject-angle",

@@ -93,9 +93,15 @@ fs.writeFileSync(
     fixed_settings: {
       seeds: [1234, 5678],
       base_model: "test-model",
+      width: 1024,
+      height: 1024,
+      steps: 25,
+      sampler: "test-sampler",
+      guidance_scale: 5,
       lora_weight: 0.7,
       controlnet: {
         model: "synthetic-controlnet",
+        mode: "balanced",
         weight: 1,
         start: 0,
         end: 1,
@@ -639,6 +645,24 @@ const automationRegistry = await tool("lora_automation", {
   action: "registry-refresh",
 });
 assert.equal(automationRegistry.result.structuredContent.revision_count, 2);
+const validationLibraryPath = path.join(testQueue, "validation-prompts.json");
+const completeValidationLibrary = fs.readFileSync(validationLibraryPath, "utf8");
+const incompleteValidationLibrary = JSON.parse(completeValidationLibrary);
+delete incompleteValidationLibrary.fixed_settings.sampler;
+fs.writeFileSync(
+  validationLibraryPath,
+  `${JSON.stringify(incompleteValidationLibrary)}\n`,
+);
+const incompleteValidationPlan = await tool("lora_automation", {
+  action: "validation-plan",
+  job_id: "cap-test",
+});
+assert.equal(incompleteValidationPlan.result.isError, true);
+assert.match(
+  incompleteValidationPlan.result.content[0].text,
+  /fixed_settings\.sampler must be a non-empty string/,
+);
+fs.writeFileSync(validationLibraryPath, completeValidationLibrary);
 const automationValidationPlan = await tool("lora_automation", {
   action: "validation-plan",
   job_id: "cap-test",
@@ -778,6 +802,7 @@ const drawThingsResult = {
         control: {
           input_sha256: drawThingsPromptsById.get(promptId).control_image_sha256,
           model: "synthetic-controlnet",
+          mode: "balanced",
           weight: 1,
           start: 0,
           end: 1,
@@ -1018,6 +1043,16 @@ fs.writeFileSync(
   `${JSON.stringify({
     schema_version: 1,
     seed_policy: "Use seed 20260801 for every mapped prompt.",
+    fixed_settings: {
+      seeds: [20260801],
+      base_model: "test-model",
+      width: 1024,
+      height: 1024,
+      steps: 25,
+      sampler: "test-sampler",
+      guidance_scale: 5,
+      lora_weight: 0.7,
+    },
     prompts: validationPromptIds.map((id) => ({ id, prompt: `test, ${id}` })),
   })}\n`,
 );

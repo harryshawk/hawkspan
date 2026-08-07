@@ -9,6 +9,7 @@ import datetime as dt
 import glob
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -370,6 +371,63 @@ def validation_seeds(library: dict) -> list[int]:
     return seeds
 
 
+def validate_controlled_fixed_settings(document: dict, label: str) -> dict:
+    settings = document.get("fixed_settings")
+    if not isinstance(settings, dict):
+        raise RuntimeError(f"{label} has no fixed_settings object")
+
+    seeds = settings.get("seeds")
+    if not isinstance(seeds, list) or not seeds or any(
+        isinstance(seed, bool) or not isinstance(seed, int) for seed in seeds
+    ):
+        raise RuntimeError(f"{label} fixed_settings.seeds must be nonempty integers")
+
+    for key in ("base_model", "sampler"):
+        if not isinstance(settings.get(key), str) or not settings[key].strip():
+            raise RuntimeError(f"{label} fixed_settings.{key} must be a nonempty string")
+
+    for key in ("width", "height", "steps"):
+        value = settings.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise RuntimeError(f"{label} fixed_settings.{key} must be a positive integer")
+
+    for key in ("guidance_scale", "lora_weight"):
+        value = settings.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise RuntimeError(f"{label} fixed_settings.{key} must be a finite number")
+
+    prompts = document.get("prompts", [])
+    has_controlled_prompt = any(
+        isinstance(prompt, dict)
+        and (prompt.get("control_image") or prompt.get("control_image_path"))
+        for prompt in prompts
+    )
+    if has_controlled_prompt:
+        controlnet = settings.get("controlnet")
+        if not isinstance(controlnet, dict):
+            raise RuntimeError(f"{label} fixed_settings.controlnet must be an object")
+        for key in ("model", "mode"):
+            if not isinstance(controlnet.get(key), str) or not controlnet[key].strip():
+                raise RuntimeError(
+                    f"{label} fixed_settings.controlnet.{key} must be a nonempty string"
+                )
+        for key in ("weight", "start", "end"):
+            value = controlnet.get(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise RuntimeError(
+                    f"{label} fixed_settings.controlnet.{key} must be a finite number"
+                )
+    return settings
+
+
 def controlled_validation_samples(
     output_dir: Path, destination: Path, validation_library: Path,
     expected_lora_sha256: str,
@@ -378,6 +436,7 @@ def controlled_validation_samples(
     if not result_path.is_file():
         raise RuntimeError("Final packet requires output/validation-result.json")
     library = json.loads(validation_library.read_text())
+    validate_controlled_fixed_settings(library, "Validation prompt library")
     result = json.loads(result_path.read_text())
     if result.get("lora_sha256") != expected_lora_sha256:
         raise RuntimeError(
@@ -402,6 +461,7 @@ def controlled_validation_samples(
     ):
         raise RuntimeError("Validation result differs from the Draw Things validation plan")
     validation_plan = json.loads(validation_plan_path.read_text())
+    validate_controlled_fixed_settings(validation_plan, "Validation plan")
     if result.get("settings") != validation_plan.get("fixed_settings", {}):
         raise RuntimeError("Validation result settings differ from the bound fixed settings")
     if (

@@ -101,7 +101,19 @@ fs.writeFileSync(trainingConfigPath, JSON.stringify({
   checkpoint_step_interval: 1,
   max_train_steps: 1,
 }));
-fs.writeFileSync(validationPath, JSON.stringify({ prompts: [] }));
+fs.writeFileSync(validationPath, JSON.stringify({
+  fixed_settings: {
+    seeds: [20260801],
+    base_model: "test-model",
+    width: 1024,
+    height: 1024,
+    steps: 25,
+    sampler: "test-sampler",
+    guidance_scale: 5,
+    lora_weight: 0.7,
+  },
+  prompts: [],
+}));
 fs.writeFileSync(policyPath, JSON.stringify({
   version_tag: "policy",
   expected_caption_variants: 1,

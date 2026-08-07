@@ -50,12 +50,29 @@ with tempfile.TemporaryDirectory() as temporary:
     samples = root / "packet" / "VALIDATION_SAMPLES"
     output.mkdir()
     (output / "render.png").write_bytes(b"render")
+    fixed_settings = {
+        "seeds": [20260801],
+        "base_model": "test-model",
+        "width": 1024,
+        "height": 1024,
+        "steps": 25,
+        "sampler": "DPM++ 2M Karras",
+        "guidance_scale": 5.0,
+        "lora_weight": 0.7,
+        "controlnet": {
+            "model": "synthetic-controlnet",
+            "weight": 1.0,
+            "start": 0.0,
+            "end": 1.0,
+            "mode": "balanced",
+        },
+    }
     library.write_text(
         json.dumps(
             {
                 "controls_are_relative_to": "dataset",
                 "seed_policy": "Use seed 20260801 for every mapped prompt.",
-                "fixed_settings": {"seeds": [20260801]},
+                "fixed_settings": fixed_settings,
                 "prompts": [
                     {
                         "id": "robot",
@@ -77,7 +94,7 @@ with tempfile.TemporaryDirectory() as temporary:
                 "job_id": "output",
                 "lora_path": str(lora),
                 "lora_sha256": lora_sha256,
-                "fixed_settings": {"seeds": [20260801]},
+                "fixed_settings": fixed_settings,
                 "prompts": [
                     {
                         "id": "robot",
@@ -119,7 +136,7 @@ with tempfile.TemporaryDirectory() as temporary:
         "lora_sha256": lora_sha256,
         "imported_name": "output final",
         "base_model": "test-model",
-        "settings": {"seeds": [20260801]},
+        "settings": fixed_settings,
         "renders": [
             {
                 "prompt_id": "robot",
@@ -129,13 +146,14 @@ with tempfile.TemporaryDirectory() as temporary:
                     "imported_name": "output final",
                     "lora_weight": 0.7,
                     "base_model": "test-model",
-                    "settings": {"seeds": [20260801]},
+                    "settings": fixed_settings,
                     "control": {
                         "input_sha256": module.sha256(conditioning / "robot.png"),
                         "model": "synthetic-controlnet",
                         "weight": 1.0,
                         "start": 0.0,
                         "end": 1.0,
+                        "mode": "balanced",
                     },
                 },
                 "image_sha256": module.sha256(output / "render.png"),
@@ -163,6 +181,65 @@ with tempfile.TemporaryDirectory() as temporary:
     assert portable["renders"][0]["image_path"] == (
         "VALIDATION_SAMPLES/robot--seed-20260801.png"
     )
+
+    complete_library = json.loads(library.read_text())
+    module.validate_controlled_fixed_settings(
+        complete_library, "Validation prompt library"
+    )
+    complete_plan = json.loads(validation_plan.read_text())
+    module.validate_controlled_fixed_settings(complete_plan, "Validation plan")
+
+    invalid_settings = [
+        ("seeds", [], "seeds"),
+        ("seeds", [True], "seeds"),
+        ("base_model", " ", "base_model"),
+        ("width", 0, "width"),
+        ("height", True, "height"),
+        ("steps", 0, "steps"),
+        ("sampler", "", "sampler"),
+        ("guidance_scale", float("inf"), "guidance_scale"),
+        ("lora_weight", float("nan"), "lora_weight"),
+    ]
+    for key, value, expected_error in invalid_settings:
+        invalid = json.loads(json.dumps(complete_library))
+        invalid["fixed_settings"][key] = value
+        try:
+            module.validate_controlled_fixed_settings(
+                invalid, "Validation prompt library"
+            )
+        except RuntimeError as error:
+            assert expected_error in str(error)
+        else:
+            raise AssertionError(f"invalid fixed setting {key} was accepted")
+
+    invalid_control_settings = [
+        ("model", "", "controlnet.model"),
+        ("weight", float("inf"), "controlnet.weight"),
+        ("start", True, "controlnet.start"),
+        ("end", float("nan"), "controlnet.end"),
+        ("mode", " ", "controlnet.mode"),
+    ]
+    for key, value, expected_error in invalid_control_settings:
+        invalid = json.loads(json.dumps(complete_plan))
+        invalid["fixed_settings"]["controlnet"][key] = value
+        try:
+            module.validate_controlled_fixed_settings(invalid, "Validation plan")
+        except RuntimeError as error:
+            assert expected_error in str(error)
+        else:
+            raise AssertionError(f"invalid fixed ControlNet setting {key} was accepted")
+
+    missing_controlnet = json.loads(json.dumps(complete_library))
+    del missing_controlnet["fixed_settings"]["controlnet"]
+    try:
+        module.validate_controlled_fixed_settings(
+            missing_controlnet, "Validation prompt library"
+        )
+    except RuntimeError as error:
+        assert "fixed_settings.controlnet" in str(error)
+    else:
+        raise AssertionError("missing fixed ControlNet settings were accepted")
+
     wrong_control = json.loads(result_path.read_text())
     wrong_control["renders"][0]["live_metadata"]["control"]["input_sha256"] = (
         "f" * 64
