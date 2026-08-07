@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.4 - 2026-08-06
+
+- Cleared SimpleTuner's current-target telemetry when an operator skips that
+  target, whether the scheduler stored the target name or queue-item ID.
+
 ## 0.3.3 - 2026-08-06
 
 - Serialized each complete SimpleTuner scheduler invocation from candidate

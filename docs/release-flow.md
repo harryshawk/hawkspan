@@ -1,5 +1,15 @@
 # Release Flow
 
+## 2026-08-06 - HawkSpan 0.3.4 skipped-current repair
+
+- Request: Exercise real queue controls before four uninterrupted 100-step
+  completion runs.
+- Defect evidence: Skipping stopped R24 changed its item state to `skipped`
+  but left `current` reporting R24 because the control compared only the queue
+  item ID while the scheduler stores the target name after launch.
+- Scope: Clear `current` for either representation and cover the target-name
+  representation in the queue-control regression test.
+
 ## 2026-08-06 - HawkSpan 0.3.3 scheduler serialization repair
 
 - Request: Queue multiple real 100-step LoRA plus ControlNet runs and exercise

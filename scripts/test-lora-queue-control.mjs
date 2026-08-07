@@ -102,9 +102,15 @@ assert.equal(schedulerState.jobs["queue-stale"].state, "paused");
 queueControl(["resume-job", "--target", "stale-target", "--reason", "test"]);
 schedulerState = JSON.parse(fs.readFileSync(path.join(scheduler, "lora-scheduler-state.json")));
 assert.equal(schedulerState.jobs["queue-stale"].state, "queued");
+schedulerState.current = "stale-target";
+fs.writeFileSync(
+  path.join(scheduler, "lora-scheduler-state.json"),
+  JSON.stringify(schedulerState),
+);
 queueControl(["skip-job", "--target", "stale-target", "--reason", "test"]);
 schedulerState = JSON.parse(fs.readFileSync(path.join(scheduler, "lora-scheduler-state.json")));
 assert.equal(schedulerState.jobs["queue-stale"].state, "skipped");
+assert.equal(schedulerState.current, null);
 queueControl(["retry-job", "--target", "stale-target", "--reason", "test"]);
 schedulerState = JSON.parse(fs.readFileSync(path.join(scheduler, "lora-scheduler-state.json")));
 assert.equal(schedulerState.jobs["queue-stale"].state, "queued");

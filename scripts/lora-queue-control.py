@@ -260,7 +260,10 @@ def main() -> int:
                 record.update({"state": "skipped", "phase": "skipped"})
             record["updated_at"] = updated_at
         if matching_ids:
-            if scheduler.get("current") in matching_ids and args.action in {"skip-job"}:
+            if (
+                scheduler.get("current") in {*matching_ids, args.target}
+                and args.action in {"skip-job"}
+            ):
                 scheduler["current"] = None
             scheduler["decision"] = f"{args.action}: {args.target}"
             scheduler["last_checked_at"] = updated_at
