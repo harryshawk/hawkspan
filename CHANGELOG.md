@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2 - 2026-08-06
+
+- Enforced the durable `training` job contract both when a SimpleTuner item is
+  admitted and again immediately before scheduler launch.
+- Allowed additional immutable jobs to enter the queue while one trainer is
+  active, while preserving single-trainer execution.
+- Rejected duplicate scheduler targets and mismatched authorization targets.
+- Kept successfully launched trainers in truthful `running` telemetry instead
+  of recording a premature finish time and exit code.
+
 ## 0.3.1 - 2026-08-06
 
 - Migrated explicitly retired environment variables during release activation

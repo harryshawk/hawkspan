@@ -1,5 +1,18 @@
 # Release Flow
 
+## 2026-08-06 - HawkSpan 0.3.2 queue-admission candidate
+
+- Request: Exercise multiple real 100-step LoRA plus ControlNet jobs and queue
+  controls through HawkSpan.
+- Source branch: `fix/atomic-upgrade`, based on public `v0.3.1`.
+- Scope: Validate durable training jobs at admission and launch, permit queued
+  admission while a trainer is active, reject duplicate targets, and report a
+  successful launch as running rather than finished.
+- Verification so far: The complete 27-test release gate passes. The real R20
+  training run remains on installed public v0.3.1 until its automatic package
+  return completes; the 0.3.2 candidate has not been installed or published.
+- Production update: Pending real M2/M4 acceptance and explicit approval.
+
 ## 2026-08-06 - HawkSpan 0.3.1 upgrade repair
 
 - Request: Publish the approved release-upgrade migration and rollback repair while preserving `v0.3.0`.
