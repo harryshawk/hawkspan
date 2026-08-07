@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { periodicServiceHealthy } from "./service-health.mjs";
 import { readHawkspanEnv } from "./hawkspan-env.mjs";
 import {
   assertExecutingRelease,
@@ -183,17 +184,17 @@ const localControl = waitForService(
 );
 const linkAgent = waitForService(
   "org.hawkspan.link-agent",
-  (service) => service.loaded && service.last_status === 0,
+  periodicServiceHealthy,
 );
 const queueSupervisor = waitForService(
   "org.hawkspan.queue-supervisor",
   (service) => service.loaded && Number.isFinite(service.pid),
 );
 const loraScheduler = schedulerExpected
-  ? waitForService("org.hawkspan.lora-scheduler", (service) => service.loaded && service.last_status === 0)
+  ? waitForService("org.hawkspan.lora-scheduler", periodicServiceHealthy)
   : launchctlList("org.hawkspan.lora-scheduler");
 const packetReceiver = packetReceiverExpected
-  ? waitForService("org.hawkspan.packet-receiver", (service) => service.loaded && service.last_status === 0)
+  ? waitForService("org.hawkspan.packet-receiver", periodicServiceHealthy)
   : launchctlList("org.hawkspan.packet-receiver");
 const hawkspanLaunchdEntries = run("launchctl", ["list"]).stdout
   .split("\n")
@@ -219,7 +220,7 @@ const receipt = {
     link_agent: {
       ...linkAgent,
       uses_plugin_root: serviceUsesPluginRoot("org.hawkspan.link-agent"),
-      ok: linkAgent.loaded && linkAgent.last_status === 0 &&
+      ok: periodicServiceHealthy(linkAgent) &&
         serviceUsesPluginRoot("org.hawkspan.link-agent"),
       expected: "periodic_oneshot_startinterval_120",
     },
@@ -234,7 +235,7 @@ const receipt = {
       ...loraScheduler,
       uses_plugin_root: schedulerExpected && serviceUsesPluginRoot("org.hawkspan.lora-scheduler"),
       ok: schedulerExpected
-        ? loraScheduler.loaded && loraScheduler.last_status === 0 && serviceUsesPluginRoot("org.hawkspan.lora-scheduler")
+        ? periodicServiceHealthy(loraScheduler) && serviceUsesPluginRoot("org.hawkspan.lora-scheduler")
         : !loraScheduler.loaded,
       expected: schedulerExpected ? "periodic_oneshot_startinterval_300" : "disabled_for_this_role",
     },
@@ -242,7 +243,7 @@ const receipt = {
       ...packetReceiver,
       uses_plugin_root: packetReceiverExpected && serviceUsesPluginRoot("org.hawkspan.packet-receiver"),
       ok: packetReceiverExpected
-        ? packetReceiver.loaded && packetReceiver.last_status === 0 && serviceUsesPluginRoot("org.hawkspan.packet-receiver")
+        ? periodicServiceHealthy(packetReceiver) && serviceUsesPluginRoot("org.hawkspan.packet-receiver")
         : !packetReceiver.loaded,
       expected: packetReceiverExpected ? "periodic_oneshot_startinterval_300" : "disabled_for_this_role",
     },

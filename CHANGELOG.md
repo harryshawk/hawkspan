@@ -11,6 +11,8 @@
 - Wired controller activation to HawkSpan's built-in packet receiver, admitted
   only digest-bound automatic return artifacts, and removed the hidden runtime
   dependency on the retired `application-workflows` intake path.
+- Treated a currently running periodic launchd service as healthy instead of
+  requiring it to finish before startup readiness could pass.
 
 ## 0.3.5 - 2026-08-07
 
