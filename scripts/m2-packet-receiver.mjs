@@ -11,7 +11,7 @@ const configPath = process.env.HAWKSPAN_CONFIG ||
 const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
 const receiver = config.packet_receiver || {};
 const stagingRoot = path.resolve(
-  receiver.staging_root || path.join(process.env.HOME, "M4-LoRA-Incoming"),
+  receiver.staging_root || path.join(path.dirname(configPath), "artifacts"),
 );
 const destinationRoot = receiver.destination_root
   ? path.resolve(receiver.destination_root)
@@ -83,13 +83,26 @@ function atomicJson(filePath, value) {
   fs.renameSync(temporary, filePath);
 }
 
+function automaticReturnMetadata(name) {
+  const artifactId = name.match(/^(artifact-\d+-[a-f0-9]+)-/)?.[1];
+  if (!artifactId) return null;
+  const metadataPath = path.join(stagingRoot, `${artifactId}.artifact.json`);
+  if (!fs.existsSync(metadataPath)) return null;
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+  if (metadata.artifact_id !== artifactId || metadata.file_name !== name) return null;
+  if (metadata.metadata?.kind !== "lora-return-packet" ||
+      metadata.metadata?.automatic_return !== true) return null;
+  return metadata;
+}
+
 function updatePacketRegistry(receipt) {
   const registryPath = path.join(destinationRoot, "packet-registry.json");
   const registry = fs.existsSync(registryPath)
     ? JSON.parse(fs.readFileSync(registryPath, "utf8"))
     : { schema_version: 1, packets: {} };
   const packetName = path.basename(receipt.destination);
-  const jobId = packetName.match(/^(cap-[^_]+)__/)?.[1] || null;
+  const unprefixedName = packetName.replace(/^artifact-\d+-[a-f0-9]+-/, "");
+  const jobId = receipt.job_id || unprefixedName.split("__", 1)[0] || null;
   registry.updated_at = new Date().toISOString();
   registry.packets[receipt.sha256] = {
     job_id: jobId,
@@ -210,13 +223,28 @@ if (!destinationRoot) {
   const receiptRoot = path.join(destinationRoot, "Transfer Receipts");
   fs.mkdirSync(receiptRoot, { recursive: true });
   const packets = fs.readdirSync(stagingRoot)
-    .filter((name) => name.toLowerCase().endsWith(".zip") && !name.startsWith("._"))
+    .filter((name) => {
+      const normalized = name.toLowerCase();
+      if (!normalized.endsWith(".zip") || name.startsWith("._")) return false;
+      if (receiver.return_packets_only === true && !normalized.endsWith("return-packet.zip")) {
+        return false;
+      }
+      return receiver.require_automatic_return_metadata !== true ||
+        automaticReturnMetadata(name) !== null;
+    })
     .sort();
 
   for (const name of packets) {
     const source = path.join(stagingRoot, name);
     const sourceStat = fs.statSync(source);
     const sourceSha256 = sha256(source);
+    const artifactMetadata = automaticReturnMetadata(name);
+    if (receiver.require_automatic_return_metadata === true &&
+        (artifactMetadata.size_bytes !== sourceStat.size ||
+         artifactMetadata.sha256 !== sourceSha256)) {
+      fail(`automatic return metadata mismatch; retained staging file: ${source}`);
+      continue;
+    }
     const destination = path.join(destinationRoot, name);
     const temporary = `${destination}.partial`;
     if (!fs.existsSync(destination) || sha256(destination) !== sourceSha256) {
@@ -255,6 +283,10 @@ if (!destinationRoot) {
       destination,
       size_bytes: sourceStat.size,
       sha256: sourceSha256,
+      artifact_id: artifactMetadata?.artifact_id || null,
+      job_id: artifactMetadata?.metadata?.automatic_return_job_id || null,
+      durable_job_id: artifactMetadata?.metadata?.durable_job_id || null,
+      simpletuner_queue_item_id: artifactMetadata?.metadata?.simpletuner_queue_item_id || null,
       transport_verified: true,
       package_contents_inspected: false,
       staging_removed: false,
@@ -288,7 +320,7 @@ if (!destinationRoot) {
     fail(`unable to create metadata destination; staging remains intact: ${error.message}`);
     process.exit();
   }
-  const sidecars = fs.readdirSync(stagingRoot)
+  const sidecars = receiver.copy_metadata_sidecars === false ? [] : fs.readdirSync(stagingRoot)
     .filter((name) =>
       !name.startsWith("._") &&
       (name.toLowerCase().endsWith(".json") || name.toLowerCase().endsWith(".md")))

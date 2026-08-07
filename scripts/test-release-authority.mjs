@@ -75,6 +75,7 @@ fs.appendFileSync(
   'HAWKSPAN_PLUGIN_ROOT="/old/release"\nHAWKSPAN_LOCAL_CONTROL_URL="http://127.0.0.1:8765"\n',
 );
 fs.writeFileSync(path.join(stateRoot, "config.json"), `${JSON.stringify({
+  node_role: "controller",
   peer: { user: "peer", remote_plugin_root: "/remote/old", remote_call_tool: "/remote/old/scripts/call-tool.mjs" },
   training: {},
 }, null, 2)}\n`, { mode: 0o600 });
@@ -98,6 +99,7 @@ assert.equal(fs.existsSync(path.join(stateRoot, "installed-revision.json")), fal
 assert.match(fs.readFileSync(path.join(stateRoot, "hawkspan.env"), "utf8"), /HAWKSPAN_PLUGIN_ROOT/);
 
 fs.writeFileSync(path.join(stateRoot, "config.json"), `${JSON.stringify({
+  node_role: "controller",
   peer: { user: "peer" },
   training: {},
 }, null, 2)}\n`, { mode: 0o600 });
@@ -199,6 +201,15 @@ const config = JSON.parse(fs.readFileSync(path.join(stateRoot, "config.json"), "
 assert.equal(Object.hasOwn(config, "plugin_root"), false);
 assert.equal(Object.hasOwn(config.peer, "remote_plugin_root"), false);
 assert.equal(Object.hasOwn(config.peer, "remote_call_tool"), false);
+assert.deepEqual(config.packet_receiver, {
+  staging_root: path.join(stateRoot, "artifacts"),
+  destination_root: path.join(stateRoot, "received-packets"),
+  send_durable_receipt: true,
+  allow_remove_verified_staging: false,
+  return_packets_only: true,
+  require_automatic_return_metadata: true,
+  copy_metadata_sidecars: false,
+});
 for (const label of launchdLabels) {
   const body = fs.readFileSync(path.join(launchAgentsRoot, `${label}.plist`), "utf8");
   assert.match(body, new RegExp(authority.stable_release_root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));

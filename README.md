@@ -163,11 +163,12 @@ The `trainer_queue_control` MCP tool exposes these controls over the normal
 Thunderbolt-primary/Ethernet-fallback peer bridge. `status` is the recovery
 source for queue and per-job intent; conversational memory is not.
 
-Verified M4 LoRA return packets land in `~/M4-LoRA-Incoming`. The M2 receiver
-copies to the configured artifact destination, verifies size and SHA-256,
-writes a receipt without opening or auditing package contents, and removes only
-the verified staging copy when standing authorization is recorded in
-configuration.
+Verified M4 LoRA return packets land in HawkSpan's configured artifact staging
+directory, `~/.hawkspan/artifacts` by default. The M2 receiver copies only
+return-packet ZIPs to the configured artifact destination, verifies size and
+SHA-256, writes a receipt without opening or auditing package contents, and
+removes only the verified staging copy when standing authorization is recorded
+in configuration.
 The sending job remains in `returning` after transport staging and becomes
 complete only after HawkSpan imports that receiver-generated, digest-bound
 receipt. Periodic recovery can reconstruct an interrupted return from the

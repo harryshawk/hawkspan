@@ -68,6 +68,18 @@ config.training = {
   automation_script: derived.trainer_automation,
   packet_builder: derived.packet_builder,
 };
+if (config.node_role === "controller") {
+  config.packet_receiver = {
+    staging_root: path.join(stateRoot, "artifacts"),
+    destination_root: path.join(stateRoot, "received-packets"),
+    send_durable_receipt: true,
+    allow_remove_verified_staging: false,
+    return_packets_only: true,
+    require_automatic_return_metadata: true,
+    copy_metadata_sidecars: false,
+    ...(config.packet_receiver || {}),
+  };
+}
 const renderedLaunchd = renderLaunchdPlistBodies(authority, {
   stateRoot,
   nodePath: process.env.HAWKSPAN_NODE || process.execPath,

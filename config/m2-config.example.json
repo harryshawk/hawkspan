@@ -22,8 +22,11 @@
     "minimum_checkpoint_retention": 10
   },
   "packet_receiver": {
-    "staging_root": "/Users/controlleruser/HawkSpan/Incoming",
+    "staging_root": "/Users/controlleruser/.hawkspan/artifacts",
     "destination_root": "/Volumes/ExternalVolume/HawkSpan/Artifacts",
+    "return_packets_only": true,
+    "require_automatic_return_metadata": true,
+    "copy_metadata_sidecars": false,
     "allow_remove_verified_staging": true,
     "authorization_evidence": "The owner authorized verified artifact intake and removal of verified staging copies."
   }
