@@ -37,6 +37,15 @@ const unrelatedCommand = spawn(
   ["-e", "setInterval(() => {}, 1000);", unrelatedTarget],
   { detached: true, stdio: "ignore" },
 );
+let testProcessesStopped = false;
+function stopTestProcesses() {
+  if (testProcessesStopped) return;
+  testProcessesStopped = true;
+  for (const child of [liveRunner, unrelatedCommand]) {
+    try { process.kill(-child.pid, "SIGTERM"); } catch {}
+  }
+}
+process.once("exit", stopTestProcesses);
 await new Promise((resolve) => setTimeout(resolve, 100));
 
 fs.writeFileSync(path.join(queue, "captioned-lora-manifest.json"), JSON.stringify([
@@ -263,7 +272,7 @@ for (const id of ["nonterminal-return", "legacy-completed-nonterminal"]) {
 }
 reconciled.close();
 
-process.kill(-liveRunner.pid, "SIGTERM");
-process.kill(-unrelatedCommand.pid, "SIGTERM");
+stopTestProcesses();
+process.off("exit", stopTestProcesses);
 fs.rmSync(root, { recursive: true, force: true });
 process.stdout.write("HawkSpan reboot reconciliation tests passed\n");
