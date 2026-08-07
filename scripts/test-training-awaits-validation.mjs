@@ -19,6 +19,7 @@ const returnRoot = path.join(queue, "return-packets");
 const schedulerRoot = path.join(root, "state", "lora-scheduler");
 const schedulerState = path.join(schedulerRoot, "lora-scheduler-state.json");
 const configPath = path.join(root, "state", "config.json");
+const readinessPath = path.join(queue, "r-awaiting-training-readiness.json");
 for (const directory of [
   path.join(install, ".venv", "bin"), configDir, dataDir, outputDir,
   returnRoot, schedulerRoot, path.dirname(configPath),
@@ -70,7 +71,16 @@ import fs from "node:fs";
 const args = process.argv.slice(2);
 const invoked = args[0] || "";
 if (invoked.endsWith("lora-automation.mjs")) {
-  process.stdout.write(JSON.stringify({ ready: true, revision_fingerprint: process.env.TEST_FINGERPRINT }) + "\\n");
+  const request = JSON.parse(args[2]);
+  if (!Number.isInteger(request.ignore_process_group)) {
+    process.stderr.write("training readiness did not ignore its own process group\\n");
+    process.exit(1);
+  }
+  process.stdout.write(JSON.stringify({
+    ready: true,
+    revision_fingerprint: process.env.TEST_FINGERPRINT,
+    readiness_path: process.env.TEST_READINESS_PATH,
+  }) + "\\n");
 } else if (invoked.endsWith("automatic-package-return.mjs")) {
   const packet = args[args.indexOf("--packet") + 1];
   const sha256 = crypto.createHash("sha256").update(fs.readFileSync(packet)).digest("hex");
@@ -104,6 +114,12 @@ fs.writeFileSync(configPath, `${JSON.stringify({
     scheduler_state_path: schedulerState,
   },
 }, null, 2)}\n`);
+fs.writeFileSync(readinessPath, `${JSON.stringify({
+  job_id: target,
+  revision_fingerprint: fingerprint,
+  ready: true,
+  problems: [],
+}, null, 2)}\n`);
 
 const result = spawnSync("/usr/bin/python3", [
   path.join(scripts, "run_captioned_loras.py.managed"),
@@ -129,6 +145,7 @@ const result = spawnSync("/usr/bin/python3", [
     HAWKSPAN_MAX_TRAIN_ATTEMPTS: "1",
     HAWKSPAN_CONFIG: configPath,
     TEST_FINGERPRINT: fingerprint,
+    TEST_READINESS_PATH: readinessPath,
     PYTHONDONTWRITEBYTECODE: "1",
   },
 });
@@ -138,6 +155,9 @@ assert.doesNotMatch(result.stdout, /COMPLETE r-awaiting/);
 const spec = JSON.parse(fs.readFileSync(path.join(queue, `${target}-return-spec.json`)))[0];
 assert.equal(spec.require_validation_samples, false);
 assert.equal(spec.packet_variant, "training");
+assert.equal(spec.training_readiness, readinessPath);
+assert.equal(spec.revision_fingerprint, fingerprint);
+assert.match(spec.notes, /controlled Draw Things validation remains pending/);
 const status = JSON.parse(fs.readFileSync(path.join(queue, "captioned-lora-status.json")));
 assert.equal(status.completed.length, 0);
 assert.equal(status.returning.length, 1);

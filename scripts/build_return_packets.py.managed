@@ -49,11 +49,6 @@ RELEVANT_TRAINING_ENV = (
     "HF_HUB_DISABLE_TELEMETRY",
     "DO_NOT_TRACK",
 )
-PINNED_DIAGNOSTIC_PREFLIGHT_SHA256 = (
-    "699855f3f87c2af84cac080fbe5f484158853981288f3503e257544847775e1a"
-)
-
-
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -98,63 +93,46 @@ def load_config(config_dir: Path) -> dict:
     return json.loads(config.read_text())
 
 
-def resolve_preflight_summary(spec: dict, config_dir: Path) -> tuple[Path | None, str | None]:
-    """Resolve explicit or batch-local preflight evidence for an older in-memory spec."""
-    explicit = spec.get("preflight_summary")
-    if explicit and Path(explicit).is_file():
-        path = Path(explicit)
-        return path, sha256(path)
-    candidates: list[Path] = []
-    for ancestor in (config_dir, *config_dir.parents):
-        manifest_root = ancestor / "automation-manifests"
-        if manifest_root.is_dir():
-            candidates.extend(
-                manifest_root.glob("all-datasets-*-preflight-summary.json")
-            )
-    unique = sorted(
-        set(candidates), key=lambda path: path.stat().st_mtime, reverse=True
-    )
-    for path in unique:
-        digest = sha256(path)
-        if digest == PINNED_DIAGNOSTIC_PREFLIGHT_SHA256:
-            return path, digest
-    if unique:
-        return unique[0], sha256(unique[0])
-    return None, None
-
-
-def classify_run(preflight_path: Path | None) -> tuple[str, list[str]]:
-    if not preflight_path:
-        return "candidate; controlled validation pending", [
-            "No batch preflight summary was available to the packet builder."
-        ]
-    try:
-        preflight = json.loads(preflight_path.read_text())
-    except Exception as exc:
-        return "diagnostic/rerun candidate", [
-            f"Preflight evidence could not be parsed: {exc}"
-        ]
-    results = preflight.get("results", [])
-    defects: list[str] = []
-    if results:
-        total = len(results)
-        caption_ready = sum(
-            bool(row.get("caption_structure_ready")) for row in results
+def resolve_training_readiness(
+    spec: dict,
+) -> tuple[Path, dict, Path]:
+    value = str(spec.get("training_readiness", "")).strip()
+    if not value:
+        raise RuntimeError("Exact packet specification lacks training_readiness")
+    readiness_path = Path(value)
+    if not readiness_path.is_file():
+        raise RuntimeError(
+            f"Exact training readiness receipt is missing: {readiness_path}"
         )
-        config_ready = sum(bool(row.get("config_ready")) for row in results)
-        if caption_ready < total:
-            defects.append(
-                f"Only {caption_ready}/{total} jobs passed six-field caption preflight."
-            )
-        if config_ready < total:
-            defects.append(
-                f"Only {config_ready}/{total} jobs passed fixed-validation-config preflight."
-            )
-    return (
-        ("diagnostic/rerun candidate" if defects else
-         "candidate; controlled validation pending"),
-        defects,
-    )
+    readiness = json.loads(readiness_path.read_text())
+    if readiness.get("job_id") != spec.get("run_name"):
+        raise RuntimeError("Training readiness receipt names the wrong run")
+    expected_fingerprint = str(spec.get("revision_fingerprint", "")).strip()
+    if not expected_fingerprint:
+        raise RuntimeError("Exact packet specification lacks revision_fingerprint")
+    if readiness.get("revision_fingerprint") != expected_fingerprint:
+        raise RuntimeError("Training readiness fingerprint does not match the packet")
+    if readiness.get("ready") is not True or readiness.get("problems"):
+        raise RuntimeError("Training readiness receipt is not clean")
+    for path_key, digest_key in (
+        ("config_path", "config_sha256"),
+        ("backend_path", "backend_sha256"),
+        ("policy_path", "policy_sha256"),
+        ("validation_prompt_library", "validation_sha256"),
+    ):
+        evidence_path = Path(str(readiness.get(path_key, "")))
+        expected_digest = readiness.get(digest_key)
+        if not evidence_path.is_file() or not expected_digest:
+            raise RuntimeError(f"Training readiness lacks {path_key} evidence")
+        if sha256(evidence_path) != expected_digest:
+            raise RuntimeError(f"Training readiness {path_key} changed after approval")
+    dataset_path = Path(str(readiness.get("dataset_manifest", "")))
+    dataset_digest = readiness.get("dataset_manifest_sha256")
+    if not dataset_path.is_file() or not dataset_digest:
+        raise RuntimeError("Training readiness lacks exact dataset preflight evidence")
+    if sha256(dataset_path) != dataset_digest:
+        raise RuntimeError("Exact dataset preflight changed after approval")
+    return readiness_path, readiness, dataset_path
 
 
 def validate_lora(path: Path, python_bin: str) -> tuple[int, int]:
@@ -946,26 +924,30 @@ def build_one(
 
     write_dataset_inventory(data_dir, folder / "DATASET", config)
     copy_validation_inputs(validation_library, data_dir, folder / "DATASET")
-    preflight_summary, preflight_sha256 = resolve_preflight_summary(
-        spec, config_dir
+    readiness_path, readiness, dataset_preflight = resolve_training_readiness(spec)
+    shutil.copy2(
+        readiness_path,
+        folder / "DATASET" / "training-readiness.json",
     )
-    quality_classification, quality_defects = classify_run(preflight_summary)
-    preflight_status = "not available"
-    diagnostic_only = quality_classification == "diagnostic/rerun candidate"
-    if preflight_summary:
-        shutil.copy2(
-            preflight_summary,
-            folder / "DATASET" / "all-datasets-preflight-summary.json",
-        )
-        preflight = json.loads(preflight_summary.read_text())
-        job_count = int(preflight.get("job_count", 0))
-        caption_ready = int(preflight.get("caption_structure_ready", 0))
-        config_ready = int(preflight.get("config_ready", 0))
-        preflight_status = (
-            f"{caption_ready}/{job_count} six-field caption-ready; "
-            f"{config_ready}/{job_count} fixed-validation-config-ready; "
-            f"SHA-256 {preflight_sha256}"
-        )
+    shutil.copy2(
+        dataset_preflight,
+        folder / "DATASET" / "dataset-preflight.json",
+    )
+    quality_classification = (
+        "controlled validation complete"
+        if packet_variant == "validated"
+        else "candidate; controlled validation pending"
+    )
+    quality_defects = (
+        [] if packet_variant == "validated"
+        else ["Controlled Draw Things validation has not completed."]
+    )
+    preflight_status = (
+        f"exact job readiness passed; revision fingerprint "
+        f"{readiness['revision_fingerprint']}; dataset preflight SHA-256 "
+        f"{readiness['dataset_manifest_sha256']}"
+    )
+    diagnostic_only = False
     logs = resolve_logs(spec.get("log_files", []))
     warning_lines: list[str] = []
     for log in logs:
@@ -1000,7 +982,7 @@ def build_one(
         f"- End time: {dt.datetime.fromtimestamp(end).astimezone().isoformat()}\n"
         "- Status: completed\n"
         f"- Quality classification: {quality_classification}\n"
-        f"- Batch preflight: {preflight_status}\n"
+        f"- Training readiness/preflight: {preflight_status}\n"
         f"- Quality defects: {'; '.join(quality_defects) if quality_defects else 'None'}\n"
         f"- Output folder on M4: {source_output}\n"
         f"- Training ZIP used: {training_zip}\n"

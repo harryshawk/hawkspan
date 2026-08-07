@@ -280,4 +280,87 @@ with tempfile.TemporaryDirectory() as temporary:
     else:
         raise AssertionError("mismatched validation LoRA hash was accepted")
 
+    readiness_inputs = {}
+    for name in ("config", "backend", "policy", "validation", "dataset-preflight"):
+        path = root / f"{name}.json"
+        path.write_text(json.dumps({"name": name, "run": "exact-run"}))
+        readiness_inputs[name] = path
+    fingerprint = "a" * 64
+    readiness_path = root / "training-readiness.json"
+    readiness = {
+        "job_id": "exact-run",
+        "revision_fingerprint": fingerprint,
+        "ready": True,
+        "problems": [],
+        "config_path": str(readiness_inputs["config"]),
+        "config_sha256": module.sha256(readiness_inputs["config"]),
+        "backend_path": str(readiness_inputs["backend"]),
+        "backend_sha256": module.sha256(readiness_inputs["backend"]),
+        "policy_path": str(readiness_inputs["policy"]),
+        "policy_sha256": module.sha256(readiness_inputs["policy"]),
+        "validation_prompt_library": str(readiness_inputs["validation"]),
+        "validation_sha256": module.sha256(readiness_inputs["validation"]),
+        "dataset_manifest": str(readiness_inputs["dataset-preflight"]),
+        "dataset_manifest_sha256": module.sha256(
+            readiness_inputs["dataset-preflight"]
+        ),
+    }
+    readiness_path.write_text(json.dumps(readiness))
+    packet_spec = {
+        "run_name": "exact-run",
+        "revision_fingerprint": fingerprint,
+        "training_readiness": str(readiness_path),
+    }
+    resolved_path, resolved, resolved_dataset = module.resolve_training_readiness(
+        packet_spec
+    )
+    assert resolved_path == readiness_path
+    assert resolved == readiness
+    assert resolved_dataset == readiness_inputs["dataset-preflight"]
+
+    try:
+        module.resolve_training_readiness({
+            "run_name": "exact-run",
+            "revision_fingerprint": fingerprint,
+        })
+    except RuntimeError as error:
+        assert "lacks training_readiness" in str(error)
+    else:
+        raise AssertionError("packet without exact training readiness was accepted")
+
+    invalid_spec = dict(packet_spec, run_name="wrong-run")
+    try:
+        module.resolve_training_readiness(invalid_spec)
+    except RuntimeError as error:
+        assert "wrong run" in str(error)
+    else:
+        raise AssertionError("wrong-run training readiness was accepted")
+
+    invalid_spec = dict(packet_spec, revision_fingerprint="b" * 64)
+    try:
+        module.resolve_training_readiness(invalid_spec)
+    except RuntimeError as error:
+        assert "fingerprint" in str(error)
+    else:
+        raise AssertionError("wrong-fingerprint training readiness was accepted")
+
+    readiness_inputs["config"].write_text('{"changed":true}')
+    try:
+        module.resolve_training_readiness(packet_spec)
+    except RuntimeError as error:
+        assert "config_path changed" in str(error)
+    else:
+        raise AssertionError("changed training configuration was accepted")
+    readiness_inputs["config"].write_text(
+        json.dumps({"name": "config", "run": "exact-run"})
+    )
+
+    readiness_inputs["dataset-preflight"].write_text('{"changed":true}')
+    try:
+        module.resolve_training_readiness(packet_spec)
+    except RuntimeError as error:
+        assert "dataset preflight changed" in str(error)
+    else:
+        raise AssertionError("changed dataset preflight was accepted")
+
 print("return packet validation-input test passed")

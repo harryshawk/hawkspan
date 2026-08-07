@@ -9,6 +9,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from hawkspan_scheduler_state import edit_scheduler_state
@@ -122,8 +123,37 @@ def read_queue_policy() -> dict:
     return default | json.loads(QUEUE_POLICY.read_text())
 
 
+def current_training_readiness(
+    job_id: str, ignore_process_group: Optional[int] = None
+) -> dict:
+    request = {"job_id": job_id}
+    if ignore_process_group is not None:
+        request["ignore_process_group"] = ignore_process_group
+    result = subprocess.run(
+        [
+            str(NODE),
+            str(AUTOMATION),
+            "training-readiness",
+            json.dumps(request),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            "training readiness evaluation failed\n" + result.stderr
+        )
+    readiness = json.loads(result.stdout)
+    if not readiness.get("ready"):
+        raise RuntimeError(
+            "training readiness gate failed\n" + json.dumps(readiness, indent=2)
+        )
+    return readiness
+
+
 def package_return_packet(
-    job: dict, log_path: Path, require_validation_samples: bool
+    job: dict, log_path: Path, require_validation_samples: bool,
+    readiness: dict,
 ) -> Path:
     packet_variant = "validated" if require_validation_samples else "training"
     spec_path = RUN_ROOT / f"{job['job_id']}-return-spec.json"
@@ -141,6 +171,8 @@ def package_return_packet(
             "require_validation_samples": require_validation_samples,
             "packet_variant": packet_variant,
             "packet_result_path": str(packet_result_path),
+            "training_readiness": readiness["readiness_path"],
+            "revision_fingerprint": readiness["revision_fingerprint"],
             "launcher_command": (
                 f"cd {job['config_dir']!r} && "
                 f"{VENV_BIN / 'simpletuner'} train"
@@ -164,12 +196,11 @@ def package_return_packet(
                 "DO_NOT_TRACK": "1",
             },
             "notes": (
-                "Diagnostic/rerun candidate, not a final-quality LoRA. "
-                "Captioned full-rerun batch. Text sidecars were consumed with "
-                "caption_strategy=textfile and multiline splitting disabled. "
-                "The batch preflight records that captions lack the owner's "
-                "required labeled six-field structure and configs lack a fixed "
-                "validation_prompt."
+                "Exact revision-bound training and controlled Draw Things "
+                "validation completed."
+                if require_validation_samples else
+                "Exact revision-bound training completed; controlled Draw "
+                "Things validation remains pending."
             ),
         }
     ]
@@ -339,30 +370,10 @@ if args.mode in {"full", "train-and-return"}:
         raise SystemExit(
             "TRAINING REFUSED: exact-job authorization fingerprint is missing"
         )
-    readiness_result = subprocess.run(
-        [
-            str(NODE),
-            str(AUTOMATION),
-            "training-readiness",
-            json.dumps({
-                "job_id": args.only_job,
-                "ignore_process_group": os.getpgrp(),
-            }),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if readiness_result.returncode:
-        raise SystemExit(
-            "TRAINING REFUSED: readiness evaluation failed\n"
-            + readiness_result.stderr
-        )
-    readiness = json.loads(readiness_result.stdout)
-    if not readiness.get("ready"):
-        raise SystemExit(
-            "TRAINING REFUSED: readiness gate failed\n"
-            + json.dumps(readiness, indent=2)
-        )
+    try:
+        readiness = current_training_readiness(args.only_job, os.getpgrp())
+    except RuntimeError as error:
+        raise SystemExit(f"TRAINING REFUSED: {error}") from error
     if readiness.get("revision_fingerprint") != authorized_fingerprint:
         raise SystemExit(
             "TRAINING REFUSED: dataset/config revision differs from authorization"
@@ -519,9 +530,24 @@ for job in jobs:
     validation_result = Path(job["output_dir"]) / "validation-result.json"
     require_validation_samples = validation_result.exists()
     packet_variant = "validated" if require_validation_samples else "training"
+    expected_fingerprint = os.environ.get(
+        "HAWKSPAN_AUTHORIZED_REVISION_FINGERPRINT", ""
+    )
+    if not expected_fingerprint:
+        raise SystemExit("PACKAGING REFUSED: authorized revision fingerprint is missing")
+    try:
+        packet_readiness = current_training_readiness(job["job_id"], os.getpgrp())
+    except RuntimeError as error:
+        raise SystemExit(f"PACKAGING REFUSED: {error}") from error
+    if packet_readiness.get("revision_fingerprint") != expected_fingerprint:
+        raise SystemExit(
+            "PACKAGING REFUSED: current inputs differ from the trained revision"
+        )
     update_scheduler_state(job["job_id"], "running", f"packaging-{packet_variant}")
     try:
-        packet = package_return_packet(job, log_path, require_validation_samples)
+        packet = package_return_packet(
+            job, log_path, require_validation_samples, packet_readiness
+        )
         update_scheduler_state(job["job_id"], "running", "returning", {
             "packet": str(packet),
             "packet_sha256": sha256(packet),
