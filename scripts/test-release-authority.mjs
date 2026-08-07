@@ -64,6 +64,7 @@ for (const label of launchdLabels) {
 fs.mkdirSync(stateRoot, { recursive: true });
 writeHawkspanEnv(path.join(stateRoot, "hawkspan.env"), {
   HAWKSPAN_ACTIVE_RELEASE_ROOT: "/old/release",
+  HAWKSPAN_LINK_CONNECT_TIMEOUT_MS: "7000",
 });
 fs.appendFileSync(
   path.join(stateRoot, "hawkspan.env"),
@@ -182,6 +183,13 @@ assert.equal(fs.readlinkSync(authority.stable_release_root), stableTargetBeforeP
 
 const envValues = readHawkspanEnv(path.join(stateRoot, "hawkspan.env"));
 assert.equal(envValues.HAWKSPAN_ACTIVE_RELEASE_ROOT, resolvedReleaseRoot);
+assert.equal(envValues.HAWKSPAN_LINK_OPERATION_RETRY_DELAYS_MS, "2000,5000,10000,20000");
+assert.equal(envValues.HAWKSPAN_LINK_OPERATION_ATTEMPT_TIMEOUT_MS, "15000");
+assert.equal(envValues.HAWKSPAN_LINK_CONNECT_TIMEOUT_MS, "7000");
+assert.equal(envValues.HAWKSPAN_LINK_CYCLE_TIMEOUT_MS, "120000");
+assert.equal(envValues.HAWKSPAN_LINK_SERVER_ALIVE_INTERVAL_SECONDS, "15");
+assert.equal(envValues.HAWKSPAN_LINK_SERVER_ALIVE_COUNT_MAX, "3");
+assert.equal(envValues.HAWKSPAN_LINK_PRIMARY_REPROBE_MS, "60000");
 assert.equal(Object.hasOwn(envValues, "HAWKSPAN_PLUGIN_ROOT"), false);
 assert.equal(Object.hasOwn(envValues, "HAWKSPAN_REMOTE_PLUGIN_ROOT"), false);
 assert.equal(Object.hasOwn(envValues, "HAWKSPAN_REMOTE_CALL_TOOL"), false);

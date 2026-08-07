@@ -31,6 +31,18 @@ const separation = assertProductSeparated(releaseRoot);
 const envPath = path.join(stateRoot, "hawkspan.env");
 const envUpgrade = readHawkspanEnvForUpgrade(envPath);
 const envValues = { ...envUpgrade.values };
+const linkEnvDefaults = {
+  HAWKSPAN_LINK_OPERATION_RETRY_DELAYS_MS: "2000,5000,10000,20000",
+  HAWKSPAN_LINK_OPERATION_ATTEMPT_TIMEOUT_MS: "15000",
+  HAWKSPAN_LINK_CONNECT_TIMEOUT_MS: "5000",
+  HAWKSPAN_LINK_CYCLE_TIMEOUT_MS: "120000",
+  HAWKSPAN_LINK_SERVER_ALIVE_INTERVAL_SECONDS: "15",
+  HAWKSPAN_LINK_SERVER_ALIVE_COUNT_MAX: "3",
+  HAWKSPAN_LINK_PRIMARY_REPROBE_MS: "60000",
+};
+for (const [name, value] of Object.entries(linkEnvDefaults)) {
+  if (!Object.hasOwn(envValues, name)) envValues[name] = value;
+}
 const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
 for (const name of ["remote_plugin_root", "remote_call_tool"]) {
   if (Object.hasOwn(config.peer || {}, name)) {
