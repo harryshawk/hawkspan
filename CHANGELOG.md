@@ -14,6 +14,12 @@
   prior runs.
 - Scoped checkpoint-retention health to targets registered in the sole live
   scheduler while still reporting the size of the historical manifest.
+- Split successful training return from terminal validation: M4 first returns
+  an immutable training packet and releases the trainer slot while the same
+  job remains `awaiting-validation`; only the distinct validated packet and
+  receiver-confirmed receipt complete the lifecycle.
+- Reused the original durable `training` job for final package control instead
+  of requiring a separate packaging job identity.
 
 ## 0.3.1 - 2026-08-06
 

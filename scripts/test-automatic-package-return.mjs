@@ -46,7 +46,7 @@ const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, "
 fs.appendFileSync(logPath, name + " " + JSON.stringify(args) + "\\n");
 let structuredContent;
 if (name === "list_artifacts") structuredContent = state.artifacts;
-if (name === "list_jobs") structuredContent = [{ id: "durable-r-test", state: "returning" }];
+if (name === "list_jobs") structuredContent = [{ id: "durable-r-test", state: process.env.JOB_STATE || "returning" }];
 if (name === "update_job_status") structuredContent = { job_id: args.job_id, state: args.state };
 if (name === "receive_messages") structuredContent = { messages: process.env.RECEIVER_RECEIPT === "yes" ? [{
   id: "receiver-receipt-test",
@@ -87,13 +87,16 @@ process.stdout.write("ready\\n");
 setInterval(() => {}, 1000);
 `);
 
-function run(extraEnv = {}, explicit = false) {
+function run(extraEnv = {}, explicit = false, options = {}) {
+  const selectedPacket = options.packet || packet;
+  const selectedSha256 = options.sha256 || packetSha256;
   return spawnSync(process.execPath, [
     path.join(scripts, "automatic-package-return.mjs"),
     ...(explicit ? [
-      "--strict", "--job-id", "r-test", "--packet", packet, "--sha256", packetSha256,
+      "--strict", "--job-id", "r-test", "--packet", selectedPacket, "--sha256", selectedSha256,
       "--durable-job-id", "durable-r-test",
       "--queue-item-id", "queue-r-test",
+      ...(options.awaitingValidation ? ["--awaiting-validation"] : []),
     ] : []),
   ], {
     encoding: "utf8",
@@ -104,7 +107,7 @@ function run(extraEnv = {}, explicit = false) {
       HAWKSPAN_CALL_TOOL: fakeCallTool,
       FAKE_STATE: fakeState,
       FAKE_LOG: fakeLog,
-      PACKET_SHA256: packetSha256,
+      PACKET_SHA256: selectedSha256,
       ...extraEnv,
     },
   });
@@ -227,6 +230,62 @@ assert.equal(replayedSettlement.status, 0, replayedSettlement.stderr);
 const replayedScheduler = JSON.parse(fs.readFileSync(schedulerState, "utf8"));
 assert.equal(replayedScheduler.jobs["queue-r-test"].state, "completed");
 assert.equal(replayedScheduler.current, "queue-r-next");
+
+// A received training packet is durable evidence, but it is not terminal.
+// It releases the scheduler slot and keeps the lifecycle awaiting validation.
+const trainingPacket = path.join(packetRoot, "r-test__training__return-packet.zip");
+fs.writeFileSync(trainingPacket, "training packet awaiting controlled validation\n");
+const trainingSha256 = crypto.createHash("sha256")
+  .update(fs.readFileSync(trainingPacket))
+  .digest("hex");
+const awaitingScheduler = JSON.parse(fs.readFileSync(schedulerState, "utf8"));
+awaitingScheduler.current = "queue-r-test";
+awaitingScheduler.jobs["queue-r-test"] = {
+  state: "running",
+  phase: "returning",
+  target: "r-test",
+  packet: trainingPacket,
+  packet_sha256: trainingSha256,
+  terminal: false,
+};
+fs.writeFileSync(schedulerState, `${JSON.stringify(awaitingScheduler)}\n`);
+fs.writeFileSync(path.join(queueRoot, "captioned-lora-status.json"), `${JSON.stringify({
+  returning: [{ job_id: "r-test", packet: trainingPacket }],
+  completed: [],
+})}\n`);
+const trainingQueued = run(
+  { DELIVERY_MODE: "queued", JOB_STATE: "running" },
+  true,
+  { packet: trainingPacket, sha256: trainingSha256, awaitingValidation: true },
+);
+assert.equal(trainingQueued.status, 0, trainingQueued.stderr);
+assert.equal(JSON.parse(trainingQueued.stdout).results[0].state, "queued");
+const awaitingValidation = run({
+  RECEIVER_RECEIPT: "yes",
+  JOB_STATE: "returning",
+  PACKET_SHA256: trainingSha256,
+});
+assert.equal(awaitingValidation.status, 0, awaitingValidation.stderr);
+const awaitingReceipt = JSON.parse(awaitingValidation.stdout).results[0];
+assert.equal(awaitingReceipt.state, "receipt-confirmed");
+assert.equal(awaitingReceipt.terminal, false);
+const awaitingState = JSON.parse(fs.readFileSync(schedulerState, "utf8"));
+assert.equal(awaitingState.jobs["queue-r-test"].state, "returning");
+assert.equal(awaitingState.jobs["queue-r-test"].phase, "awaiting-validation");
+assert.equal(awaitingState.current, null);
+const awaitingStatus = JSON.parse(fs.readFileSync(
+  path.join(queueRoot, "captioned-lora-status.json"),
+  "utf8",
+));
+assert.equal(awaitingStatus.returning.length, 1);
+assert.equal(awaitingStatus.completed.length, 0);
+assert.equal(awaitingStatus.returning[0].phase, "awaiting-validation");
+assert.equal(awaitingStatus.returning[0].package_return_state, "receipt-confirmed");
+const lastDurableUpdate = fs.readFileSync(fakeLog, "utf8").trim().split("\n")
+  .filter((line) => line.startsWith("update_job_status "))
+  .at(-1);
+assert.match(lastDurableUpdate, /\"state\":\"returning\"/);
+assert.match(lastDurableUpdate, /\"phase\":\"awaiting-validation\"/);
 
 fs.rmSync(root, { recursive: true, force: true });
 process.stdout.write("automatic package return tests passed\n");

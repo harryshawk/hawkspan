@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 
 
@@ -70,6 +71,40 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
     assert pointer["authorization_job_id"] == "test-job"
     assert pointer["target"] == "test-target"
 
+    scheduler_jobs = root / "scheduler" / "lora-jobs.json"
+    scheduler_jobs.parent.mkdir()
+    scheduler_jobs.write_text(json.dumps({"schema_version": 2, "jobs": [{
+        "job_id": "queue-test-target",
+        "target": "test-target",
+        "authorization_job_id": "test-job",
+    }]}))
+    package_calls = []
+    original_run = controller.subprocess.run
+    original_training_processes = controller.training_processes
+    original_load_target = controller.load_target
+    controller.training_processes = lambda: []
+    controller.load_target = lambda target: {"job_id": target}
+    controller.subprocess.run = lambda *args, **kwargs: (
+        package_calls.append((args, kwargs))
+        or types.SimpleNamespace(returncode=0, stdout="packaged\n", stderr="")
+    )
+    try:
+        controller.package("test-job", "test-target")
+        package_env = package_calls[0][1]["env"]
+        assert package_env["HAWKSPAN_DURABLE_TRAINING_JOB_ID"] == "test-job"
+        assert package_env["HAWKSPAN_SIMPLETUNER_QUEUE_ITEM_ID"] == "queue-test-target"
+        scheduler_jobs.write_text(json.dumps({"schema_version": 2, "jobs": []}))
+        try:
+            controller.package("test-job", "test-target")
+        except SystemExit as error:
+            assert "exactly one scheduler item" in str(error)
+        else:
+            raise AssertionError("unbound package target was accepted")
+    finally:
+        controller.subprocess.run = original_run
+        controller.training_processes = original_training_processes
+        controller.load_target = original_load_target
+
     child_pid_path = root / "child.pid"
     helper = root / "runner-helper.py"
     helper.write_text(
@@ -96,7 +131,7 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
         assert by_pid[runner.pid]["pgid"] != by_pid[child_pid]["pgid"]
 
         control = root / "control"
-        control.mkdir()
+        control.mkdir(exist_ok=True)
         old_release_runner = root / "old-release" / "run_captioned_loras.py.managed"
         old_release_runner.parent.mkdir()
         old_release_runner.symlink_to(helper)

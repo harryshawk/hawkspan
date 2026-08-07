@@ -70,6 +70,7 @@ with tempfile.TemporaryDirectory() as temporary:
             {
                 "checkpoint": "final",
                 "score": 8.5,
+                "lora_sha256": "a" * 64,
                 "renders": [
                     {
                         "prompt_id": "robot",
@@ -82,11 +83,23 @@ with tempfile.TemporaryDirectory() as temporary:
             }
         )
     )
-    rendered = module.controlled_validation_samples(output, samples, library)
+    rendered = module.controlled_validation_samples(
+        output, samples, library, "a" * 64
+    )
     assert len(rendered) == 1
     portable = json.loads((samples / "validation-result.json").read_text())
     assert portable["renders"][0]["image_path"] == (
         "VALIDATION_SAMPLES/robot--seed-20260801.png"
     )
+    evidence_before = module.validation_evidence_sha256(output, "a" * 64)
+    (output / "render.png").write_bytes(b"changed render")
+    evidence_after = module.validation_evidence_sha256(output, "a" * 64)
+    assert evidence_before != evidence_after
+    try:
+        module.validation_evidence_sha256(output, "b" * 64)
+    except RuntimeError as error:
+        assert "does not match" in str(error)
+    else:
+        raise AssertionError("mismatched validation LoRA hash was accepted")
 
 print("return packet validation-input test passed")

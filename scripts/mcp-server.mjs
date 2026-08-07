@@ -958,7 +958,7 @@ function updateJobStatus(args) {
     if (!args.authorization_evidence?.trim()) {
       throw new Error("authorization_evidence is required to authorize a job");
     }
-  } else if (!jobTransitions[row.state]?.has(args.state)) {
+  } else if (args.state !== row.state && !jobTransitions[row.state]?.has(args.state)) {
     throw new Error(`invalid job transition: ${row.state} -> ${args.state}`);
   }
   let authorizationState = row.authorization_state;
@@ -2392,6 +2392,21 @@ function trainerStopAuthorizedJob(args) {
   return { ...result, queue_control: queueControl };
 }
 
+function trainerPackageAuthorizedJob(args) {
+  if (args._delegated_job) importDelegatedJob(args._delegated_job, args.job_id);
+  const job = requireTrackedJob(args.job_id, "training", ["returning", "completed"]);
+  const metadata = JSON.parse(job.metadata_json || "{}");
+  if (!args.target || metadata.target !== args.target) {
+    throw new Error(
+      `package target must match durable training target ${metadata.target || "<missing>"}`,
+    );
+  }
+  return runConfiguredScript(
+    "package_script", "allow_package", { ...args, _delegated_job: null },
+    "training", ["returning", "completed"],
+  );
+}
+
 function trainerQueueControl(args) {
   if (args.action === "resume-job" && !args.reason?.trim()) {
     throw new Error("resume-job requires a reason recording the explicit resume instruction");
@@ -3558,10 +3573,7 @@ const coreTools = [
       idempotentHint: true,
       openWorldHint: false,
     },
-    handler: (args) => runConfiguredScript(
-      "package_script", "allow_package", args, "packaging",
-      ["authorized", "queued", "completed"],
-    ),
+    handler: trainerPackageAuthorizedJob,
   },
 ];
 

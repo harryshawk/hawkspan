@@ -173,6 +173,14 @@ complete only after HawkSpan imports that receiver-generated, digest-bound
 receipt. Periodic recovery can reconstruct an interrupted return from the
 SimpleTuner scheduler record without creating another artifact identity.
 
+Training and final acceptance use two immutable packet identities. A successful
+M4 run first returns a `training` packet and releases the single trainer slot,
+but the durable job remains `returning / awaiting-validation`. M2 then evaluates
+the LoRA with the fixed Draw Things prompts, controls, seeds, and live settings.
+After that evidence is ingested back into the run output, the normal package
+control creates a separate `validated` packet. Only receipt confirmation for
+that validated packet completes the original training job and queue item.
+
 The immutable message body is embedded in the peer wake prompt. The prompt also
 provides a direct `call-tool.mjs` fallback for Codex exec environments that do
 not load dynamic MCP tools.

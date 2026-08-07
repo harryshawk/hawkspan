@@ -267,6 +267,41 @@ const mismatch = await tool("trainer_stop_authorized_job", {
 assert.equal(mismatch.result.isError, true);
 assert.match(mismatch.result.content[0].text, /identity does not match/);
 
+const packageJobId = "job-delegated-package-test";
+const refusedPackageTargetDrift = await tool("trainer_package_authorized_job", {
+  job_id: packageJobId,
+  target: "different-target",
+  _delegated_job: {
+    ...context,
+    id: packageJobId,
+    state: "returning",
+    metadata: { target: "robot-test", phase: "awaiting-validation" },
+  },
+});
+assert.equal(refusedPackageTargetDrift.result.isError, true);
+assert.match(refusedPackageTargetDrift.result.content[0].text, /must match durable training target/);
+const returningReplay = await tool("update_job_status", {
+  job_id: packageJobId,
+  state: "returning",
+  metadata: { phase: "awaiting-validation", target: "robot-test" },
+});
+assert.equal(returningReplay.result.isError, false, returningReplay.result.content?.[0]?.text);
+const packaged = await tool("trainer_package_authorized_job", {
+  job_id: packageJobId,
+  target: "robot-test",
+  _delegated_job: {
+    ...context,
+    id: packageJobId,
+    state: "returning",
+    metadata: { target: "robot-test", phase: "awaiting-validation" },
+  },
+});
+assert.equal(packaged.result.isError, false, packaged.result.content?.[0]?.text);
+assert.match(
+  fs.readFileSync(invocationLog, "utf8"),
+  new RegExp(`--job-id ${packageJobId}.*--target robot-test`),
+);
+
 child.stdin.end();
 await new Promise((resolve) => child.once("exit", resolve));
 fs.rmSync(root, { recursive: true, force: true });

@@ -43,20 +43,29 @@ Feature: HawkSpan-managed 100-step robot ControlNet LoRA lifecycle
     Then training resumes from the explicitly bound complete checkpoint
     And status continues to identify the same job
 
-  Scenario: Complete, package, and return the 100-step result
+  Scenario: Complete training and return the result for validation
     Given the resumed job reaches step 100 and exits successfully
     When the managed lifecycle enters packaging
-    Then HawkSpan-D creates the exact job's return packet
-    And M4 returns the registered packet through HawkSpan-D artifact delivery
+    Then HawkSpan-D creates the exact job's immutable training packet
+    And M4 returns the registered training packet through HawkSpan-D artifact delivery
     And M2 verifies the artifact identity, size, and SHA-256 digest
-    And only the receipt-confirmed phase completes the SimpleTuner queue item
+    And the trainer slot becomes available for the next queued job
+    And the same job remains returning and awaiting validation
+
+  Scenario: Validate and complete the original training job
+    Given M2 has rendered and ingested the fixed Draw Things validation suite
+    And the validation evidence is attached to the exact training output
+    When M2 requests package control for the original durable training job
+    Then HawkSpan-D creates a distinct immutable validated packet
+    And M4 returns the validated packet through HawkSpan-D artifact delivery
+    And only its receiver-confirmed receipt completes the original job and queue item
 
   Scenario Outline: Complete four independent 100-step ControlNet LoRA runs
     Given <target> owns a distinct staged runtime and durable training job
     And its scheduler item is bound to the current HawkSpan revision
     When <target> reaches step 100 without interruption
     Then its LoRA plus ControlNet-conditioned training exits successfully
-    And its automatic return packet is independently registered and verified
+    And its training and validated return packets are independently registered and verified
     And no output, checkpoint, receipt, or package is borrowed from another run
 
     Examples:
@@ -88,12 +97,13 @@ Feature: HawkSpan-managed 100-step robot ControlNet LoRA lifecycle
     And the stopped attempt produces no return package
     And its checkpoints remain available for an explicitly authorized resume
 
-  Scenario: Automatically return every successful training package
+  Scenario: Automatically return every successful training packet
     When an authorized training target exits zero with a valid final LoRA
-    Then the same managed run builds the matching return packet
+    Then the same managed run builds the matching nonterminal training packet
     And HawkSpan-D calculates and records the packet SHA-256 digest
     And HawkSpan-D durably sends the packet through its artifact queue
     And a periodic link cycle retries a queued return without duplicate registration
+    And receipt confirmation leaves the job awaiting controlled validation
 
   Scenario: Never package an unsuccessful training target
     When training exits nonzero or is stopped before a valid final LoRA is complete

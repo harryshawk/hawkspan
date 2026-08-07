@@ -371,13 +371,18 @@ def validation_seeds(library: dict) -> list[int]:
 
 
 def controlled_validation_samples(
-    output_dir: Path, destination: Path, validation_library: Path
+    output_dir: Path, destination: Path, validation_library: Path,
+    expected_lora_sha256: str,
 ) -> list[Path]:
     result_path = output_dir / "validation-result.json"
     if not result_path.is_file():
         raise RuntimeError("Final packet requires output/validation-result.json")
     library = json.loads(validation_library.read_text())
     result = json.loads(result_path.read_text())
+    if result.get("lora_sha256") != expected_lora_sha256:
+        raise RuntimeError(
+            "Validation result LoRA SHA-256 does not match the packaged final LoRA"
+        )
     prompts = {str(prompt["id"]) for prompt in library["prompts"]}
     expected = {
         (prompt_id, seed)
@@ -465,6 +470,34 @@ def copy_validation_samples(output_dir: Path, destination: Path) -> list[Path]:
             "No validation/sample images were produced by this run.\n"
         )
     return samples
+
+
+def validation_evidence_sha256(output_dir: Path, final_hash: str) -> str:
+    result_path = output_dir / "validation-result.json"
+    result = json.loads(result_path.read_text())
+    if result.get("lora_sha256") != final_hash:
+        raise RuntimeError(
+            "Validation result LoRA SHA-256 does not match the packaged final LoRA"
+        )
+    digest = hashlib.sha256(result_path.read_bytes())
+    output_root = output_dir.resolve()
+    evidence: list[tuple[str, int, str, Path]] = []
+    for render in result.get("renders", []):
+        source = Path(str(render.get("image_path", "")))
+        if not source.is_absolute():
+            source = output_dir / source
+        source = source.resolve()
+        try:
+            relative = str(source.relative_to(output_root))
+        except ValueError as error:
+            raise RuntimeError("Validation render is outside the output directory") from error
+        if not source.is_file():
+            raise RuntimeError(f"Validation render is missing: {source}")
+        evidence.append((str(render.get("prompt_id", "")), int(render.get("seed")), relative, source))
+    for prompt_id, seed, relative, source in sorted(evidence):
+        digest.update(f"\0{prompt_id}\0{seed}\0{relative}\0".encode())
+        digest.update(bytes.fromhex(sha256(source)))
+    return digest.hexdigest()
 
 
 def packet_output_inventory(output_root: Path) -> None:
@@ -638,19 +671,48 @@ def build_one(
     final = source_output / "pytorch_lora_weights.safetensors"
     final_size, tensor_count = validate_lora(final, python_bin)
     final_hash = sha256(final)
-    identity = f"{spec['run_name']}:{final_hash}"
+    packet_variant = spec.get(
+        "packet_variant",
+        "validated" if spec.get("require_validation_samples") else "training",
+    )
+    if packet_variant not in {"training", "validated"}:
+        raise RuntimeError(f"Unsupported packet_variant: {packet_variant}")
+    validation_hash = (
+        validation_evidence_sha256(source_output, final_hash)
+        if packet_variant == "validated"
+        else None
+    )
+    identity = ":".join(
+        part for part in (spec["run_name"], final_hash, packet_variant, validation_hash)
+        if part
+    )
     prior = next(
         (entry for entry in ledger["packets"] if entry["identity"] == identity),
         None,
     )
     if prior and not include_existing:
-        print(f"SKIP EXISTING {spec['run_name']} {prior['packet_path']}")
-        return None
+        prior_path = Path(prior["packet_path"])
+        if prior_path.is_file() and sha256(prior_path) == prior.get("packet_sha256"):
+            if spec.get("packet_result_path"):
+                atomic_json(Path(spec["packet_result_path"]), prior)
+            print(f"SKIP EXISTING {spec['run_name']} {prior['packet_path']}")
+            return None
+        if prior_path.exists():
+            raise RuntimeError(f"Tracked packet failed its recorded SHA-256: {prior_path}")
+        ledger["packets"] = [
+            entry for entry in ledger["packets"] if entry["identity"] != identity
+        ]
+        prior = None
 
     today = dt.date.today().isoformat()
+    variant_label = (
+        f"validated-{validation_hash[:12]}"
+        if validation_hash
+        else packet_variant
+    )
     folder_name = (
         f"{safe_name(spec['run_name'])}__{safe_name(spec['set_name'])}"
-        f"__{today}__M4-return-packet"
+        f"__{today}__{variant_label}__M4-return-packet"
     )
     folder = output_root / folder_name
     packet = output_root / f"{folder_name}.zip"
@@ -752,7 +814,8 @@ def build_one(
     packet_output_inventory(folder / "OUTPUTS")
     if spec.get("require_validation_samples"):
         samples = controlled_validation_samples(
-            source_output, folder / "VALIDATION_SAMPLES", validation_library
+            source_output, folder / "VALIDATION_SAMPLES", validation_library,
+            final_hash,
         )
     else:
         samples = copy_validation_samples(source_output, folder / "VALIDATION_SAMPLES")
@@ -763,6 +826,7 @@ def build_one(
     summary = (
         "# RUN_SUMMARY\n\n"
         f"- Run name: {spec['run_name']}\n"
+        f"- Packet variant: {packet_variant}\n"
         f"- Set/concept name: {spec['set_name']}\n"
         "- Machine: M4 Mac\n"
         f"- Start time: {dt.datetime.fromtimestamp(start).astimezone().isoformat()}\n"
@@ -832,6 +896,8 @@ def build_one(
     packet_hash = sha256(packet)
     record = {
         "identity": identity,
+        "packet_variant": packet_variant,
+        "validation_evidence_sha256": validation_hash,
         "run_name": spec["run_name"],
         "set_name": spec["set_name"],
         "final_lora_sha256": final_hash,
@@ -845,6 +911,8 @@ def build_one(
     ]
     ledger["packets"].append(record)
     atomic_json(ledger_path, ledger)
+    if spec.get("packet_result_path"):
+        atomic_json(Path(spec["packet_result_path"]), record)
     shutil.rmtree(folder)
     print(f"PACKAGED {spec['run_name']} {packet}")
     return record

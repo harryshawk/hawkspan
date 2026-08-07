@@ -43,7 +43,7 @@ function atomicJson(filePath, value) {
   fs.renameSync(temporary, filePath);
 }
 
-function settleSchedulerItem(queueItemId, jobId, receipt) {
+function settleSchedulerItem(queueItemId, jobId, receipt, terminal) {
   const configPath = path.resolve(
     process.env.HAWKSPAN_CONFIG || process.env.HAWKSPAN_CONFIG_PATH || path.join(stateRoot, "config.json"),
   );
@@ -57,10 +57,19 @@ function settleSchedulerItem(queueItemId, jobId, receipt) {
       const returning = Array.isArray(status.returning) ? status.returning : [];
       const settled = returning.find((entry) => entry.job_id === jobId);
       if (settled) {
-        status.returning = returning.filter((entry) => entry.job_id !== jobId);
-        status.completed = Array.isArray(status.completed) ? status.completed : [];
-        if (!status.completed.some((entry) => entry.job_id === jobId)) {
-        status.completed.push({ ...settled, package_return_state: "receipt-confirmed" });
+        if (terminal) {
+          status.returning = returning.filter((entry) => entry.job_id !== jobId);
+          status.completed = Array.isArray(status.completed) ? status.completed : [];
+          if (!status.completed.some((entry) => entry.job_id === jobId)) {
+            status.completed.push({ ...settled, package_return_state: "receipt-confirmed" });
+          }
+        } else {
+          status.returning = returning.map((entry) => entry.job_id === jobId ? {
+            ...entry,
+            phase: "awaiting-validation",
+            package_return_state: "receipt-confirmed",
+            receiver_receipt_message_id: receipt.receiver_receipt_message_id,
+          } : entry);
         }
         atomicJson(statusPath, status);
       }
@@ -80,20 +89,21 @@ function settleSchedulerItem(queueItemId, jobId, receipt) {
     (state) => {
       const current = state.jobs?.[queueItemId];
       if (!current) return;
+      const now = new Date().toISOString();
       state.jobs[queueItemId] = {
         ...current,
-        state: "completed",
-        phase: "receipt-confirmed",
+        state: terminal ? "completed" : "returning",
+        phase: terminal ? "receipt-confirmed" : "awaiting-validation",
         target: jobId,
         packet_path: receipt.packet_path,
         packet_sha256: receipt.sha256,
         artifact_id: receipt.artifact_id,
         receiver_receipt_message_id: receipt.receiver_receipt_message_id,
-        completed_at: new Date().toISOString(),
+        ...(terminal ? { completed_at: now } : { awaiting_validation_at: now }),
       };
       if (state.current === queueItemId) state.current = null;
-      state.decision = "receipt-confirmed";
-      state.last_checked_at = new Date().toISOString();
+      state.decision = terminal ? "receipt-confirmed" : "awaiting-validation";
+      state.last_checked_at = now;
     },
   );
 }
@@ -156,17 +166,20 @@ function confirmReceipt(pending, receiverReceipt) {
     ? call("list_jobs", { job_id: pending.durable_job_id, limit: 1 })
     : [];
   const job = jobs[0];
+  const terminal = pending.terminal !== false;
+  const nextDurableState = terminal ? "completed" : "returning";
   if (job && ["running", "returning"].includes(job.state)) {
     call("update_job_status", {
       job_id: pending.durable_job_id,
-      state: "completed",
+      state: nextDurableState,
       metadata: {
-        phase: "receipt-confirmed",
+        phase: terminal ? "receipt-confirmed" : "awaiting-validation",
         packet_path: pending.packet_path,
         packet_sha256: pending.sha256,
         package_return_artifact_id: pending.artifact_id,
         package_return_state: "receipt-confirmed",
         receiver_receipt_message_id: receiverReceipt.id,
+        terminal,
       },
     });
   }
@@ -174,6 +187,7 @@ function confirmReceipt(pending, receiverReceipt) {
     pending.simpletuner_queue_item_id,
     pending.job_id,
     receipt,
+    terminal,
   );
   try {
     call("acknowledge_message", {
@@ -215,7 +229,7 @@ function withDigestLock(packetSha256, callback) {
   }
 }
 
-function returnPacket({ jobId, packetPath, expectedSha256 = null, durableJobId = null, queueItemId = null }, sendNow) {
+function returnPacket({ jobId, packetPath, expectedSha256 = null, durableJobId = null, queueItemId = null, terminal = true }, sendNow) {
   const resolvedPacket = path.resolve(packetPath);
   const stat = validatePacket(resolvedPacket);
   const packetSha256 = digest(resolvedPacket);
@@ -243,6 +257,7 @@ function returnPacket({ jobId, packetPath, expectedSha256 = null, durableJobId =
           durable_job_id: durableJobId,
           simpletuner_queue_item_id: queueItemId,
           packet_sha256: packetSha256,
+          terminal,
         },
       });
       if (registered.sha256 !== packetSha256) throw new Error("registered artifact digest changed");
@@ -259,6 +274,7 @@ function returnPacket({ jobId, packetPath, expectedSha256 = null, durableJobId =
       artifact_id: artifact.id,
       durable_job_id: durableJobId,
       simpletuner_queue_item_id: queueItemId,
+      terminal,
       state: "registered",
       updated_at: new Date().toISOString(),
     };
@@ -300,6 +316,7 @@ function candidatesFromReceipts() {
       expectedSha256: entry.sha256,
       durableJobId: entry.durable_job_id || null,
       queueItemId: entry.simpletuner_queue_item_id || null,
+      terminal: entry.terminal !== false,
     }))
     .filter((entry) => entry.jobId && entry.packetPath);
 }
@@ -332,6 +349,7 @@ function candidatesFromScheduler() {
         expectedSha256: record.packet_sha256 || null,
         durableJobId: queued.authorization_job_id || record.authorization_job_id || null,
         queueItemId,
+        terminal: record.terminal !== false,
       };
     })
     .filter((entry) => entry.jobId && entry.packetPath && fs.existsSync(entry.packetPath));
@@ -361,6 +379,7 @@ const candidates = explicitPacket || explicitJob
       expectedSha256: value("--sha256"),
       durableJobId: value("--durable-job-id"),
       queueItemId: value("--queue-item-id"),
+      terminal: !args.includes("--awaiting-validation"),
     }]
   : recoveryCandidates();
 

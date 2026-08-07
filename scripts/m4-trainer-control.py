@@ -478,8 +478,30 @@ def package(job_id: str, target: str) -> None:
             ),
             "HAWKSPAN_LORA_SOURCE_ZIP": str(TRAINING.get("source_zip", "not recorded")),
             "HAWKSPAN_LORA_MPS_SHIM_DIR": str(TRAINING.get("mps_shim_dir", "")),
+            "HAWKSPAN_DURABLE_TRAINING_JOB_ID": job_id,
         }
     )
+    scheduler_jobs_path = Path(
+        BASE_CONFIG.get("lora_automation", {}).get(
+            "scheduler_jobs_path", SCHEDULER_ROOT / "lora-jobs.json"
+        )
+    ).expanduser()
+    if scheduler_jobs_path.exists():
+        scheduler_jobs = json.loads(scheduler_jobs_path.read_text()).get("jobs", [])
+        matches = [
+            item
+            for item in scheduler_jobs
+            if item.get("target") == target
+            and item.get("authorization_job_id") == job_id
+        ]
+        if len(matches) != 1:
+            raise SystemExit(
+                "package refused because target is not bound to exactly one "
+                "scheduler item for this durable training job"
+            )
+        package_env["HAWKSPAN_SIMPLETUNER_QUEUE_ITEM_ID"] = matches[0]["job_id"]
+    else:
+        raise SystemExit("package refused because scheduler job authority is missing")
     result = subprocess.run(
         [
             str(PYTHON),

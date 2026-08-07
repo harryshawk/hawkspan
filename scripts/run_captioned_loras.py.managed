@@ -122,8 +122,12 @@ def read_queue_policy() -> dict:
     return default | json.loads(QUEUE_POLICY.read_text())
 
 
-def package_return_packet(job: dict, log_path: Path) -> Path:
+def package_return_packet(
+    job: dict, log_path: Path, require_validation_samples: bool
+) -> Path:
+    packet_variant = "validated" if require_validation_samples else "training"
     spec_path = RUN_ROOT / f"{job['job_id']}-return-spec.json"
+    packet_result_path = RUN_ROOT / f"{job['job_id']}-{packet_variant}-packet-result.json"
     spec = [
         {
             "run_name": job["job_id"],
@@ -134,7 +138,9 @@ def package_return_packet(job: dict, log_path: Path) -> Path:
             "log_files": [str(log_path)],
             "training_zip": SOURCE_ZIP,
             "trigger": job["trigger"],
-            "require_validation_samples": True,
+            "require_validation_samples": require_validation_samples,
+            "packet_variant": packet_variant,
+            "packet_result_path": str(packet_result_path),
             "launcher_command": (
                 f"cd {job['config_dir']!r} && "
                 f"{VENV_BIN / 'simpletuner'} train"
@@ -188,13 +194,20 @@ def package_return_packet(job: dict, log_path: Path) -> Path:
     sys.stderr.write(result.stderr)
     if result.returncode != 0:
         raise RuntimeError(f"Return-packet build failed for {job['job_id']}")
-    matches = sorted(RETURN_ROOT.glob(f"{job['job_id']}__*__M4-return-packet.zip"))
-    if len(matches) != 1:
-        raise RuntimeError(f"Expected one return packet for {job['job_id']}, found {matches}")
-    return matches[0]
+    if not packet_result_path.is_file():
+        raise RuntimeError(f"Packet builder did not record a result for {job['job_id']}")
+    packet_result = json.loads(packet_result_path.read_text())
+    packet = Path(packet_result.get("packet_path", ""))
+    if (
+        packet_result.get("packet_variant") != packet_variant
+        or not packet.is_file()
+        or sha256(packet) != packet_result.get("packet_sha256")
+    ):
+        raise RuntimeError(f"Packet result verification failed for {job['job_id']}")
+    return packet
 
 
-def automatically_return_packet(job: dict, packet: Path) -> dict:
+def automatically_return_packet(job: dict, packet: Path, terminal: bool) -> dict:
     identity_args = []
     if DURABLE_JOB_ID:
         identity_args.extend(["--durable-job-id", DURABLE_JOB_ID])
@@ -211,6 +224,7 @@ def automatically_return_packet(job: dict, packet: Path) -> dict:
             str(packet),
             "--sha256",
             sha256(packet),
+            *([] if terminal else ["--awaiting-validation"]),
             *identity_args,
         ],
         text=True,
@@ -278,7 +292,12 @@ def update_scheduler_state(target: str, state_name: str, phase: str, metadata=No
                 "updated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
                 **(metadata or {}),
             })
-            scheduler["current"] = None if state_name in {"completed", "failed", "cancelled"} else target
+            scheduler["current"] = (
+                None
+                if state_name in {"completed", "failed", "cancelled"}
+                or state_name == "returning"
+                else target
+            )
             scheduler["decision"] = phase
         return True
     except Exception as error:
@@ -497,14 +516,20 @@ for job in jobs:
     else:
         print(f"VALID EXISTING NEW-RUN OUTPUT {job['job_id']}", flush=True)
 
-    update_scheduler_state(job["job_id"], "running", "packaging")
+    validation_result = Path(job["output_dir"]) / "validation-result.json"
+    require_validation_samples = validation_result.exists()
+    packet_variant = "validated" if require_validation_samples else "training"
+    update_scheduler_state(job["job_id"], "running", f"packaging-{packet_variant}")
     try:
-        packet = package_return_packet(job, log_path)
+        packet = package_return_packet(job, log_path, require_validation_samples)
         update_scheduler_state(job["job_id"], "running", "returning", {
             "packet": str(packet),
             "packet_sha256": sha256(packet),
+            "terminal": require_validation_samples,
         })
-        package_return = automatically_return_packet(job, packet)
+        package_return = automatically_return_packet(
+            job, packet, terminal=require_validation_samples
+        )
     except Exception as error:
         update_durable_job_state("failed", {
             "target": job["job_id"],
@@ -523,9 +548,14 @@ for job in jobs:
         "packet_sha256": package_return["sha256"],
         "package_return_state": package_return["state"],
         "package_return_artifact_id": package_return["artifact_id"],
+        "packet_variant": packet_variant,
         "completed_at": int(time.time()),
     }
-    if package_return["state"] == "receipt-confirmed":
+    terminal_complete = (
+        require_validation_samples
+        and package_return["state"] == "receipt-confirmed"
+    )
+    if terminal_complete:
         state["completed"].append(record)
     else:
         state["returning"] = [
@@ -536,20 +566,31 @@ for job in jobs:
     state.pop("current_started_at", None)
     state.pop("current_attempts", None)
     write_status(state)
-    terminal_state = "completed" if package_return["state"] == "receipt-confirmed" else "returning"
-    terminal_phase = "receipt-confirmed" if terminal_state == "completed" else "returning"
-    update_durable_job_state(terminal_state, {
-        "target": job["job_id"],
-        "phase": terminal_phase,
-        "packet": str(packet),
-        "packet_sha256": package_return["sha256"],
-        "package_return_state": package_return["state"],
-        "package_return_artifact_id": package_return["artifact_id"],
-    })
+    terminal_state = "completed" if terminal_complete else "returning"
+    if terminal_complete:
+        terminal_phase = "receipt-confirmed"
+    elif package_return["state"] != "receipt-confirmed":
+        terminal_phase = f"returning-{packet_variant}-packet"
+    elif require_validation_samples:
+        terminal_phase = "returning-validated-packet"
+    else:
+        terminal_phase = "awaiting-validation"
+    if package_return["state"] != "receipt-confirmed":
+        update_durable_job_state(terminal_state, {
+            "target": job["job_id"],
+            "phase": terminal_phase,
+            "packet": str(packet),
+            "packet_sha256": package_return["sha256"],
+            "package_return_state": package_return["state"],
+            "package_return_artifact_id": package_return["artifact_id"],
+            "packet_variant": packet_variant,
+        })
     update_scheduler_state(job["job_id"], terminal_state, terminal_phase, {
         "packet": str(packet),
         "packet_sha256": package_return["sha256"],
         "package_return_artifact_id": package_return["artifact_id"],
+        "packet_variant": packet_variant,
+        "terminal": require_validation_samples,
     })
     cleanup_candidates = RUN_ROOT / "cleanup-candidates.json"
     existing_cleanup = (
@@ -575,7 +616,13 @@ for job in jobs:
         }
     )
     cleanup_candidates.write_text(json.dumps(existing_cleanup, indent=2) + "\n")
-    print(f"COMPLETE {job['job_id']} packet={packet}", flush=True)
+    if terminal_complete:
+        print(f"COMPLETE {job['job_id']} packet={packet}", flush=True)
+    else:
+        print(
+            f"AWAITING VALIDATION {job['job_id']} training_packet={packet}",
+            flush=True,
+        )
 
 state["current"] = None
 state["finished_at"] = int(time.time())
