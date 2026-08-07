@@ -2565,11 +2565,17 @@ function trainerQueueControl(args) {
     const resumingQueuedPausedJob = args.action === "resume-job" &&
       durableJob.state === "queued" &&
       schedulerState.jobs?.[schedulerJob.job_id]?.state === "paused";
+    const retryingQueuedSkippedJob = args.action === "retry-job" &&
+      durableJob.state === "queued" &&
+      schedulerState.jobs?.[schedulerJob.job_id]?.state === "skipped";
     if (durableJob.state === "queued" &&
-        !retryingPendingAuthorization && !resumingQueuedPausedJob) {
+        !retryingPendingAuthorization && !resumingQueuedPausedJob &&
+        !retryingQueuedSkippedJob) {
       throw new Error(`job state ${durableJob.state} is not allowed for this operation`);
     }
-    originalDurableState = resumingQueuedPausedJob ? "queued" : expectedState;
+    originalDurableState = resumingQueuedPausedJob || retryingQueuedSkippedJob
+      ? "queued"
+      : expectedState;
     originalDurableMetadata = metadata;
     if (durableJob.state !== "queued") {
       updateJobStatus({

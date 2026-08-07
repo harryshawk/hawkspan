@@ -179,8 +179,12 @@ fs.writeFileSync(
   `${JSON.stringify({ checkpoints_total_limit: 10 })}\n`,
 );
 const fakeTrainerStart = path.join(testRoot, "trainer-start.sh");
-const schedulerJobsPath = path.join(testRoot, "lora-scheduler", "lora-jobs.json");
+const schedulerRoot = path.join(testRoot, "lora-scheduler");
+const schedulerJobsPath = path.join(schedulerRoot, "lora-jobs.json");
+const schedulerStatePath = path.join(schedulerRoot, "lora-scheduler-state.json");
+const schedulerJobControlRoot = path.join(schedulerRoot, "jobs");
 fs.mkdirSync(path.dirname(schedulerJobsPath), { recursive: true });
+fs.mkdirSync(schedulerJobControlRoot, { recursive: true });
 fs.writeFileSync(schedulerJobsPath, JSON.stringify({
   schema_version: 2,
   jobs: [{
@@ -190,6 +194,11 @@ fs.writeFileSync(schedulerJobsPath, JSON.stringify({
     revision_fingerprint: "scheduler-revision",
     authorized: true,
   }],
+}));
+fs.writeFileSync(schedulerStatePath, JSON.stringify({
+  schema_version: 1,
+  current: null,
+  jobs: { "scheduler-cap-test": { state: "queued", phase: "queued", attempts: 0 } },
 }));
 fs.writeFileSync(fakeTrainerStart, "#!/bin/sh\nprintf 'started\\n'\n", { mode: 0o755 });
 fs.writeFileSync(path.join(testRoot, "config.json"), JSON.stringify({
@@ -227,7 +236,10 @@ fs.writeFileSync(path.join(testRoot, "config.json"), JSON.stringify({
     revision_root: path.join(testRoot, "revisions"),
     validation_queue_root: path.join(testRoot, "validation-queue"),
     queue_policy_path: path.join(testQueue, "lora-queue-policy.json"),
+    scheduler_root: schedulerRoot,
     scheduler_jobs_path: schedulerJobsPath,
+    scheduler_state_path: schedulerStatePath,
+    scheduler_job_control_root: schedulerJobControlRoot,
   },
 }, null, 2));
 const serverPath = path.resolve(
@@ -595,6 +607,54 @@ const wrongKindSchedulerEnqueue = await tool("lora_automation", {
 });
 assert.equal(wrongKindSchedulerEnqueue.result.isError, true);
 assert.match(wrongKindSchedulerEnqueue.result.content[0].text, /job kind must be training/);
+
+const retryControlJob = await tool("create_job", {
+  kind: "training",
+  title: "Queued skip and retry contract",
+  metadata: { target: "cap-retry-control" },
+});
+await tool("update_job_status", {
+  job_id: retryControlJob.result.structuredContent.job_id,
+  state: "queued",
+});
+const schedulerDocument = JSON.parse(fs.readFileSync(schedulerJobsPath, "utf8"));
+schedulerDocument.jobs.push({
+  job_id: "scheduler-cap-retry-control",
+  target: "cap-retry-control",
+  authorization_job_id: retryControlJob.result.structuredContent.job_id,
+  revision_fingerprint: "b".repeat(64),
+  authorized: true,
+  priority: 20,
+});
+fs.writeFileSync(schedulerJobsPath, JSON.stringify(schedulerDocument));
+const schedulerState = JSON.parse(fs.readFileSync(schedulerStatePath, "utf8"));
+schedulerState.jobs["scheduler-cap-retry-control"] = {
+  state: "queued", phase: "queued", attempts: 0,
+};
+fs.writeFileSync(schedulerStatePath, JSON.stringify(schedulerState));
+const skippedQueuedJob = await tool("trainer_queue_control", {
+  action: "skip-job",
+  target: "cap-retry-control",
+  reason: "real queue-control regression",
+});
+assert.equal(skippedQueuedJob.result.isError, false);
+assert.equal(skippedQueuedJob.result.structuredContent.state, "skipped");
+const retriedQueuedJob = await tool("trainer_queue_control", {
+  action: "retry-job",
+  target: "cap-retry-control",
+  reason: "same immutable queued job is eligible again",
+});
+assert.equal(retriedQueuedJob.result.isError, false);
+assert.equal(retriedQueuedJob.result.structuredContent.state, "ready");
+assert.equal(
+  JSON.parse(fs.readFileSync(schedulerStatePath, "utf8"))
+    .jobs["scheduler-cap-retry-control"].state,
+  "queued",
+);
+const retriedDurableJob = await tool("list_jobs", {
+  job_id: retryControlJob.result.structuredContent.job_id,
+});
+assert.equal(retriedDurableJob.result.structuredContent[0].state, "queued");
 
 const automationQueue = await tool("lora_automation", { action: "queue" });
 assert.equal(automationQueue.result.isError, false);
