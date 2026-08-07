@@ -317,6 +317,20 @@ with tempfile.TemporaryDirectory() as temporary:
     assert resolved_path == readiness_path
     assert resolved == readiness
     assert resolved_dataset == readiness_inputs["dataset-preflight"]
+    first_identity = module.packet_identity(
+        "exact-run", "c" * 64, "training", None, fingerprint
+    )
+    second_identity = module.packet_identity(
+        "exact-run", "c" * 64, "training", None, "b" * 64
+    )
+    assert first_identity != second_identity
+    assert "provenance-v2" in first_identity
+    assert module.packet_variant_label("training", None, fingerprint) == (
+        "training-provenance-v2-aaaaaaaaaaaa"
+    )
+    assert module.packet_variant_label(
+        "validated", "d" * 64, fingerprint
+    ) == "validated-dddddddddddd-provenance-v2-aaaaaaaaaaaa"
 
     try:
         module.resolve_training_readiness({

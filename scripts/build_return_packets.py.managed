@@ -49,6 +49,9 @@ RELEVANT_TRAINING_ENV = (
     "HF_HUB_DISABLE_TELEMETRY",
     "DO_NOT_TRACK",
 )
+PACKET_PROVENANCE_SCHEMA = 2
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -133,6 +136,41 @@ def resolve_training_readiness(
     if sha256(dataset_path) != dataset_digest:
         raise RuntimeError("Exact dataset preflight changed after approval")
     return readiness_path, readiness, dataset_path
+
+
+def packet_identity(
+    run_name: str,
+    final_hash: str,
+    packet_variant: str,
+    validation_hash: str | None,
+    revision_fingerprint: str,
+) -> str:
+    return ":".join(
+        part for part in (
+            run_name,
+            final_hash,
+            packet_variant,
+            validation_hash,
+            f"provenance-v{PACKET_PROVENANCE_SCHEMA}",
+            revision_fingerprint,
+        ) if part
+    )
+
+
+def packet_variant_label(
+    packet_variant: str,
+    validation_hash: str | None,
+    revision_fingerprint: str,
+) -> str:
+    variant = (
+        f"validated-{validation_hash[:12]}"
+        if validation_hash
+        else packet_variant
+    )
+    return (
+        f"{variant}-provenance-v{PACKET_PROVENANCE_SCHEMA}"
+        f"-{revision_fingerprint[:12]}"
+    )
 
 
 def validate_lora(path: Path, python_bin: str) -> tuple[int, int]:
@@ -813,6 +851,8 @@ def build_one(
     for path in (config_dir, data_dir, source_output):
         if not path.exists():
             raise RuntimeError(f"Required path does not exist: {path}")
+    readiness_path, readiness, dataset_preflight = resolve_training_readiness(spec)
+    revision_fingerprint = readiness["revision_fingerprint"]
     final = source_output / "pytorch_lora_weights.safetensors"
     final_size, tensor_count = validate_lora(final, python_bin)
     final_hash = sha256(final)
@@ -827,9 +867,9 @@ def build_one(
         if packet_variant == "validated"
         else None
     )
-    identity = ":".join(
-        part for part in (spec["run_name"], final_hash, packet_variant, validation_hash)
-        if part
+    identity = packet_identity(
+        spec["run_name"], final_hash, packet_variant, validation_hash,
+        revision_fingerprint,
     )
     prior = next(
         (entry for entry in ledger["packets"] if entry["identity"] == identity),
@@ -850,10 +890,8 @@ def build_one(
         prior = None
 
     today = dt.date.today().isoformat()
-    variant_label = (
-        f"validated-{validation_hash[:12]}"
-        if validation_hash
-        else packet_variant
+    variant_label = packet_variant_label(
+        packet_variant, validation_hash, revision_fingerprint,
     )
     folder_name = (
         f"{safe_name(spec['run_name'])}__{safe_name(spec['set_name'])}"
@@ -924,7 +962,6 @@ def build_one(
 
     write_dataset_inventory(data_dir, folder / "DATASET", config)
     copy_validation_inputs(validation_library, data_dir, folder / "DATASET")
-    readiness_path, readiness, dataset_preflight = resolve_training_readiness(spec)
     shutil.copy2(
         readiness_path,
         folder / "DATASET" / "training-readiness.json",
