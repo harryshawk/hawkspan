@@ -2409,6 +2409,8 @@ function delegateToActiveRuntime(action, args) {
     "registry-refresh",
     "validation-plan",
     "validation-ingest",
+    "draw-things-plan",
+    "draw-things-ingest",
     "revision-ingest",
     "estimate",
   ]);
