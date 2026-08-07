@@ -49,7 +49,13 @@ RELEVANT_TRAINING_ENV = (
     "HF_HUB_DISABLE_TELEMETRY",
     "DO_NOT_TRACK",
 )
-PACKET_PROVENANCE_SCHEMA = 2
+PACKET_PROVENANCE_SCHEMA = 3
+REQUIRED_CHECKPOINT_FILES = {
+    "optimizer.bin",
+    "pytorch_lora_weights.safetensors",
+    "scheduler.bin",
+    "training_state.json",
+}
 
 
 def sha256(path: Path) -> str:
@@ -212,9 +218,97 @@ def copy_tree_filtered(source: Path, destination: Path) -> None:
         shutil.copy2(path, target)
 
 
-def copy_output_tree_deduplicated(source: Path, destination: Path) -> dict:
+def checkpoint_manifest(checkpoint: Path) -> list[dict]:
+    files = [
+        {
+            "path": path.relative_to(checkpoint).as_posix(),
+            "size_bytes": path.stat().st_size,
+            "sha256": sha256(path),
+        }
+        for path in visible_files(checkpoint)
+    ]
+    if not files:
+        raise RuntimeError(f"Checkpoint contains no files: {checkpoint}")
+    present = {entry["path"] for entry in files}
+    missing = REQUIRED_CHECKPOINT_FILES - present
+    if missing:
+        raise RuntimeError(
+            f"Checkpoint is incomplete at {checkpoint}: missing {sorted(missing)}"
+        )
+    return files
+
+
+def checkpoint_manifest_sha256(files: list[dict]) -> str:
+    encoded = json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def expected_checkpoint_names(config: dict) -> list[str]:
+    steps = int(config.get("max_train_steps") or 0)
+    interval = int(config.get("checkpoint_step_interval") or 0)
+    if steps <= 0 or interval <= 0:
+        raise RuntimeError("Training configuration lacks a positive checkpoint schedule")
+    expected = [
+        f"checkpoint-{step}"
+        for step in range(interval, steps + 1, interval)
+    ]
+    if not expected:
+        raise RuntimeError("Training configuration schedules no checkpoints")
+    return expected
+
+
+def preserve_expected_checkpoints(source: Path, expected: list[str]) -> dict[str, dict]:
+    preserved_root = source / "PRESERVED_CHECKPOINTS"
+    preserved_root.mkdir(parents=True, exist_ok=True)
+    evidence: dict[str, dict] = {}
+    for name in expected:
+        live = source / name
+        preserved = preserved_root / name
+        if not live.is_dir() and not preserved.is_dir():
+            raise RuntimeError(f"Expected checkpoint is missing: {name}")
+
+        live_manifest = checkpoint_manifest(live) if live.is_dir() else None
+        if preserved.exists():
+            if not preserved.is_dir():
+                raise RuntimeError(f"Preserved checkpoint is not a directory: {preserved}")
+            preserved_manifest = checkpoint_manifest(preserved)
+            if live_manifest is not None and preserved_manifest != live_manifest:
+                raise RuntimeError(
+                    f"Preserved checkpoint differs from live checkpoint: {name}"
+                )
+        else:
+            temporary = preserved_root / f".{name}.tmp-{os.getpid()}"
+            if temporary.exists():
+                shutil.rmtree(temporary)
+            try:
+                shutil.copytree(live, temporary, copy_function=shutil.copy2)
+                preserved_manifest = checkpoint_manifest(temporary)
+                if preserved_manifest != live_manifest:
+                    raise RuntimeError(
+                        f"Preserved checkpoint failed content verification: {name}"
+                    )
+                temporary.replace(preserved)
+            finally:
+                if temporary.exists():
+                    shutil.rmtree(temporary)
+
+        authoritative = live_manifest or preserved_manifest
+        evidence[name] = {
+            "source": "live" if live_manifest is not None else "preserved",
+            "file_count": len(authoritative),
+            "manifest_sha256": checkpoint_manifest_sha256(authoritative),
+        }
+    return evidence
+
+
+def copy_output_tree_deduplicated(
+    source: Path, destination: Path, expected_checkpoints: list[str]
+) -> dict:
     """Copy outputs while including each preserved checkpoint exactly once."""
     destination.mkdir(parents=True, exist_ok=True)
+    checkpoint_evidence = preserve_expected_checkpoints(
+        source, expected_checkpoints
+    )
     root_checkpoints = {
         path.name
         for path in source.glob("checkpoint-*")
@@ -233,6 +327,14 @@ def copy_output_tree_deduplicated(source: Path, destination: Path) -> dict:
         ):
             checkpoint = relative.parts[1]
             if checkpoint in root_checkpoints:
+                live_manifest = checkpoint_manifest(source / checkpoint)
+                preserved_manifest = checkpoint_manifest(
+                    source / "PRESERVED_CHECKPOINTS" / checkpoint
+                )
+                if live_manifest != preserved_manifest:
+                    raise RuntimeError(
+                        f"Preserved checkpoint differs from live checkpoint: {checkpoint}"
+                    )
                 omitted_preserved_duplicates.add(checkpoint)
                 continue
             recovered_pruned_checkpoints.add(checkpoint)
@@ -260,6 +362,9 @@ def copy_output_tree_deduplicated(source: Path, destination: Path) -> dict:
         "recovered_pruned_root_checkpoints": sorted(
             recovered_pruned_checkpoints
         ),
+        "expected_checkpoints": expected_checkpoints,
+        "packaged_checkpoints": list(expected_checkpoints),
+        "checkpoint_evidence": checkpoint_evidence,
     }
     (destination / "CHECKPOINT_PRESERVATION_MAP.json").write_text(
         json.dumps(report, indent=2) + "\n"
@@ -717,6 +822,14 @@ def zip_packet(folder: Path, target: Path) -> None:
     temporary.replace(target)
 
 
+def zip_member_sha256(archive: zipfile.ZipFile, member: str) -> str:
+    digest = hashlib.sha256()
+    with archive.open(member) as handle:
+        for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def verify_zip(
     path: Path, python_bin: str, require_validation_samples: bool = False
 ) -> None:
@@ -743,6 +856,7 @@ def verify_zip(
             f"{root}/CONFIG/validation-prompt-library.json",
             f"{root}/DATASET/dataset_manifest.json",
             f"{root}/DATASET/sha256_inventory.csv",
+            f"{root}/OUTPUTS/CHECKPOINT_PRESERVATION_MAP.json",
         )
         for member in required_members:
             if member not in names:
@@ -825,6 +939,46 @@ def verify_zip(
             for name in names
         ):
             raise RuntimeError("Packet does not include caption sidecars")
+        preservation = json.loads(
+            archive.read(f"{root}/OUTPUTS/CHECKPOINT_PRESERVATION_MAP.json")
+        )
+        expected_checkpoints = preservation.get("expected_checkpoints")
+        packaged_checkpoints = preservation.get("packaged_checkpoints")
+        checkpoint_evidence = preservation.get("checkpoint_evidence")
+        if (
+            not isinstance(expected_checkpoints, list)
+            or not expected_checkpoints
+            or packaged_checkpoints != expected_checkpoints
+            or not isinstance(checkpoint_evidence, dict)
+        ):
+            raise RuntimeError("Packet checkpoint-preservation evidence is incomplete")
+        for checkpoint in expected_checkpoints:
+            evidence = checkpoint_evidence.get(checkpoint)
+            prefix = f"{root}/OUTPUTS/{checkpoint}/"
+            checkpoint_members = sorted(
+                name for name in names
+                if name.startswith(prefix) and not name.endswith("/")
+            )
+            if not checkpoint_members or not isinstance(evidence, dict):
+                raise RuntimeError(
+                    f"Packet omits expected checkpoint evidence: {checkpoint}"
+                )
+            manifest = [
+                {
+                    "path": name[len(prefix):],
+                    "size_bytes": archive.getinfo(name).file_size,
+                    "sha256": zip_member_sha256(archive, name),
+                }
+                for name in checkpoint_members
+            ]
+            if (
+                evidence.get("file_count") != len(manifest)
+                or evidence.get("manifest_sha256")
+                != checkpoint_manifest_sha256(manifest)
+            ):
+                raise RuntimeError(
+                    f"Packet checkpoint evidence digest mismatch: {checkpoint}"
+                )
         final_names = [
             name for name in names
             if name.startswith(f"{root}/OUTPUTS/")
@@ -996,7 +1150,11 @@ def build_one(
         ("\n".join(warning_lines) + "\n") if warning_lines else "None found\n"
     )
 
-    copy_output_tree_deduplicated(source_output, folder / "OUTPUTS")
+    copy_output_tree_deduplicated(
+        source_output,
+        folder / "OUTPUTS",
+        expected_checkpoint_names(config),
+    )
     packet_output_inventory(folder / "OUTPUTS")
     if spec.get("require_validation_samples"):
         samples = controlled_validation_samples(

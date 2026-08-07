@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import hashlib
 import json
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -324,13 +325,13 @@ with tempfile.TemporaryDirectory() as temporary:
         "exact-run", "c" * 64, "training", None, "b" * 64
     )
     assert first_identity != second_identity
-    assert "provenance-v2" in first_identity
+    assert "provenance-v3" in first_identity
     assert module.packet_variant_label("training", None, fingerprint) == (
-        "training-provenance-v2-aaaaaaaaaaaa"
+        "training-provenance-v3-aaaaaaaaaaaa"
     )
     assert module.packet_variant_label(
         "validated", "d" * 64, fingerprint
-    ) == "validated-dddddddddddd-provenance-v2-aaaaaaaaaaaa"
+    ) == "validated-dddddddddddd-provenance-v3-aaaaaaaaaaaa"
 
     try:
         module.resolve_training_readiness({
@@ -376,5 +377,113 @@ with tempfile.TemporaryDirectory() as temporary:
         assert "dataset preflight changed" in str(error)
     else:
         raise AssertionError("changed dataset preflight was accepted")
+
+    checkpoint_source = root / "checkpoint-source"
+    checkpoint_packet = root / "checkpoint-packet"
+    checkpoint_source.mkdir()
+    expected_checkpoints = module.expected_checkpoint_names({
+        "max_train_steps": 100,
+        "checkpoint_step_interval": 50,
+    })
+    assert expected_checkpoints == ["checkpoint-50", "checkpoint-100"]
+    for checkpoint in expected_checkpoints:
+        checkpoint_root = checkpoint_source / checkpoint
+        checkpoint_root.mkdir()
+        (checkpoint_root / "training_state.json").write_text(
+            json.dumps({"checkpoint": checkpoint})
+        )
+        for name in (
+            "optimizer.bin",
+            "pytorch_lora_weights.safetensors",
+            "scheduler.bin",
+        ):
+            (checkpoint_root / name).write_bytes(f"{checkpoint}:{name}".encode())
+    preservation = module.copy_output_tree_deduplicated(
+        checkpoint_source, checkpoint_packet, expected_checkpoints
+    )
+    assert preservation["expected_checkpoints"] == expected_checkpoints
+    assert preservation["packaged_checkpoints"] == expected_checkpoints
+    for checkpoint in expected_checkpoints:
+        assert (checkpoint_packet / checkpoint / "training_state.json").is_file()
+        assert (
+            checkpoint_source / "PRESERVED_CHECKPOINTS" / checkpoint
+            / "training_state.json"
+        ).is_file()
+
+    preserved_state = (
+        checkpoint_source / "PRESERVED_CHECKPOINTS" / "checkpoint-50"
+        / "training_state.json"
+    )
+    preserved_state.write_text('{"changed":true}')
+    try:
+        module.copy_output_tree_deduplicated(
+            checkpoint_source, root / "mismatch-packet", expected_checkpoints
+        )
+    except RuntimeError as error:
+        assert "differs from live checkpoint" in str(error)
+    else:
+        raise AssertionError("mismatched preserved checkpoint was accepted")
+    preserved_state.write_text(json.dumps({"checkpoint": "checkpoint-50"}))
+
+    missing_source = root / "missing-checkpoint-source"
+    missing_source.mkdir()
+    try:
+        module.copy_output_tree_deduplicated(
+            missing_source, root / "missing-checkpoint-packet", ["checkpoint-50"]
+        )
+    except RuntimeError as error:
+        assert "Expected checkpoint is missing" in str(error)
+    else:
+        raise AssertionError("packet without its expected checkpoint was accepted")
+
+    packet_folder = root / "verified-packet-root"
+    (packet_folder / "CONFIG").mkdir(parents=True)
+    (packet_folder / "ENVIRONMENT").mkdir()
+    (packet_folder / "DATASET" / "captions").mkdir(parents=True)
+    (packet_folder / "LOGS").mkdir()
+    shutil.copytree(checkpoint_packet, packet_folder / "OUTPUTS")
+    (packet_folder / "VALIDATION_SAMPLES").mkdir()
+    (packet_folder / "RUN_SUMMARY.md").write_text("complete\n")
+    (packet_folder / "EVALUATION_NOTES.md").write_text("pending\n")
+    (packet_folder / "CONFIG" / "validation-prompt-library.json").write_text(
+        json.dumps({"prompts": []})
+    )
+    (packet_folder / "ENVIRONMENT" / "environment.json").write_text("{}\n")
+    (packet_folder / "DATASET" / "dataset_manifest.json").write_text("{}\n")
+    (packet_folder / "DATASET" / "sha256_inventory.csv").write_text(
+        "relative_path,sha256\n"
+    )
+    (packet_folder / "DATASET" / "captions" / "robot.txt").write_text(
+        "hawkspan robots\n"
+    )
+    (packet_folder / "LOGS" / "training.log").write_text("complete\n")
+    (packet_folder / "VALIDATION_SAMPLES" / "pending.txt").write_text(
+        "pending\n"
+    )
+    (packet_folder / "OUTPUTS" / "pytorch_lora_weights.safetensors").write_bytes(
+        b"synthetic-final"
+    )
+    valid_packet = root / "verified-packet.zip"
+    module.zip_packet(packet_folder, valid_packet)
+    original_validate_lora = module.validate_lora
+    module.validate_lora = lambda path, python_bin: (path.stat().st_size, 1)
+    try:
+        module.verify_zip(valid_packet, "python3")
+        preservation_path = (
+            packet_folder / "OUTPUTS" / "CHECKPOINT_PRESERVATION_MAP.json"
+        )
+        invalid_preservation = json.loads(preservation_path.read_text())
+        invalid_preservation["packaged_checkpoints"] = []
+        preservation_path.write_text(json.dumps(invalid_preservation))
+        invalid_packet = root / "invalid-checkpoint-packet.zip"
+        module.zip_packet(packet_folder, invalid_packet)
+        try:
+            module.verify_zip(invalid_packet, "python3")
+        except RuntimeError as error:
+            assert "checkpoint-preservation evidence is incomplete" in str(error)
+        else:
+            raise AssertionError("ZIP without checkpoint evidence was accepted")
+    finally:
+        module.validate_lora = original_validate_lora
 
 print("return packet validation-input test passed")
