@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.6 - 2026-08-07
+
+- Preserved settled trainer lifecycle state during reboot reconciliation.
+- Allowed an unchanged, explicitly paused queued job to resume while retaining
+  revision-bound authorization and refusing an ineligible ready job.
+- Materialized every supported operational environment default during upgrades
+  and failed the release gate when a schema key is absent from both the public
+  example and the explicit internal-key classification.
+- Wired controller activation to HawkSpan's built-in packet receiver, admitted
+  only digest-bound automatic return artifacts, and removed the hidden runtime
+  dependency on the retired `application-workflows` intake path.
+
 ## 0.3.5 - 2026-08-07
 
 - Copied fixed validation and ControlNet inputs into each immutable staged job,
