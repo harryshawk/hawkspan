@@ -247,7 +247,22 @@ if (!destinationRoot) {
     }
     const destination = path.join(destinationRoot, name);
     const temporary = `${destination}.partial`;
-    if (!fs.existsSync(destination) || sha256(destination) !== sourceSha256) {
+    const receiptPath = path.join(receiptRoot, `${name}.receipt.json`);
+    const destinationSha256 = fs.existsSync(destination) ? sha256(destination) : null;
+    const previousReceipt = fs.existsSync(receiptPath)
+      ? JSON.parse(fs.readFileSync(receiptPath, "utf8"))
+      : null;
+    if (destinationSha256 === sourceSha256 &&
+        previousReceipt?.sha256 === sourceSha256 &&
+        previousReceipt?.size_bytes === sourceStat.size &&
+        previousReceipt?.transport_verified === true &&
+        typeof previousReceipt?.receipt_message_id === "string" &&
+        previousReceipt.receipt_message_id.length > 0) {
+      updatePacketRegistry(previousReceipt);
+      process.stdout.write(`${new Date().toISOString()} already secured ${name} ${sourceSha256}\n`);
+      continue;
+    }
+    if (destinationSha256 !== sourceSha256) {
       let copiedStat = fs.existsSync(temporary) ? fs.statSync(temporary) : null;
       let copiedSha256 = copiedStat?.size === sourceStat.size
         ? sha256(temporary)
@@ -292,7 +307,6 @@ if (!destinationRoot) {
       staging_removed: false,
       authorization_evidence: receiver.authorization_evidence || null,
     };
-    const receiptPath = path.join(receiptRoot, `${name}.receipt.json`);
     atomicJson(receiptPath, receipt);
     if (receiver.send_durable_receipt !== false) {
       try {

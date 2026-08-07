@@ -13,6 +13,8 @@
   dependency on the retired `application-workflows` intake path.
 - Treated a currently running periodic launchd service as healthy instead of
   requiring it to finish before startup readiness could pass.
+- Made preserved packet staging idempotent so periodic receiver runs reuse the
+  existing digest-bound receipt instead of copying or acknowledging it again.
 
 ## 0.3.5 - 2026-08-07
 

@@ -62,7 +62,7 @@ fs.writeFileSync(configPath, `${JSON.stringify({
   packet_receiver: {
     staging_root: staging,
     destination_root: destination,
-    allow_remove_verified_staging: true,
+    allow_remove_verified_staging: false,
     return_packets_only: true,
     require_automatic_return_metadata: true,
     authorization_evidence: "Synthetic test authorization.",
@@ -110,14 +110,14 @@ assert(fs.existsSync(receiptPath));
 const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
 assert.equal(receipt.transport_verified, true);
 assert.equal(receipt.package_contents_inspected, false);
-assert.equal(receipt.staging_removed, true);
+assert.equal(receipt.staging_removed, false);
 assert.equal(Object.hasOwn(receipt, "packet_missing"), false);
 assert.equal(Object.hasOwn(receipt, "packet_complete"), false);
 assert.equal(
   receipt.sha256,
   crypto.createHash("sha256").update(fs.readFileSync(securedPacket)).digest("hex"),
 );
-assert(!fs.existsSync(packet));
+assert(fs.existsSync(packet));
 assert(fs.existsSync(unrelatedPacket));
 assert(fs.existsSync(historicalReturnPacket));
 const packetRegistry = JSON.parse(
@@ -129,6 +129,23 @@ assert.equal(
 );
 assert.equal(receipt.artifact_id, "artifact-1786104067045-8288ebcbb807");
 assert.equal(receipt.durable_job_id, "job-r32");
+const firstReceiptBody = fs.readFileSync(receiptPath, "utf8");
+const secondReceiver = spawnSync(process.execPath, [
+  path.join(path.dirname(new URL(import.meta.url).pathname), "m2-packet-receiver.mjs"),
+], {
+  encoding: "utf8",
+  env: {
+    ...process.env,
+    HOME: root,
+    HAWKSPAN_CONFIG: configPath,
+    HAWKSPAN_STATE_DIR: stateRoot,
+    HAWKSPAN_LAUNCH_AGENTS_DIR: launchAgentsRoot,
+  },
+  timeout: 120000,
+});
+assert.equal(secondReceiver.status, 0, secondReceiver.stderr);
+assert.match(secondReceiver.stdout, /already secured/);
+assert.equal(fs.readFileSync(receiptPath, "utf8"), firstReceiptBody);
 assert.equal(
   fs.readFileSync(path.join(destination, "Automation Metadata", path.basename(notice)), "utf8"),
   "Synthetic packet notice.\n",
@@ -136,8 +153,8 @@ assert.equal(
 assert(fs.existsSync(
   path.join(destination, "Automation Metadata", path.basename(registry)),
 ));
-assert(!fs.existsSync(notice));
-assert(!fs.existsSync(registry));
+assert(fs.existsSync(notice));
+assert(fs.existsSync(registry));
 
 fs.rmSync(root, { recursive: true, force: true });
 process.stdout.write("M2 packet receiver test passed\n");
