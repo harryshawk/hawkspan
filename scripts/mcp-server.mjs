@@ -1891,7 +1891,9 @@ function trainerTailLog(args) {
 }
 
 function trainerAuditCheckpointRetention() {
-  const effectiveTraining = activeRuntimeConfig()?.training || config.training;
+  const runtimeConfig = activeRuntimeConfig();
+  const effectiveTraining = runtimeConfig?.training || config.training;
+  const effectiveAutomation = runtimeConfig?.lora_automation || config.lora_automation || {};
   const queueRoot = path.resolve(
     effectiveTraining.queue_root || config.training.queue_root,
   );
@@ -1904,7 +1906,19 @@ function trainerAuditCheckpointRetention() {
   const manifest = fs.existsSync(manifestPath)
     ? JSON.parse(fs.readFileSync(manifestPath, "utf8"))
     : [];
-  for (const job of manifest) {
+  const schedulerJobsPath = effectiveAutomation.scheduler_jobs_path ||
+    config.lora_automation?.scheduler_jobs_path;
+  let schedulerTargets = null;
+  if (schedulerJobsPath && fs.existsSync(path.resolve(schedulerJobsPath))) {
+    const scheduler = JSON.parse(fs.readFileSync(path.resolve(schedulerJobsPath), "utf8"));
+    schedulerTargets = new Set(
+      (scheduler.jobs || []).map((entry) => entry.target).filter(Boolean),
+    );
+  }
+  const scopedManifest = schedulerTargets
+    ? manifest.filter((job) => schedulerTargets.has(job.job_id))
+    : manifest;
+  for (const job of scopedManifest) {
     const filePath = path.join(path.resolve(job.config_dir || ""), "config.json");
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -1937,7 +1951,10 @@ function trainerAuditCheckpointRetention() {
   );
   const result = {
     queue_root: queueRoot,
+    scope: schedulerTargets ? "scheduler" : "manifest-fallback",
     minimum,
+    inventory_config_count: manifest.length,
+    scheduler_target_count: schedulerTargets?.size ?? null,
     config_count: configs.length,
     below_minimum_count: belowMinimum.length,
     below_minimum: belowMinimum,

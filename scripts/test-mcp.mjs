@@ -163,6 +163,18 @@ fs.writeFileSync(
   `${JSON.stringify({ checkpoints_total_limit: 10 })}\n`,
 );
 const fakeTrainerStart = path.join(testRoot, "trainer-start.sh");
+const schedulerJobsPath = path.join(testRoot, "lora-scheduler", "lora-jobs.json");
+fs.mkdirSync(path.dirname(schedulerJobsPath), { recursive: true });
+fs.writeFileSync(schedulerJobsPath, JSON.stringify({
+  schema_version: 2,
+  jobs: [{
+    job_id: "scheduler-cap-test",
+    target: "cap-test",
+    authorization_job_id: "job-cap-test",
+    revision_fingerprint: "scheduler-revision",
+    authorized: true,
+  }],
+}));
 fs.writeFileSync(fakeTrainerStart, "#!/bin/sh\nprintf 'started\\n'\n", { mode: 0o755 });
 fs.writeFileSync(path.join(testRoot, "config.json"), JSON.stringify({
   schema_version: 1,
@@ -198,7 +210,8 @@ fs.writeFileSync(path.join(testRoot, "config.json"), JSON.stringify({
     registry_path: path.join(testRoot, "lora-registry.json"),
     revision_root: path.join(testRoot, "revisions"),
     validation_queue_root: path.join(testRoot, "validation-queue"),
-    queue_policy_path: path.join(testQueue, "lora-queue-policy.json")
+    queue_policy_path: path.join(testQueue, "lora-queue-policy.json"),
+    scheduler_jobs_path: schedulerJobsPath,
   },
 }, null, 2));
 const serverPath = path.resolve(
@@ -1032,14 +1045,23 @@ const activeRuntimeRoot = path.join(testRoot, "active-runtime");
 const activeRuntimeQueue = path.join(activeRuntimeRoot, "queue");
 const activeRuntimeOutput = path.join(activeRuntimeRoot, "outputs", "cap-test");
 const activeRuntimeJobConfig = path.join(activeRuntimeRoot, "config", "cap-test");
+const archivedRuntimeJobConfig = path.join(activeRuntimeRoot, "config", "archived-test");
 fs.mkdirSync(activeRuntimeQueue, { recursive: true });
 fs.mkdirSync(activeRuntimeOutput, { recursive: true });
 fs.mkdirSync(activeRuntimeJobConfig, { recursive: true });
+fs.mkdirSync(archivedRuntimeJobConfig, { recursive: true });
 fs.writeFileSync(
   path.join(activeRuntimeJobConfig, "config.json"),
   `${JSON.stringify({
     checkpoints_total_limit: 10,
     output_dir: activeRuntimeOutput,
+  })}\n`,
+);
+fs.writeFileSync(
+  path.join(archivedRuntimeJobConfig, "config.json"),
+  `${JSON.stringify({
+    checkpoints_total_limit: 1,
+    output_dir: path.join(activeRuntimeRoot, "outputs", "archived-test"),
   })}\n`,
 );
 fs.writeFileSync(
@@ -1049,6 +1071,11 @@ fs.writeFileSync(
     data_dir: path.join(activeRuntimeRoot, "dataset"),
     config_dir: activeRuntimeJobConfig,
     output_dir: activeRuntimeOutput,
+  }, {
+    job_id: "archived-test",
+    data_dir: path.join(activeRuntimeRoot, "archived-dataset"),
+    config_dir: archivedRuntimeJobConfig,
+    output_dir: path.join(activeRuntimeRoot, "outputs", "archived-test"),
   }])}\n`,
 );
 fs.writeFileSync(
@@ -1142,6 +1169,9 @@ assert.equal(logTail.result.structuredContent.content, "step 2\n");
 const retentionAudit = await tool("trainer_audit_checkpoint_retention");
 assert.equal(retentionAudit.result.structuredContent.valid, true);
 assert.equal(retentionAudit.result.structuredContent.queue_root, activeRuntimeQueue);
+assert.equal(retentionAudit.result.structuredContent.scope, "scheduler");
+assert.equal(retentionAudit.result.structuredContent.inventory_config_count, 2);
+assert.equal(retentionAudit.result.structuredContent.config_count, 1);
 const preservationStatus = await tool("trainer_preservation_status");
 assert.equal(preservationStatus.result.structuredContent.exists, true);
 assert.equal(preservationStatus.result.structuredContent.preservation_root, testPreservation);

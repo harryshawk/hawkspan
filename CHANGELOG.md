@@ -12,6 +12,8 @@
 - Restricted runtime staging and revision hashing to training images and target
   captions, excluding generated cache metadata and conditioning sidecars from
   prior runs.
+- Scoped checkpoint-retention health to targets registered in the sole live
+  scheduler while still reporting the size of the historical manifest.
 
 ## 0.3.1 - 2026-08-06
 
