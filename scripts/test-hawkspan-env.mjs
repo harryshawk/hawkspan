@@ -5,8 +5,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  applyHawkspanEnv, HAWKSPAN_OPERATIONAL_ENV_DEFAULTS, minimalChildEnvironment,
-  parseHawkspanEnv, readHawkspanEnv, writeHawkspanEnv,
+  applyHawkspanEnv, HAWKSPAN_ENV_NAMES, HAWKSPAN_INTERNAL_ENV_NAMES,
+  HAWKSPAN_OPERATIONAL_ENV_DEFAULTS, minimalChildEnvironment, parseHawkspanEnv,
+  readHawkspanEnv, writeHawkspanEnv,
 } from "./hawkspan-env.mjs";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "hawkspan-env-"));
@@ -109,7 +110,19 @@ const example = parseHawkspanEnv(fs.readFileSync(
 ));
 assert.equal(example.HAWKSPAN_REMOTE_STATE_DIR, "/Users/peeruser/.hawkspan");
 for (const [name, value] of Object.entries(HAWKSPAN_OPERATIONAL_ENV_DEFAULTS)) {
+  assert(HAWKSPAN_ENV_NAMES.includes(name), `${name} must remain in the supported schema`);
   assert.equal(example[name], value, `example must contain operational default ${name}`);
+}
+const internalNames = new Set(HAWKSPAN_INTERNAL_ENV_NAMES);
+for (const name of HAWKSPAN_ENV_NAMES) {
+  assert(
+    Object.hasOwn(example, name) || internalNames.has(name),
+    `${name} must be documented in hawkspan.env.example or classified as internal`,
+  );
+}
+for (const name of internalNames) {
+  assert(HAWKSPAN_ENV_NAMES.includes(name), `${name} must remain in the supported schema`);
+  assert.equal(Object.hasOwn(example, name), false, `${name} must remain internal`);
 }
 assert.equal(Object.hasOwn(example, "HAWKSPAN_REMOTE_PLUGIN_ROOT"), false);
 assert.equal(Object.hasOwn(example, "HAWKSPAN_REMOTE_CALL_TOOL"), false);
