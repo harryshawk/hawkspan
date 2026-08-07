@@ -31,6 +31,9 @@ const values = {
   HAWKSPAN_WORKLOAD_OUTPUT_ROOT: path.join(root, "workload-output"),
   HAWKSPAN_SIMPLETUNER_ROOT: path.join(root, "simpletuner"),
   HAWKSPAN_LOCAL_TRAINER_START_SCRIPT: path.join(root, "trainer-start"),
+  HAWKSPAN_TRAINER_STOP_TERM_TIMEOUT_MS: "30000",
+  HAWKSPAN_TRAINER_STOP_KILL_TIMEOUT_MS: "5000",
+  HAWKSPAN_TRAINER_STOP_POLL_INTERVAL_MS: "100",
   HAWKSPAN_READINESS_LOCAL_CONFIG_TIMEOUT_MS: "10000",
   HAWKSPAN_READINESS_PEER_PING_TIMEOUT_MS: "60000",
   HAWKSPAN_READINESS_SSH_PORT_TIMEOUT_MS: "90000",
@@ -69,6 +72,9 @@ assert.equal(applied.peer.remote_state_dir, path.join(root, "remote-state"));
 assert.equal(applied.local_control.port, 8765);
 assert.equal(applied.training.simpletuner_root, path.join(root, "simpletuner"));
 assert.equal(applied.training.start_script, path.join(root, "trainer-start"));
+assert.equal(applied.training.stop_term_timeout_ms, 30000);
+assert.equal(applied.training.stop_kill_timeout_ms, 5000);
+assert.equal(applied.training.stop_poll_interval_ms, 100);
 assert.equal(applied.readiness.ssh_login_timeout_ms, 120000);
 assert.deepEqual(applied.readiness.retry_delays_ms, [2000, 3000, 5000, 8000]);
 assert.equal(applied.queue_supervisor.enabled, true);

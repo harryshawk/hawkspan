@@ -60,6 +60,17 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
     assert controller.CONFIG_PATH == runtime_config.resolve()
     assert controller.RUN_ROOT.resolve() == runtime_queue.resolve()
     assert controller.CONTROL_ROOT.resolve() == (root / "control").resolve()
+    assert controller.STOP_TERM_TIMEOUT_SECONDS == 30.0
+    assert controller.STOP_KILL_TIMEOUT_SECONDS == 5.0
+    assert controller.STOP_POLL_SECONDS == 0.1
+    controller.TRAINING["stop_poll_interval_ms"] = "100"
+    try:
+        controller.training_milliseconds("stop_poll_interval_ms", 100, 10, 1000)
+    except SystemExit as error:
+        assert "must be an integer" in str(error)
+    else:
+        raise AssertionError("non-integer trainer stop setting was accepted")
+    controller.TRAINING.pop("stop_poll_interval_ms")
     readiness_request = controller.readiness_request("test-target")
     assert readiness_request["job_id"] == "test-target"
     assert readiness_request["ignore_process_group"] == os.getpgrp()

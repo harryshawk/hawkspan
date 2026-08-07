@@ -97,9 +97,30 @@ AUTOMATION = Path(
 )
 TARGET_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 REVISION_FINGERPRINT_PATTERN = re.compile(r"^[A-Fa-f0-9]{64}$")
-STOP_TERM_TIMEOUT_SECONDS = 30.0
-STOP_KILL_TIMEOUT_SECONDS = 5.0
-STOP_POLL_SECONDS = 0.1
+
+
+def training_milliseconds(
+    key: str, default: int, minimum: int, maximum: int
+) -> int:
+    value = TRAINING.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SystemExit(f"HawkSpan training.{key} must be an integer")
+    if value < minimum or value > maximum:
+        raise SystemExit(
+            f"HawkSpan training.{key} must be between {minimum} and {maximum}"
+        )
+    return value
+
+
+STOP_TERM_TIMEOUT_SECONDS = training_milliseconds(
+    "stop_term_timeout_ms", 30000, 1000, 600000
+) / 1000
+STOP_KILL_TIMEOUT_SECONDS = training_milliseconds(
+    "stop_kill_timeout_ms", 5000, 1000, 600000
+) / 1000
+STOP_POLL_SECONDS = training_milliseconds(
+    "stop_poll_interval_ms", 100, 10, 1000
+) / 1000
 
 
 def parse_args() -> argparse.Namespace:

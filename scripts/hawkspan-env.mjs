@@ -40,6 +40,9 @@ export const HAWKSPAN_ENV_NAMES = Object.freeze([
   "HAWKSPAN_LOCAL_TRAINER_START_SCRIPT",
   "HAWKSPAN_LOCAL_TRAINER_STOP_SCRIPT",
   "HAWKSPAN_LOCAL_TRAINER_PACKAGE_SCRIPT",
+  "HAWKSPAN_TRAINER_STOP_TERM_TIMEOUT_MS",
+  "HAWKSPAN_TRAINER_STOP_KILL_TIMEOUT_MS",
+  "HAWKSPAN_TRAINER_STOP_POLL_INTERVAL_MS",
   "HAWKSPAN_READINESS_LOCAL_CONFIG_TIMEOUT_MS",
   "HAWKSPAN_READINESS_PEER_PING_TIMEOUT_MS",
   "HAWKSPAN_READINESS_SSH_PORT_TIMEOUT_MS",
@@ -69,6 +72,9 @@ export const HAWKSPAN_ENV_NAMES = Object.freeze([
 ]);
 
 export const HAWKSPAN_OPERATIONAL_ENV_DEFAULTS = Object.freeze({
+  HAWKSPAN_TRAINER_STOP_TERM_TIMEOUT_MS: "30000",
+  HAWKSPAN_TRAINER_STOP_KILL_TIMEOUT_MS: "5000",
+  HAWKSPAN_TRAINER_STOP_POLL_INTERVAL_MS: "100",
   HAWKSPAN_READINESS_LOCAL_CONFIG_TIMEOUT_MS: "10000",
   HAWKSPAN_READINESS_PEER_PING_TIMEOUT_MS: "60000",
   HAWKSPAN_READINESS_SSH_PORT_TIMEOUT_MS: "90000",
@@ -128,12 +134,17 @@ const INTEGER_NAMES = new Set([
   "HAWKSPAN_READINESS_AGENT_TIMEOUT_MS",
   "HAWKSPAN_READINESS_TRAINER_TIMEOUT_MS",
   "HAWKSPAN_READINESS_TOTAL_TIMEOUT_MS",
+  "HAWKSPAN_TRAINER_STOP_TERM_TIMEOUT_MS",
+  "HAWKSPAN_TRAINER_STOP_KILL_TIMEOUT_MS",
   "HAWKSPAN_QUEUE_SUPERVISOR_POLL_INTERVAL_MS",
   "HAWKSPAN_QUEUE_ITEM_LEASE_MS",
   "HAWKSPAN_LINK_CONNECT_TIMEOUT_MS",
   "HAWKSPAN_LINK_CYCLE_TIMEOUT_MS",
   "HAWKSPAN_LINK_OPERATION_ATTEMPT_TIMEOUT_MS",
   "HAWKSPAN_LINK_PRIMARY_REPROBE_MS",
+]);
+const SHORT_INTERVAL_NAMES = new Set([
+  "HAWKSPAN_TRAINER_STOP_POLL_INTERVAL_MS",
 ]);
 const LARGE_INTEGER_NAMES = new Set([
   "HAWKSPAN_PACKAGE_RETURN_LOCK_WAIT_MS",
@@ -178,6 +189,7 @@ function validateValue(name, value) {
   }
   if (name === "HAWKSPAN_LOCAL_CONTROL_PORT") integerValue({ [name]: value }, name, 0, 65535);
   if (INTEGER_NAMES.has(name)) integerValue({ [name]: value }, name, 1000, 600000);
+  if (SHORT_INTERVAL_NAMES.has(name)) integerValue({ [name]: value }, name, 10, 1000);
   if (LARGE_INTEGER_NAMES.has(name)) integerValue({ [name]: value }, name, 1000, 16777216);
   if (COUNT_INTEGER_NAMES.has(name)) integerValue({ [name]: value }, name, 1, 1000000);
   if (SMALL_INTEGER_NAMES.has(name)) integerValue({ [name]: value }, name, 1, 1000);
@@ -295,6 +307,14 @@ export function applyHawkspanEnv(configuration, values) {
     ["stop_script", "HAWKSPAN_LOCAL_TRAINER_STOP_SCRIPT"],
     ["package_script", "HAWKSPAN_LOCAL_TRAINER_PACKAGE_SCRIPT"],
   ]) assign(next.training, key, name);
+  for (const [key, name, minimum, maximum] of [
+    ["stop_term_timeout_ms", "HAWKSPAN_TRAINER_STOP_TERM_TIMEOUT_MS", 1000, 600000],
+    ["stop_kill_timeout_ms", "HAWKSPAN_TRAINER_STOP_KILL_TIMEOUT_MS", 1000, 600000],
+    ["stop_poll_interval_ms", "HAWKSPAN_TRAINER_STOP_POLL_INTERVAL_MS", 10, 1000],
+  ]) {
+    const value = integerValue(values, name, minimum, maximum);
+    if (value !== undefined) next.training[key] = value;
+  }
   const peerEnvironmentNames = HAWKSPAN_ENV_NAMES.filter((name) =>
     name.startsWith("HAWKSPAN_PEER_") || name.startsWith("HAWKSPAN_REMOTE_") ||
     name.startsWith("HAWKSPAN_PRIMARY_") || name.startsWith("HAWKSPAN_FALLBACK_") ||
