@@ -667,6 +667,7 @@ def package(
             "HAWKSPAN_LORA_SOURCE_ZIP": str(TRAINING.get("source_zip", "not recorded")),
             "HAWKSPAN_LORA_MPS_SHIM_DIR": str(TRAINING.get("mps_shim_dir", "")),
             "HAWKSPAN_DURABLE_TRAINING_JOB_ID": job_id,
+            "HAWKSPAN_AUTHORIZED_REVISION_FINGERPRINT": expected_revision_fingerprint,
         }
     )
     scheduler_jobs_path = Path(

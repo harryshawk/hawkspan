@@ -126,6 +126,7 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
         package_env = package_calls[0][1]["env"]
         assert package_env["HAWKSPAN_DURABLE_TRAINING_JOB_ID"] == "test-job"
         assert package_env["HAWKSPAN_SIMPLETUNER_QUEUE_ITEM_ID"] == "queue-test-target"
+        assert package_env["HAWKSPAN_AUTHORIZED_REVISION_FINGERPRINT"] == revision_fingerprint
         scheduler_jobs.write_text(json.dumps({"schema_version": 2, "jobs": []}))
         try:
             controller.package("test-job", "test-target", revision_fingerprint)
