@@ -724,6 +724,12 @@ assert.equal(
 const drawThingsPlanDoc = drawThingsPlanResult.result.structuredContent.plan;
 const drawThingsPlanPath = drawThingsPlanResult.result.structuredContent.plan_path;
 const drawThingsPlanSha256 = drawThingsPlanResult.result.structuredContent.plan_sha256;
+const drawThingsValidationPlan = JSON.parse(
+  fs.readFileSync(drawThingsPlanDoc.validation_plan_path, "utf8"),
+);
+const drawThingsPromptsById = new Map(
+  drawThingsValidationPlan.prompts.map((prompt) => [prompt.id, prompt]),
+);
 const drawThingsResultPath = path.join(testRoot, "draw-things-result.json");
 const drawThingsResult = {
   import_succeeded: true,
@@ -743,7 +749,18 @@ const drawThingsResult = {
       prompt_id: promptId,
       image_path: validationImagePath,
       seed,
-      live_metadata: { lora_weight: 0.7, imported_name: "cap-test checkpoint-400" },
+      live_metadata: {
+        lora_weight: 0.7,
+        imported_name: "cap-test checkpoint-400",
+        base_model: "test-model",
+        control: {
+          input_sha256: drawThingsPromptsById.get(promptId).control_image_sha256,
+          model: "synthetic-controlnet",
+          weight: 1,
+          start: 0,
+          end: 1,
+        },
+      },
       score: 8.5,
       notes: "synthetic Draw Things render",
     }))),
@@ -807,6 +824,23 @@ assert.equal(changedSettingsIngest.result.isError, true);
 assert.match(
   changedSettingsIngest.result.content[0].text,
   /validation settings differ from the bound fixed settings/,
+);
+const missingControlResultPath = path.join(testRoot, "missing-control-result.json");
+const missingControlResult = structuredClone(drawThingsResult);
+delete missingControlResult.renders[0].live_metadata.control;
+fs.writeFileSync(
+  missingControlResultPath,
+  `${JSON.stringify(missingControlResult)}\n`,
+);
+const missingControlIngest = await tool("lora_automation", {
+  action: "draw-things-ingest",
+  job_id: "cap-test",
+  result_path: missingControlResultPath,
+});
+assert.equal(missingControlIngest.result.isError, true);
+assert.match(
+  missingControlIngest.result.content[0].text,
+  /has no ControlNet metadata/,
 );
 const drawThingsIngest = await tool("lora_automation", {
   action: "draw-things-ingest",

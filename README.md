@@ -119,7 +119,9 @@ ingestion requires the returned `draw_things_plan_path` and
 `draw_things_plan_sha256`, then binds that saved plan to the exact selected
 checkpoint/LoRA SHA-256, expected imported name and base model, unchanged fixed
 settings, common seed set, actual render files, scores, and live Draw Things
-metadata. A different but internally valid LoRA or base model is rejected.
+metadata. Controlled prompts additionally require the exact planned control
+image SHA-256 and the recorded ControlNet model, weight, start, and end values.
+A different but internally valid LoRA, base model, or control input is rejected.
 
 The dedicated adapters remain useful for repeatable SimpleTuner operations, but
 they are not a restriction on routine coordination. M2 can invoke

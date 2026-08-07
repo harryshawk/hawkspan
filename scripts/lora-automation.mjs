@@ -1755,6 +1755,9 @@ function ingestControlledValidationResult(revision, result, drawThingsPlanDocume
     throw new Error("validation plan has no fixed integer seeds");
   }
   const promptIds = new Set((plan.prompts || []).map((prompt) => String(prompt.id)));
+  const promptsById = new Map(
+    (plan.prompts || []).map((prompt) => [String(prompt.id), prompt]),
+  );
   const expected = new Set(
     [...promptIds].flatMap((promptId) => seeds.map((seed) => `${promptId}\0${seed}`)),
   );
@@ -1775,6 +1778,31 @@ function ingestControlledValidationResult(revision, result, drawThingsPlanDocume
     if (!render.live_metadata || typeof render.live_metadata !== "object" ||
         Array.isArray(render.live_metadata)) {
       throw new Error(`validation render ${index} has no live metadata`);
+    }
+    if (render.live_metadata.imported_name !== result.imported_name) {
+      throw new Error(`validation render ${index} has the wrong imported LoRA name`);
+    }
+    if (!Number.isFinite(Number(render.live_metadata.lora_weight))) {
+      throw new Error(`validation render ${index} has no numeric LoRA weight`);
+    }
+    if (render.live_metadata.base_model !== result.base_model) {
+      throw new Error(`validation render ${index} has the wrong base model`);
+    }
+    const prompt = promptsById.get(promptId);
+    if (prompt?.control_image_path) {
+      const control = render.live_metadata.control;
+      if (!control || typeof control !== "object" || Array.isArray(control)) {
+        throw new Error(`validation render ${index} has no ControlNet metadata`);
+      }
+      if (control.input_sha256 !== prompt.control_image_sha256) {
+        throw new Error(`validation render ${index} used the wrong control input`);
+      }
+      if (!String(control.model || "").trim() ||
+          !Number.isFinite(Number(control.weight)) ||
+          !Number.isFinite(Number(control.start)) ||
+          !Number.isFinite(Number(control.end))) {
+        throw new Error(`validation render ${index} has incomplete ControlNet metadata`);
+      }
     }
     if (typeof render.score !== "number" || Number.isNaN(render.score)) {
       throw new Error(`validation render ${index} has no numeric score`);
