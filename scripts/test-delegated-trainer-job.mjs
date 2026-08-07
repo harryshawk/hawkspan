@@ -271,11 +271,16 @@ const packageJobId = "job-delegated-package-test";
 const refusedPackageTargetDrift = await tool("trainer_package_authorized_job", {
   job_id: packageJobId,
   target: "different-target",
+  expected_revision_fingerprint: "a".repeat(64),
   _delegated_job: {
     ...context,
     id: packageJobId,
     state: "returning",
-    metadata: { target: "robot-test", phase: "awaiting-validation" },
+    metadata: {
+      target: "robot-test",
+      phase: "awaiting-validation",
+      revision_fingerprint: "a".repeat(64),
+    },
   },
 });
 assert.equal(refusedPackageTargetDrift.result.isError, true);
@@ -283,24 +288,104 @@ assert.match(refusedPackageTargetDrift.result.content[0].text, /must match durab
 const returningReplay = await tool("update_job_status", {
   job_id: packageJobId,
   state: "returning",
-  metadata: { phase: "awaiting-validation", target: "robot-test" },
+  metadata: {
+    phase: "awaiting-validation",
+    target: "robot-test",
+    revision_fingerprint: "a".repeat(64),
+  },
 });
 assert.equal(returningReplay.result.isError, false, returningReplay.result.content?.[0]?.text);
 const packaged = await tool("trainer_package_authorized_job", {
   job_id: packageJobId,
   target: "robot-test",
+  expected_revision_fingerprint: "a".repeat(64),
   _delegated_job: {
     ...context,
     id: packageJobId,
     state: "returning",
-    metadata: { target: "robot-test", phase: "awaiting-validation" },
+    metadata: {
+      target: "robot-test",
+      phase: "awaiting-validation",
+      revision_fingerprint: "a".repeat(64),
+    },
   },
 });
 assert.equal(packaged.result.isError, false, packaged.result.content?.[0]?.text);
 assert.match(
   fs.readFileSync(invocationLog, "utf8"),
-  new RegExp(`--job-id ${packageJobId}.*--target robot-test`),
+  new RegExp(
+    `--job-id ${packageJobId}.*--target robot-test.*--expected-revision-fingerprint ${"a".repeat(64)}`,
+  ),
 );
+
+const retryPackageJobId = "job-delegated-package-retry-test";
+const retriedPackage = await tool("trainer_package_authorized_job", {
+  job_id: retryPackageJobId,
+  target: "robot-test",
+  expected_revision_fingerprint: "b".repeat(64),
+  _delegated_job: {
+    ...context,
+    id: retryPackageJobId,
+    state: "failed",
+    metadata: {
+      target: "robot-test",
+      phase: "package_return",
+      revision_fingerprint: "b".repeat(64),
+    },
+  },
+});
+assert.equal(retriedPackage.result.isError, false, retriedPackage.result.content?.[0]?.text);
+jobs = await tool("list_jobs", { job_id: retryPackageJobId });
+assert.equal(jobs.result.structuredContent[0].state, "running");
+assert.equal(jobs.result.structuredContent[0].metadata.phase, "package_return");
+assert.equal(jobs.result.structuredContent[0].metadata.package_retry_state, "running");
+
+const refusedDriftedPackage = await tool("trainer_package_authorized_job", {
+  job_id: packageJobId,
+  target: "robot-test",
+  expected_revision_fingerprint: "c".repeat(64),
+});
+assert.equal(refusedDriftedPackage.result.isError, true);
+assert.match(
+  refusedDriftedPackage.result.content[0].text,
+  /must match the revision recorded at training start/,
+);
+
+const preservedPackageJobId = "job-delegated-package-preserve-test";
+const seededPackageFailure = await tool("trainer_package_authorized_job", {
+  job_id: preservedPackageJobId,
+  target: "robot-test",
+  expected_revision_fingerprint: "d".repeat(64),
+  _delegated_job: {
+    ...context,
+    id: preservedPackageJobId,
+    state: "failed",
+    metadata: {
+      target: "robot-test",
+      phase: "package_return",
+      revision_fingerprint: "e".repeat(64),
+    },
+  },
+});
+assert.equal(seededPackageFailure.result.isError, true);
+const preservedPackageRetry = await tool("trainer_package_authorized_job", {
+  job_id: preservedPackageJobId,
+  target: "robot-test",
+  expected_revision_fingerprint: "e".repeat(64),
+  _delegated_job: {
+    ...context,
+    id: preservedPackageJobId,
+    state: "running",
+    metadata: { target: "robot-test", phase: "training" },
+  },
+});
+assert.equal(
+  preservedPackageRetry.result.isError,
+  false,
+  preservedPackageRetry.result.content?.[0]?.text,
+);
+jobs = await tool("list_jobs", { job_id: preservedPackageJobId });
+assert.equal(jobs.result.structuredContent[0].metadata.revision_fingerprint, "e".repeat(64));
 
 child.stdin.end();
 await new Promise((resolve) => child.once("exit", resolve));

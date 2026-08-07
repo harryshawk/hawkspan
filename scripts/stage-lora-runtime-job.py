@@ -98,6 +98,76 @@ def clone_training_inputs(source: Path, destination: Path, include_captions: boo
         shutil.copy2(source_path, target)
 
 
+def validation_input_inventory(
+    source_config: Path,
+    source_data: Path,
+    source_conditioning: Path | None,
+) -> tuple[dict, list[dict]]:
+    policy = json.loads((source_config / "TRAINING_READINESS_POLICY.json").read_text())
+    library_path = Path(policy["validation_prompt_library"])
+    library = json.loads(library_path.read_text())
+    references = [
+        (prompt["id"], key, prompt.get(key))
+        for prompt in library.get("prompts", [])
+        for key in ("control_image", "source_target")
+        if prompt.get(key)
+    ]
+    if references and library.get("controls_are_relative_to") != "dataset":
+        raise SystemExit(
+            "validation inputs require controls_are_relative_to=dataset"
+        )
+
+    resolved: list[dict] = []
+    for prompt_id, key, value in references:
+        relative = Path(str(value))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise SystemExit(
+                f"validation prompt {prompt_id} has invalid {key}: {relative}"
+            )
+        candidates = [source_data.parent / relative]
+        if key == "source_target":
+            candidates.append(source_data / relative.name)
+        elif source_conditioning:
+            candidates.append(source_conditioning / relative.name)
+        matches = [candidate for candidate in candidates if candidate.is_file()]
+        if not matches:
+            raise SystemExit(
+                f"validation prompt {prompt_id} is missing {key}: {relative}"
+            )
+        digests = {sha256(candidate) for candidate in matches}
+        if len(digests) != 1:
+            raise SystemExit(
+                f"validation prompt {prompt_id} has ambiguous {key}: {relative}"
+            )
+        resolved.append({
+            "prompt_id": prompt_id,
+            "kind": key,
+            "relative_path": str(relative),
+            "source_path": str(matches[0]),
+            "size_bytes": matches[0].stat().st_size,
+            "sha256": next(iter(digests)),
+        })
+    return ({
+        "path": str(library_path),
+        "size_bytes": library_path.stat().st_size,
+        "sha256": sha256(library_path),
+    }, resolved)
+
+
+def clone_validation_inputs(entries: list[dict], destination_root: Path) -> None:
+    for entry in entries:
+        source = Path(entry["source_path"])
+        target = destination_root / entry["relative_path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if sha256(target) != entry["sha256"]:
+                raise SystemExit(
+                    f"staged validation input conflicts with training input: {target}"
+                )
+            continue
+        shutil.copy2(source, target)
+
+
 def atomic_json(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -160,6 +230,9 @@ def main() -> None:
         training_input_inventory(source_conditioning, include_captions=False)
         if source_conditioning else []
     )
+    source_validation_library, source_validation_inputs = validation_input_inventory(
+        source_config, source_data, source_conditioning
+    )
     overlay_job_root = None
     source_overlay_inventory = []
     if args.caption_overlay_root:
@@ -173,6 +246,8 @@ def main() -> None:
                 "job": source_job,
                 "dataset": source_inventory,
                 "conditioning": conditioning_inventory,
+                "validation_library": source_validation_library,
+                "validation_inputs": source_validation_inputs,
                 "config": config_inventory,
                 "caption_overlay": source_overlay_inventory,
             },
@@ -218,6 +293,7 @@ def main() -> None:
             clone_training_inputs(
                 source_conditioning, conditioning_dir, include_captions=False
             )
+        clone_validation_inputs(source_validation_inputs, temporary_root)
         preserved_captions = temporary_root / "preserved-source-captions"
         preserved_captions.mkdir()
         for caption in sorted(data_dir.rglob("*.txt")):
@@ -434,6 +510,8 @@ def main() -> None:
             "source_revision_sha256": source_revision,
             "source_dataset_inventory": source_inventory,
             "source_conditioning_inventory": conditioning_inventory,
+            "source_validation_library": source_validation_library,
+            "source_validation_input_inventory": source_validation_inputs,
             "source_config_inventory": config_inventory,
             "caption_overlay_root": (
                 str(args.caption_overlay_root) if args.caption_overlay_root else None

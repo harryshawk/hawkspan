@@ -84,18 +84,27 @@ with tempfile.TemporaryDirectory(prefix="trainer-process-tree-") as temporary:
     original_load_target = controller.load_target
     controller.training_processes = lambda: []
     controller.load_target = lambda target: {"job_id": target}
-    controller.subprocess.run = lambda *args, **kwargs: (
+    revision_fingerprint = "a" * 64
+
+    def fake_run(*args, **kwargs):
+        if "training-readiness" in args[0]:
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"revision_fingerprint": revision_fingerprint}),
+                stderr="",
+            )
         package_calls.append((args, kwargs))
-        or types.SimpleNamespace(returncode=0, stdout="packaged\n", stderr="")
-    )
+        return types.SimpleNamespace(returncode=0, stdout="packaged\n", stderr="")
+
+    controller.subprocess.run = fake_run
     try:
-        controller.package("test-job", "test-target")
+        controller.package("test-job", "test-target", revision_fingerprint)
         package_env = package_calls[0][1]["env"]
         assert package_env["HAWKSPAN_DURABLE_TRAINING_JOB_ID"] == "test-job"
         assert package_env["HAWKSPAN_SIMPLETUNER_QUEUE_ITEM_ID"] == "queue-test-target"
         scheduler_jobs.write_text(json.dumps({"schema_version": 2, "jobs": []}))
         try:
-            controller.package("test-job", "test-target")
+            controller.package("test-job", "test-target", revision_fingerprint)
         except SystemExit as error:
             assert "exactly one scheduler item" in str(error)
         else:

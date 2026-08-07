@@ -1,5 +1,15 @@
 # Release Flow
 
+## 2026-08-07 - HawkSpan 0.3.5 validation-input staging repair
+
+- Release intent: ensure every immutable runtime job contains the fixed
+  validation and ControlNet files its packet contract names.
+- Acceptance evidence: the staging regression requires copied control and
+  source-target inputs, readiness binds their hashes, and package retry accepts
+  only a package-return failure at the exact supplied revision fingerprint.
+- Promotion condition: the complete release gate passes before the exact commit
+  is installed on M2 or M4.
+
 ## 2026-08-06 - HawkSpan 0.3.4 skipped-current repair
 
 - Request: Exercise real queue controls before four uninterrupted 100-step

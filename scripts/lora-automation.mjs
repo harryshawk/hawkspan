@@ -633,6 +633,46 @@ function trainingReadiness(args) {
       }
     }
   }
+  const validationInputs = [];
+  if (validation && Array.isArray(validation.prompts)) {
+    const datasetRoot = path.dirname(path.resolve(job.data_dir));
+    for (const prompt of validation.prompts) {
+      for (const key of ["control_image", "source_target"]) {
+        const declared = String(prompt[key] || "").trim();
+        if (!declared) continue;
+        const resolved = path.resolve(datasetRoot, declared);
+        const valid = validation.controls_are_relative_to === "dataset" &&
+          resolved.startsWith(`${datasetRoot}${path.sep}`) &&
+          fs.existsSync(resolved) && fs.statSync(resolved).isFile() &&
+          imageExtensions.has(path.extname(resolved).toLowerCase());
+        if (!valid) {
+          problems.push({
+            issue: "missing_or_invalid_validation_input",
+            prompt_id: prompt.id || null,
+            kind: key,
+            declared,
+            resolved,
+          });
+          continue;
+        }
+        validationInputs.push({
+          prompt_id: prompt.id || null,
+          kind: key,
+          relative_path: declared,
+          path: resolved,
+          sha256: sha256(resolved),
+        });
+      }
+    }
+  }
+  const validationInputsRevisionSha256 = crypto.createHash("sha256")
+    .update(JSON.stringify(validationInputs.map((entry) => ({
+      prompt_id: entry.prompt_id,
+      kind: entry.kind,
+      relative_path: entry.relative_path,
+      sha256: entry.sha256,
+    }))))
+    .digest("hex");
 
   const inventory = installedInventory();
   if (!inventory.environment?.mps_available) {
@@ -671,6 +711,8 @@ function trainingReadiness(args) {
     backend_sha256: Array.isArray(backendJson) ? sha256(backendPath) : null,
     policy_sha256: policy ? sha256(policyPath) : null,
     validation_sha256: validation ? sha256(validationPath) : null,
+    validation_inputs: validationInputs,
+    validation_inputs_revision_sha256: validationInputsRevisionSha256,
     image_count: dataset.image_count,
     caption_count: dataset.caption_count,
     caption_variant_count: dataset.token_audit?.variant_count || null,
@@ -690,6 +732,8 @@ function trainingReadiness(args) {
       backend_sha256: evidence.backend_sha256,
       policy_sha256: evidence.policy_sha256,
       validation_sha256: evidence.validation_sha256,
+      validation_inputs_revision_sha256:
+        evidence.validation_inputs_revision_sha256,
       conditioning_revision_sha256: evidence.conditioning?.revision_sha256 || null,
       recovery_checkpoint_sha256:
         evidence.recovery_checkpoint?.revision_sha256 || null,

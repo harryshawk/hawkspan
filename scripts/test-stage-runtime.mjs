@@ -10,6 +10,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-lora-stage-test-"));
 const queue = path.join(root, "source-queue");
 const dataset = path.join(queue, "source", "Test v2");
 const conditioning = path.join(queue, "source", "Test v2 controls");
+const targets = path.join(queue, "source", "targets");
 const configDir = path.join(queue, "configs", "cap-test-v2");
 const sourceOutput = path.join(root, "source-output", "cap-test-v2");
 const recoveryCheckpoint = path.join(sourceOutput, "checkpoint-400");
@@ -19,6 +20,7 @@ const simpletuner = path.join(root, "simpletuner");
 for (const directory of [
   dataset,
   conditioning,
+  targets,
   configDir,
   sourceOutput,
   recoveryCheckpoint,
@@ -43,6 +45,7 @@ const image = Buffer.from(
 );
 fs.writeFileSync(path.join(dataset, "sample.png"), image);
 fs.writeFileSync(path.join(conditioning, "sample.png"), image);
+fs.writeFileSync(path.join(targets, "sample.png"), image);
 fs.writeFileSync(path.join(dataset, "aspect_ratio_bucket_metadata_old-job.json"), "{}\n");
 fs.writeFileSync(path.join(conditioning, "aspect_ratio_bucket_indices_old-job.json"), "{}\n");
 fs.writeFileSync(path.join(conditioning, "sample.txt"), "conditioning cache sidecar\n");
@@ -69,13 +72,19 @@ fs.writeFileSync(
 
 const validationPath = path.join(configDir, "validation-prompt-library.json");
 fs.writeFileSync(validationPath, JSON.stringify({
+  controls_are_relative_to: "dataset",
   seed_policy: "Use seed 20260801 for every mapped prompt at step 300.",
   prompts: [
     "subject-wide",
     "subject-angle",
     "subject-detail",
     "subject-context",
-  ].map((id) => ({ id, prompt: `testv2, ${id}` })),
+  ].map((id) => ({
+    id,
+    prompt: `testv2, ${id}`,
+    control_image: "conditioning/sample.png",
+    source_target: "targets/sample.png",
+  })),
 }));
 fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({
   data_backend_config: path.join(configDir, "multidatabackend.json"),
@@ -260,6 +269,13 @@ assert.equal(
 );
 assert.equal(
   fs.readFileSync(path.join(runtimeManifest[0].conditioning_dir, "sample.png"), "base64"),
+  image.toString("base64"),
+);
+assert.equal(
+  fs.readFileSync(
+    path.join(path.dirname(runtimeManifest[0].data_dir), "targets", "sample.png"),
+    "base64",
+  ),
   image.toString("base64"),
 );
 assert.equal(

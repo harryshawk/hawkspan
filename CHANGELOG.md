@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.5 - 2026-08-07
+
+- Copied fixed validation and ControlNet inputs into each immutable staged job,
+  included their hashes in revision identity, and rejected missing inputs at
+  readiness instead of after training.
+- Added exact-revision package-only recovery for a completed run whose automatic
+  return packet failed, without retraining or discarding checkpoints.
+
 ## 0.3.4 - 2026-08-06
 
 - Cleared SimpleTuner's current-target telemetry when an operator skips that

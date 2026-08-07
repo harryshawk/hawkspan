@@ -445,10 +445,40 @@ def stop(job_id: str, target: str) -> None:
     )
 
 
-def package(job_id: str, target: str) -> None:
+def package(
+    job_id: str,
+    target: str,
+    expected_revision_fingerprint: str | None = None,
+) -> None:
     load_target(target)
     if training_processes():
         raise SystemExit("package refused while a training process is active")
+    readiness_result = subprocess.run(
+        [
+            str(NODE),
+            str(AUTOMATION),
+            "training-readiness",
+            json.dumps(readiness_request(target)),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HAWKSPAN_CONFIG": str(CONFIG_PATH)},
+    )
+    if readiness_result.returncode:
+        raise SystemExit(
+            "package refused because training readiness could not be evaluated:\n"
+            + readiness_result.stderr
+        )
+    readiness = json.loads(readiness_result.stdout)
+    if not expected_revision_fingerprint:
+        raise SystemExit("package requires expected revision fingerprint")
+    if readiness.get("revision_fingerprint") != expected_revision_fingerprint:
+        raise SystemExit(
+            "package refused because dataset/config revision changed after authorization: "
+            f"expected {expected_revision_fingerprint}, "
+            f"found {readiness.get('revision_fingerprint')}"
+        )
     CONTROL_ROOT.mkdir(parents=True, exist_ok=True)
     status_path = CONTROL_ROOT / f"{job_id}--{target}.package-status.json"
     package_env = os.environ.copy()
@@ -532,7 +562,7 @@ def main() -> None:
     elif args.action == "stop":
         stop(args.job_id, args.target)
     else:
-        package(args.job_id, args.target)
+        package(args.job_id, args.target, args.expected_revision_fingerprint)
 
 
 if __name__ == "__main__":

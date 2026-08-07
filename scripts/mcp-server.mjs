@@ -1512,7 +1512,7 @@ function delegatedJobRecord(row) {
   };
 }
 
-function importDelegatedJob(context, expectedJobId) {
+function importDelegatedJob(context, expectedJobId, options = {}) {
   if (process.env.HAWKSPAN_CALL_ORIGIN !== "peer") {
     throw new Error("delegated job context is accepted only from the paired peer");
   }
@@ -1526,12 +1526,29 @@ function importDelegatedJob(context, expectedJobId) {
   if (existing && existing.creator !== context.creator) {
     throw new Error(`delegated job creator conflict: ${expectedJobId}`);
   }
+  const preserveExisting = options.preserve_existing === true && existing;
+  const existingMetadata = existing ? JSON.parse(existing.metadata_json || "{}") : {};
+  const importedContext = preserveExisting ? {
+    ...context,
+    created_at: existing.created_at,
+    updated_at: existing.updated_at,
+    creator: existing.creator,
+    assignee: existing.assignee,
+    kind: existing.kind,
+    title: existing.title,
+    description: existing.description,
+    state: existing.state,
+    authorization_state: existing.authorization_state,
+    authorization_evidence: existing.authorization_evidence,
+    metadata: { ...(context.metadata || {}), ...existingMetadata },
+  } : context;
   const values = [
-    context.created_at || now(), context.updated_at || now(), context.creator,
-    context.assignee || config.node_id, context.kind, context.title || expectedJobId,
-    context.description || "", context.state,
-    context.authorization_state || "not_required",
-    context.authorization_evidence || null, json(context.metadata), expectedJobId,
+    importedContext.created_at || now(), importedContext.updated_at || now(), importedContext.creator,
+    importedContext.assignee || config.node_id, importedContext.kind,
+    importedContext.title || expectedJobId, importedContext.description || "",
+    importedContext.state, importedContext.authorization_state || "not_required",
+    importedContext.authorization_evidence || null,
+    json(importedContext.metadata), expectedJobId,
   ];
   if (existing) {
     db.prepare(`
@@ -1547,9 +1564,10 @@ function importDelegatedJob(context, expectedJobId) {
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(...values);
   }
-  audit("import", "job", expectedJobId, context.state, {
-    creator: context.creator,
+  audit("import", "job", expectedJobId, importedContext.state, {
+    creator: importedContext.creator,
     delegated: true,
+    preserved_existing_execution_state: Boolean(preserveExisting),
   });
 }
 
@@ -1640,7 +1658,16 @@ function peerCallTool(args) {
           .get(forwardedArguments.job_id);
         if (args.tool_name === "trainer_start_authorized_job" &&
             localJob?.state === "queued") {
-          updateJobStatus({ job_id: localJob.id, state: "running" });
+          updateJobStatus({
+            job_id: localJob.id,
+            state: "running",
+            metadata: {
+              target: forwardedArguments.target || null,
+              phase: "training",
+              revision_fingerprint:
+                forwardedArguments.expected_revision_fingerprint,
+            },
+          });
         }
         if (args.tool_name === "trainer_stop_authorized_job" &&
             localJob?.state === "cancel_requested") {
@@ -2339,7 +2366,11 @@ function trainerStartAuthorizedJob(args) {
     updateJobStatus({
       job_id: job.id,
       state: "running",
-      metadata: { target: args.target || null, phase: "training" },
+      metadata: {
+        target: args.target || null,
+        phase: "training",
+        revision_fingerprint: args.expected_revision_fingerprint,
+      },
     });
     return result;
   } catch (error) {
@@ -2393,18 +2424,59 @@ function trainerStopAuthorizedJob(args) {
 }
 
 function trainerPackageAuthorizedJob(args) {
-  if (args._delegated_job) importDelegatedJob(args._delegated_job, args.job_id);
-  const job = requireTrackedJob(args.job_id, "training", ["returning", "completed"]);
+  if (args._delegated_job) {
+    importDelegatedJob(args._delegated_job, args.job_id, {
+      preserve_existing: true,
+    });
+  }
+  let job = requireTrackedJob(args.job_id, "training", ["failed", "returning", "completed"]);
   const metadata = JSON.parse(job.metadata_json || "{}");
   if (!args.target || metadata.target !== args.target) {
     throw new Error(
       `package target must match durable training target ${metadata.target || "<missing>"}`,
     );
   }
-  return runConfiguredScript(
-    "package_script", "allow_package", { ...args, _delegated_job: null },
-    "training", ["returning", "completed"],
-  );
+  if (!args.expected_revision_fingerprint) {
+    throw new Error("trainer package requires expected_revision_fingerprint");
+  }
+  if (!metadata.revision_fingerprint ||
+      metadata.revision_fingerprint !== args.expected_revision_fingerprint) {
+    throw new Error(
+      "package revision fingerprint must match the revision recorded at training start",
+    );
+  }
+  if (job.state === "failed") {
+    if (metadata.phase !== "package_return") {
+      throw new Error("only a package-return failure can be retried by package control");
+    }
+    updateJobStatus({
+      job_id: job.id,
+      state: "queued",
+      metadata: { ...metadata, phase: "package_return", package_retry_state: "queued" },
+    });
+    updateJobStatus({
+      job_id: job.id,
+      state: "running",
+      metadata: { ...metadata, phase: "package_return", package_retry_state: "running" },
+    });
+    job = requireTrackedJob(job.id, "training", ["running"]);
+  }
+  try {
+    return runConfiguredScript(
+      "package_script", "allow_package", { ...args, _delegated_job: null },
+      "training", ["running", "returning", "completed"],
+    );
+  } catch (error) {
+    job = requireTrackedJob(job.id, "training");
+    if (job.state === "running") {
+      updateJobStatus({
+        job_id: job.id,
+        state: "failed",
+        metadata: { ...metadata, phase: "package_return", error: String(error.message || error) },
+      });
+    }
+    throw error;
+  }
 }
 
 function trainerQueueControl(args) {
@@ -3562,6 +3634,7 @@ const coreTools = [
       properties: {
         job_id: { type: "string" },
         target: { type: "string" },
+        expected_revision_fingerprint: { type: "string", pattern: "^[A-Fa-f0-9]{64}$" },
         timeout_ms: { type: "integer", minimum: 1000, maximum: 300000 },
         _delegated_job: { type: "object" },
       },
