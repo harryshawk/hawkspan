@@ -327,14 +327,8 @@ def copy_output_tree_deduplicated(
         ):
             checkpoint = relative.parts[1]
             if checkpoint in root_checkpoints:
-                live_manifest = checkpoint_manifest(source / checkpoint)
-                preserved_manifest = checkpoint_manifest(
-                    source / "PRESERVED_CHECKPOINTS" / checkpoint
-                )
-                if live_manifest != preserved_manifest:
-                    raise RuntimeError(
-                        f"Preserved checkpoint differs from live checkpoint: {checkpoint}"
-                    )
+                # preserve_expected_checkpoints compared this pair once before
+                # packet copying; avoid rehashing the full checkpoint per file.
                 omitted_preserved_duplicates.add(checkpoint)
                 continue
             recovered_pruned_checkpoints.add(checkpoint)
