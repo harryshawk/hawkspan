@@ -566,6 +566,14 @@ assert.equal(cleared.result.structuredContent.cleared, 1);
 const loraAutomationTool = listed.result.tools.find(
   (entry) => entry.name === "lora_automation",
 );
+for (const [name, required] of Object.entries({
+  trainer_start_authorized_job: ["job_id", "target", "expected_revision_fingerprint"],
+  trainer_stop_authorized_job: ["job_id", "target"],
+  trainer_package_authorized_job: ["job_id", "target", "expected_revision_fingerprint"],
+})) {
+  const definition = listed.result.tools.find((entry) => entry.name === name);
+  assert.deepEqual(definition.inputSchema.required, required);
+}
 for (const requiredAction of [
   "training-readiness",
   "prepare-versioned-job",
@@ -1291,6 +1299,17 @@ assert(
     (entry) => entry.name === "checkpoint-400",
   ),
 );
+assert.equal(
+  runStatus.result.structuredContent.checkpoints.find(
+    (entry) => entry.name === "checkpoint-400",
+  ).complete,
+  false,
+);
+const completeCheckpoint = runStatus.result.structuredContent.checkpoints.find(
+  (entry) => entry.name === "checkpoint-200" && entry.preserved,
+);
+assert.equal(completeCheckpoint.complete, true);
+assert.equal(completeCheckpoint.global_step, 200);
 const queueDetail = await tool("trainer_queue_detail");
 assert.equal(queueDetail.result.structuredContent.jobs[0].state, "running");
 assert.equal(queueDetail.result.structuredContent.jobs[1].state, "completed");

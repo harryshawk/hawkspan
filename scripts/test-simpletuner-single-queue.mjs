@@ -47,7 +47,10 @@ const insertJob = database.prepare(`
 `);
 insertJob.run(
   "durable-r-test", "now", "now", "test", "test", "training", "test", "test",
-  "queued", "recorded", "test", JSON.stringify({ target: "r-test" }),
+  "queued", "recorded", "test", JSON.stringify({
+    target: "r-test",
+    revision_fingerprint: "a".repeat(64),
+  }),
 );
 
 const jobsPath = path.join(schedulerRoot, "lora-jobs.json");
@@ -58,7 +61,7 @@ fs.writeFileSync(jobsPath, `${JSON.stringify({
     job_id: "queue-r-test",
     target: "r-test",
     authorization_job_id: "durable-r-test",
-    revision_fingerprint: "revision-r-test",
+    revision_fingerprint: "a".repeat(64),
     authorized: true,
     priority: 10,
   }],

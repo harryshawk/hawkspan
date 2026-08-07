@@ -34,10 +34,13 @@ for (const name of [
   "pytorch_lora_weights.safetensors",
   "optimizer.bin",
   "scheduler.bin",
-  "training_state.json",
 ]) {
   fs.writeFileSync(path.join(recoveryCheckpoint, name), `${name}\n`);
 }
+fs.writeFileSync(
+  path.join(recoveryCheckpoint, "training_state.json"),
+  `${JSON.stringify({ global_step: 400 })}\n`,
+);
 
 const image = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z5Z8AAAAASUVORK5CYII=",
@@ -64,6 +67,16 @@ fs.writeFileSync(
   path.join(overlayRoot, "jobs", "cap-test-v2", "source", "Test v2", "sample.txt"),
   `${variants.join("\n")}\n`,
 );
+const v3Overlay = path.join(
+  overlayRoot,
+  "jobs",
+  "cap-test-v3",
+  "source",
+  "Test v2",
+  "sample.txt",
+);
+fs.mkdirSync(path.dirname(v3Overlay), { recursive: true });
+fs.writeFileSync(v3Overlay, `${variants.join("\n")}\n`);
 fs.writeFileSync(
   path.join(simpletuner, ".venv", "bin", "python"),
   "#!/bin/sh\nprintf '{\"python\":\"test\",\"platform\":\"test\",\"torch\":\"test\",\"mps_built\":true,\"mps_available\":true,\"packages\":{}}\\n'\n",
@@ -196,6 +209,93 @@ fs.writeFileSync(configPath, JSON.stringify({
   },
 }));
 
+function writeCheckpoint(checkpointPath, globalStep, mutation = null) {
+  fs.mkdirSync(checkpointPath, { recursive: true });
+  for (const name of [
+    "pytorch_lora_weights.safetensors",
+    "optimizer.bin",
+    "scheduler.bin",
+  ]) {
+    fs.writeFileSync(path.join(checkpointPath, name), `${name}\n`);
+  }
+  fs.writeFileSync(
+    path.join(checkpointPath, "training_state.json"),
+    `${JSON.stringify({ global_step: globalStep })}\n`,
+  );
+  mutation?.(checkpointPath);
+}
+
+function rejectedPreparation(label, checkpointPath, expectedError) {
+  const result = spawnSync(process.execPath, [
+    automationScript,
+    "prepare-versioned-job",
+    JSON.stringify({
+      job_id: "cap-test-v2",
+      target_job_id: `cap-test-${label}`,
+      version_tag: label,
+      required_trigger: "testv2",
+      tokenizer_root: path.join(root, "fake-tokenizer"),
+      validation_prompt_library: validationPath,
+      recovery_checkpoint: checkpointPath,
+    }),
+  ], {
+    encoding: "utf8",
+    timeout: 30000,
+    env: { ...process.env, HAWKSPAN_CONFIG: configPath },
+  });
+  assert.notEqual(result.status, 0, `${label} unexpectedly passed`);
+  assert.match(result.stderr, expectedError);
+}
+
+const nonRegularCheckpoint = path.join(sourceOutput, "checkpoint-401");
+writeCheckpoint(nonRegularCheckpoint, 401, (checkpointPath) => {
+  fs.rmSync(path.join(checkpointPath, "optimizer.bin"));
+  fs.mkdirSync(path.join(checkpointPath, "optimizer.bin"));
+});
+rejectedPreparation("nonregular", nonRegularCheckpoint, /required_path_not_regular_file/);
+
+const emptyCheckpoint = path.join(sourceOutput, "checkpoint-402");
+writeCheckpoint(emptyCheckpoint, 402, (checkpointPath) => {
+  fs.writeFileSync(path.join(checkpointPath, "scheduler.bin"), "");
+});
+rejectedPreparation("empty", emptyCheckpoint, /required_file_empty/);
+
+const malformedCheckpoint = path.join(sourceOutput, "checkpoint-403");
+writeCheckpoint(malformedCheckpoint, 403, (checkpointPath) => {
+  fs.writeFileSync(path.join(checkpointPath, "training_state.json"), "{not-json\n");
+});
+rejectedPreparation("malformed", malformedCheckpoint, /training_state_json_invalid/);
+
+const mismatchedCheckpoint = path.join(sourceOutput, "checkpoint-404");
+writeCheckpoint(mismatchedCheckpoint, 405);
+rejectedPreparation("mismatch", mismatchedCheckpoint, /checkpoint_basename_global_step_mismatch/);
+
+const invalidNameCheckpoint = path.join(sourceOutput, "recovery-405");
+writeCheckpoint(invalidNameCheckpoint, 405);
+rejectedPreparation("badname", invalidNameCheckpoint, /checkpoint_basename_must_be_checkpoint_N/);
+
+const outsideCheckpoint = path.join(root, "outside", "checkpoint-406");
+writeCheckpoint(outsideCheckpoint, 406);
+rejectedPreparation(
+  "outside",
+  outsideCheckpoint,
+  /must be under the source job output or configured preservation root/,
+);
+
+const otherJobCheckpoint = path.join(
+  root,
+  "source-output",
+  "other-job",
+  "PRESERVED_CHECKPOINTS",
+  "checkpoint-407",
+);
+writeCheckpoint(otherJobCheckpoint, 407);
+rejectedPreparation(
+  "otherjob",
+  otherJobCheckpoint,
+  /must be under the source job output or configured preservation root/,
+);
+
 const preparedResult = spawnSync(process.execPath, [
   automationScript,
   "prepare-versioned-job",
@@ -226,6 +326,15 @@ const stagedCheckpoint = path.join(
   "checkpoint-400",
 );
 assert.equal(prepared.staged_recovery_checkpoint, stagedCheckpoint);
+assert.equal(prepared.recovery_checkpoint.global_step, 400);
+assert.equal(
+  prepared.recovery_checkpoint_provenance.source_job_id,
+  "cap-test-v2",
+);
+assert.equal(
+  prepared.recovery_checkpoint_provenance.matched_root_kind,
+  "source_output",
+);
 assert.deepEqual(
   fs.readdirSync(stagedCheckpoint).sort(),
   fs.readdirSync(recoveryCheckpoint).sort(),
@@ -259,7 +368,7 @@ const stageScript = path.join(
 const result = spawnSync("/usr/bin/python3", [
   stageScript,
   "--source-manifest", path.join(queue, "captioned-lora-manifest.json"),
-  "--job-id", "cap-test-v2",
+  "--job-id", "cap-test-v3",
   "--runtime-root", runtimeRoot,
   "--base-link-config", configPath,
   "--caption-overlay-root", overlayRoot,
@@ -271,6 +380,56 @@ assert.equal(staged.training_started, false);
 assert.equal(staged.ready, true, JSON.stringify(staged.problems, null, 2));
 assert.equal(staged.recovery_checkpoint.complete, true);
 assert.match(staged.recovery_checkpoint.revision_sha256, /^[a-f0-9]{64}$/);
+const runtimeRecoveryCheckpoint = path.join(
+  runtimeRoot,
+  "outputs",
+  "cap-test-v3",
+  "checkpoint-400",
+);
+assert.equal(staged.recovery_checkpoint.path, runtimeRecoveryCheckpoint);
+assert.deepEqual(
+  fs.readdirSync(runtimeRecoveryCheckpoint).sort(),
+  fs.readdirSync(recoveryCheckpoint).sort(),
+);
+const runtimeConfig = JSON.parse(fs.readFileSync(
+  path.join(staged.runtime_job_root, "config", "config.json"),
+));
+const runtimePolicy = JSON.parse(fs.readFileSync(
+  path.join(staged.runtime_job_root, "config", "TRAINING_READINESS_POLICY.json"),
+));
+assert.equal(runtimeConfig.resume_from_checkpoint, runtimeRecoveryCheckpoint);
+assert.equal(runtimePolicy.recovery_checkpoint, runtimeRecoveryCheckpoint);
+assert.equal(runtimePolicy.staged_recovery_checkpoint, runtimeRecoveryCheckpoint);
+assert.equal(runtimePolicy.runtime_recovery_checkpoint, runtimeRecoveryCheckpoint);
+assert.equal(runtimePolicy.source_recovery_checkpoint, recoveryCheckpoint);
+assert.equal(
+  runtimePolicy.recovery_checkpoint_revision_sha256,
+  prepared.recovery_checkpoint.revision_sha256,
+);
+assert.equal(
+  runtimePolicy.recovery_checkpoint_provenance.runtime_checkpoint_path,
+  runtimeRecoveryCheckpoint,
+);
+assert(
+  runtimeRecoveryCheckpoint.startsWith(
+    `${path.join(runtimeRoot, "outputs", "cap-test-v3")}${path.sep}`,
+  ),
+  "recovery checkpoint must be visible under the packaged runtime output",
+);
+const preparedOptimizer = path.join(stagedCheckpoint, "optimizer.bin");
+const preparedOptimizerContents = fs.readFileSync(preparedOptimizer);
+fs.appendFileSync(preparedOptimizer, "tampered\n");
+const rejectedDriftedStage = spawnSync("/usr/bin/python3", [
+  stageScript,
+  "--source-manifest", path.join(queue, "captioned-lora-manifest.json"),
+  "--job-id", "cap-test-v3",
+  "--runtime-root", runtimeRoot,
+  "--base-link-config", configPath,
+  "--caption-overlay-root", overlayRoot,
+], { encoding: "utf8", timeout: 30000 });
+assert.notEqual(rejectedDriftedStage.status, 0);
+assert.match(rejectedDriftedStage.stderr, /does not match prepared hash evidence/);
+fs.writeFileSync(preparedOptimizer, preparedOptimizerContents);
 
 const runtimeManifest = JSON.parse(fs.readFileSync(staged.runtime_manifest));
 assert.equal(runtimeManifest.length, 1);
@@ -358,13 +517,13 @@ const delegatedQueue = spawnSync(process.execPath, [
 assert.equal(delegatedQueue.status, 0, delegatedQueue.stderr);
 assert.deepEqual(
   JSON.parse(delegatedQueue.stdout).jobs.map((entry) => entry.job_id),
-  ["cap-test-v2"],
+  ["cap-test-v3"],
 );
 
 const second = spawnSync("/usr/bin/python3", [
   stageScript,
   "--source-manifest", path.join(queue, "captioned-lora-manifest.json"),
-  "--job-id", "cap-test-v2",
+  "--job-id", "cap-test-v3",
   "--runtime-root", runtimeRoot,
   "--base-link-config", configPath,
   "--caption-overlay-root", overlayRoot,
@@ -377,7 +536,7 @@ fs.writeFileSync(path.join(conditioning, "aspect_ratio_bucket_metadata_new-cache
 const afterSourceCacheMutation = spawnSync("/usr/bin/python3", [
   stageScript,
   "--source-manifest", path.join(queue, "captioned-lora-manifest.json"),
-  "--job-id", "cap-test-v2",
+  "--job-id", "cap-test-v3",
   "--runtime-root", runtimeRoot,
   "--base-link-config", configPath,
   "--caption-overlay-root", overlayRoot,
@@ -392,7 +551,7 @@ fs.writeFileSync(path.join(stagedRoot, "partial-attempt-marker"), "incomplete\n"
 const recovered = spawnSync("/usr/bin/python3", [
   stageScript,
   "--source-manifest", path.join(queue, "captioned-lora-manifest.json"),
-  "--job-id", "cap-test-v2",
+  "--job-id", "cap-test-v3",
   "--runtime-root", runtimeRoot,
   "--base-link-config", configPath,
   "--caption-overlay-root", overlayRoot,

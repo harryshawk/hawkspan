@@ -41,26 +41,31 @@ const insertJob = database.prepare(`
   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 `);
 for (const target of ["r-first", "r-second"]) {
+  const fingerprint = target === "r-first" ? "a".repeat(64) : "b".repeat(64);
   insertJob.run(
     `durable-${target}`, "now", "now", "test", "test", "training", target,
-    target, "queued", "recorded", "test", JSON.stringify({ target }),
+    target, "queued", "recorded", "test", JSON.stringify({
+      target,
+      revision_fingerprint: fingerprint,
+    }),
   );
 }
 database.close();
 
 const jobsPath = path.join(schedulerRoot, "lora-jobs.json");
 const statePath = path.join(schedulerRoot, "lora-scheduler-state.json");
-fs.writeFileSync(jobsPath, `${JSON.stringify({
+const schedulerDocument = {
   schema_version: 2,
   jobs: ["r-first", "r-second"].map((target, index) => ({
     job_id: `queue-${target}`,
     target,
     authorization_job_id: `durable-${target}`,
-    revision_fingerprint: `revision-${target}`,
+    revision_fingerprint: index === 0 ? "a".repeat(64) : "b".repeat(64),
     authorized: true,
     priority: index + 1,
   })),
-}, null, 2)}\n`);
+};
+fs.writeFileSync(jobsPath, `${JSON.stringify(schedulerDocument, null, 2)}\n`);
 fs.writeFileSync(configPath, `${JSON.stringify({
   training: {
     process_match: "process-name-that-cannot-match",
@@ -87,6 +92,19 @@ const run = () => new Promise((resolve, reject) => {
   child.on("error", reject);
   child.on("close", (status) => resolve({ status, stderr }));
 });
+
+schedulerDocument.jobs[0].revision_fingerprint = "c".repeat(64);
+schedulerDocument.jobs[1].revision_fingerprint = "c".repeat(64);
+fs.writeFileSync(jobsPath, `${JSON.stringify(schedulerDocument, null, 2)}\n`);
+const mismatched = await run();
+assert.equal(mismatched.status, 0, mismatched.stderr);
+assert.equal(fs.existsSync(startsPath), false);
+const mismatchState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+assert.equal(mismatchState.jobs["queue-r-first"].state, "invalid-authorization");
+fs.rmSync(statePath);
+schedulerDocument.jobs[0].revision_fingerprint = "a".repeat(64);
+schedulerDocument.jobs[1].revision_fingerprint = "b".repeat(64);
+fs.writeFileSync(jobsPath, `${JSON.stringify(schedulerDocument, null, 2)}\n`);
 
 const [first, second] = await Promise.all([run(), run()]);
 assert.equal(first.status, 0, first.stderr);

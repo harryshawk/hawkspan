@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -20,6 +21,12 @@ from pathlib import Path
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+REQUIRED_CHECKPOINT_FILES = (
+    "pytorch_lora_weights.safetensors",
+    "optimizer.bin",
+    "scheduler.bin",
+    "training_state.json",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,6 +64,108 @@ def inventory(root: Path) -> list[dict]:
         }
         for path in files(root)
     ]
+
+
+def directory_revision_sha256(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in files(root):
+        relative = path.relative_to(root).as_posix()
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        digest.update(str(path.stat().st_size).encode())
+        digest.update(b"\0")
+        digest.update(sha256(path).encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def checkpoint_evidence(checkpoint: Path) -> dict:
+    match = re.fullmatch(r"checkpoint-(\d+)", checkpoint.name)
+    problems: list[str] = []
+    required_files: dict[str, dict] = {}
+    if not checkpoint.is_dir() or checkpoint.is_symlink():
+        problems.append("checkpoint_directory_missing_or_not_regular")
+    if not match:
+        problems.append("checkpoint_basename_must_be_checkpoint_N")
+    if checkpoint.is_dir() and not checkpoint.is_symlink():
+        for name in REQUIRED_CHECKPOINT_FILES:
+            candidate = checkpoint / name
+            if not candidate.exists():
+                problems.append(f"missing_required_file:{name}")
+            elif not candidate.is_file() or candidate.is_symlink():
+                problems.append(f"required_path_not_regular_file:{name}")
+            elif candidate.stat().st_size <= 0:
+                problems.append(f"required_file_empty:{name}")
+            else:
+                required_files[name] = {
+                    "path": str(candidate),
+                    "size_bytes": candidate.stat().st_size,
+                    "sha256": sha256(candidate),
+                }
+    training_state = None
+    state_entry = required_files.get("training_state.json")
+    if state_entry:
+        try:
+            training_state = json.loads(Path(state_entry["path"]).read_text())
+            if not isinstance(training_state, dict):
+                problems.append("training_state_json_must_be_an_object")
+        except (OSError, json.JSONDecodeError):
+            problems.append("training_state_json_invalid")
+    expected_step = int(match.group(1)) if match else None
+    global_step = training_state.get("global_step") if isinstance(training_state, dict) else None
+    if isinstance(training_state, dict):
+        if isinstance(global_step, bool) or not isinstance(global_step, int) or global_step < 1:
+            problems.append("training_state_global_step_invalid")
+        elif expected_step is not None and global_step != expected_step:
+            problems.append("checkpoint_basename_global_step_mismatch")
+    complete = not problems
+    return {
+        "path": str(checkpoint.resolve()),
+        "checkpoint_name": checkpoint.name,
+        "step": expected_step,
+        "global_step": global_step if isinstance(global_step, int) and not isinstance(global_step, bool) else None,
+        "complete": complete,
+        "problems": problems,
+        "required_files": required_files,
+        "bytes": sum(path.stat().st_size for path in files(checkpoint)) if checkpoint.is_dir() else 0,
+        "revision_sha256": directory_revision_sha256(checkpoint) if complete else None,
+    }
+
+
+def copy_verified_checkpoint(source: Path, destination: Path, expected_sha256: str) -> dict:
+    source_evidence = checkpoint_evidence(source)
+    if not source_evidence["complete"]:
+        raise SystemExit(
+            "recovery checkpoint is incomplete: " + json.dumps(source_evidence, sort_keys=True)
+        )
+    if not expected_sha256 or source_evidence["revision_sha256"] != expected_sha256:
+        raise SystemExit("recovery checkpoint differs from its prepared SHA-256 evidence")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        destination_evidence = checkpoint_evidence(destination)
+        if (
+            not destination_evidence["complete"]
+            or destination_evidence["revision_sha256"] != expected_sha256
+        ):
+            raise SystemExit(f"refusing differing runtime recovery checkpoint: {destination}")
+        return destination_evidence
+    temporary_root = Path(
+        tempfile.mkdtemp(prefix=f".{destination.name}-stage-", dir=destination.parent)
+    )
+    temporary = temporary_root / destination.name
+    try:
+        clone_tree(source, temporary)
+        destination_evidence = checkpoint_evidence(temporary)
+        if (
+            not destination_evidence["complete"]
+            or destination_evidence["revision_sha256"] != expected_sha256
+        ):
+            raise SystemExit("runtime recovery checkpoint failed content verification")
+        temporary.replace(destination)
+        return checkpoint_evidence(destination)
+    finally:
+        if temporary_root.exists():
+            shutil.rmtree(temporary_root)
 
 
 def training_input_files(root: Path, include_captions: bool) -> list[Path]:
@@ -198,6 +307,7 @@ def read_json_bounded(path: Path, seconds: int = 5):
 
 def main() -> None:
     args = parse_args()
+    base_link_config = json.loads(args.base_link_config.read_text())
     manifest = read_json_bounded(args.source_manifest)
     matches = [entry for entry in manifest if entry.get("job_id") == args.job_id]
     if len(matches) != 1:
@@ -205,6 +315,9 @@ def main() -> None:
     source_job = matches[0]
     source_data = Path(source_job["data_dir"])
     source_config = Path(source_job["config_dir"])
+    source_policy = json.loads(
+        (source_config / "TRAINING_READINESS_POLICY.json").read_text()
+    )
     source_backends = json.loads(
         (source_config / "multidatabackend.json").read_text()
     )
@@ -233,6 +346,38 @@ def main() -> None:
     source_validation_library, source_validation_inputs = validation_input_inventory(
         source_config, source_data, source_conditioning
     )
+    source_recovery_checkpoint = None
+    source_recovery_evidence = None
+    if source_policy.get("recovery_checkpoint"):
+        source_recovery_checkpoint = Path(source_policy["recovery_checkpoint"]).resolve()
+        source_recovery_evidence = checkpoint_evidence(source_recovery_checkpoint)
+        expected_recovery_sha = source_policy.get("recovery_checkpoint_revision_sha256")
+        provenance = source_policy.get("recovery_checkpoint_provenance")
+        if not source_recovery_evidence["complete"]:
+            raise SystemExit(
+                "source recovery checkpoint is incomplete: "
+                + json.dumps(source_recovery_evidence, sort_keys=True)
+            )
+        if (
+            not expected_recovery_sha
+            or source_recovery_evidence["revision_sha256"] != expected_recovery_sha
+        ):
+            raise SystemExit("source recovery checkpoint does not match prepared hash evidence")
+        if not isinstance(provenance, dict) or not provenance.get("source_job_id"):
+            raise SystemExit("source recovery checkpoint lacks prepared provenance")
+        expected_parent = source_job.get("revision_of") or source_job.get("job_id")
+        if provenance["source_job_id"] != expected_parent:
+            raise SystemExit("source recovery checkpoint provenance names the wrong source job")
+        source_output_root = Path(source_job["output_dir"]).resolve()
+        prepared_checkpoint = Path(
+            source_policy.get("staged_recovery_checkpoint", "")
+        ).resolve()
+        if source_recovery_checkpoint != prepared_checkpoint:
+            raise SystemExit("source recovery checkpoint differs from its prepared path")
+        if not source_recovery_checkpoint.is_relative_to(source_output_root):
+            raise SystemExit(
+                "prepared recovery checkpoint is outside the target job output"
+            )
     overlay_job_root = None
     source_overlay_inventory = []
     if args.caption_overlay_root:
@@ -250,6 +395,7 @@ def main() -> None:
                 "validation_inputs": source_validation_inputs,
                 "config": config_inventory,
                 "caption_overlay": source_overlay_inventory,
+                "recovery_checkpoint": source_recovery_evidence,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -343,8 +489,33 @@ def main() -> None:
         cache_root = args.runtime_root / "cache" / args.job_id
         config["data_backend_config"] = str(backend_path)
         config["output_dir"] = str(output_dir)
-        if policy.get("recovery_checkpoint"):
-            config["resume_from_checkpoint"] = policy["recovery_checkpoint"]
+        runtime_recovery_checkpoint = None
+        runtime_recovery_evidence = None
+        if source_recovery_checkpoint:
+            runtime_recovery_checkpoint = output_dir / source_recovery_checkpoint.name
+            runtime_recovery_evidence = copy_verified_checkpoint(
+                source_recovery_checkpoint,
+                runtime_recovery_checkpoint,
+                source_recovery_evidence["revision_sha256"],
+            )
+            config["resume_from_checkpoint"] = str(runtime_recovery_checkpoint)
+            policy.setdefault(
+                "source_recovery_checkpoint",
+                policy["recovery_checkpoint_provenance"]["source_checkpoint_path"],
+            )
+            policy["prepared_recovery_checkpoint"] = str(source_recovery_checkpoint)
+            policy["recovery_checkpoint"] = str(runtime_recovery_checkpoint)
+            policy["staged_recovery_checkpoint"] = str(runtime_recovery_checkpoint)
+            policy["runtime_recovery_checkpoint"] = str(runtime_recovery_checkpoint)
+            policy["recovery_checkpoint_revision_sha256"] = runtime_recovery_evidence[
+                "revision_sha256"
+            ]
+            policy["recovery_checkpoint_provenance"] = {
+                **policy["recovery_checkpoint_provenance"],
+                "prepared_checkpoint_path": str(source_recovery_checkpoint),
+                "runtime_checkpoint_path": str(runtime_recovery_checkpoint),
+                "runtime_revision_sha256": runtime_recovery_evidence["revision_sha256"],
+            }
         else:
             config.pop("resume_from_checkpoint", None)
         for backend in backends:
@@ -399,7 +570,6 @@ def main() -> None:
             key=lambda entry: (int(entry.get("index", 0)), entry["job_id"])
         )
 
-        base_link_config = json.loads(args.base_link_config.read_text())
         runtime_link_config = json.loads(json.dumps(base_link_config))
         runtime_link_config["training"]["queue_root"] = str(args.runtime_root)
         runtime_link_config["training"]["output_root"] = str(args.runtime_root / "outputs")
@@ -513,6 +683,8 @@ def main() -> None:
             "source_validation_library": source_validation_library,
             "source_validation_input_inventory": source_validation_inputs,
             "source_config_inventory": config_inventory,
+            "source_recovery_checkpoint": source_recovery_evidence,
+            "runtime_recovery_checkpoint": runtime_recovery_evidence,
             "caption_overlay_root": (
                 str(args.caption_overlay_root) if args.caption_overlay_root else None
             ),

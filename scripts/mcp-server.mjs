@@ -924,6 +924,23 @@ const jobTransitions = {
   cancelled: new Set(),
 };
 
+function trainingAuthorizationBinding(row, metadata = null) {
+  const bound = metadata || JSON.parse(row.metadata_json || "{}");
+  const target = String(bound.target || "").trim();
+  const revisionFingerprint = String(bound.revision_fingerprint || "").trim();
+  if (!target) throw new Error("training authorization metadata requires target");
+  if (!/^[A-Fa-f0-9]{64}$/.test(revisionFingerprint)) {
+    throw new Error("training authorization metadata requires revision_fingerprint");
+  }
+  if (bound.recovery_checkpoint &&
+      !/^[A-Fa-f0-9]{64}$/.test(String(bound.recovery_checkpoint_revision_sha256 || ""))) {
+    throw new Error(
+      "checkpoint-resume authorization requires recovery_checkpoint_revision_sha256",
+    );
+  }
+  return { target, revision_fingerprint: revisionFingerprint };
+}
+
 function createJob(args) {
   const jobId = id("job");
   const createdAt = now();
@@ -962,6 +979,24 @@ function updateJobStatus(args) {
   } else if (args.state !== row.state && !jobTransitions[row.state]?.has(args.state)) {
     throw new Error(`invalid job transition: ${row.state} -> ${args.state}`);
   }
+  const currentMetadata = JSON.parse(row.metadata_json || "{}");
+  const nextMetadata = { ...currentMetadata, ...(args.metadata || {}) };
+  if (row.kind === "training" && args.state === "authorized") {
+    trainingAuthorizationBinding(row, nextMetadata);
+  }
+  if (row.kind === "training" && row.authorization_state === "recorded") {
+    const currentBinding = trainingAuthorizationBinding(row, currentMetadata);
+    const nextBinding = trainingAuthorizationBinding(row, nextMetadata);
+    if (currentBinding.target !== nextBinding.target ||
+        currentBinding.revision_fingerprint !== nextBinding.revision_fingerprint) {
+      throw new Error("recorded training authorization binding is immutable");
+    }
+    if (currentMetadata.recovery_checkpoint_revision_sha256 &&
+        nextMetadata.recovery_checkpoint_revision_sha256 !==
+          currentMetadata.recovery_checkpoint_revision_sha256) {
+      throw new Error("recorded recovery checkpoint binding is immutable");
+    }
+  }
   let authorizationState = row.authorization_state;
   let authorizationEvidence = row.authorization_evidence;
   if (args.state === "authorized") {
@@ -981,7 +1016,7 @@ function updateJobStatus(args) {
     now(),
     authorizationState,
     authorizationEvidence,
-    json({ ...JSON.parse(row.metadata_json), ...(args.metadata || {}) }),
+    json(nextMetadata),
     args.job_id,
   );
   audit("transition", "job", args.job_id, args.state, {
@@ -1456,8 +1491,12 @@ function loraAutomation(args) {
       ["authorized", "queued"],
     );
     const metadata = JSON.parse(authorizationJob.metadata_json || "{}");
-    if (metadata.target && metadata.target !== args.job_id) {
+    const binding = trainingAuthorizationBinding(authorizationJob, metadata);
+    if (binding.target !== args.job_id) {
       throw new Error("training authorization target does not match scheduler target");
+    }
+    if (binding.revision_fingerprint !== args.revision_fingerprint) {
+      throw new Error("training authorization fingerprint does not match scheduler fingerprint");
     }
   }
   const operationArgs = { ...args };
@@ -1568,6 +1607,20 @@ function importDelegatedJob(context, expectedJobId, options = {}) {
     authorization_evidence: existing.authorization_evidence,
     metadata: { ...(context.metadata || {}), ...existingMetadata },
   } : context;
+  if (importedContext.kind === "training" &&
+      importedContext.authorization_state === "recorded") {
+    const importedBinding = trainingAuthorizationBinding(
+      { metadata_json: json(importedContext.metadata) },
+      importedContext.metadata,
+    );
+    if (existing?.kind === "training" && existing.authorization_state === "recorded") {
+      const existingBinding = trainingAuthorizationBinding(existing, existingMetadata);
+      if (existingBinding.target !== importedBinding.target ||
+          existingBinding.revision_fingerprint !== importedBinding.revision_fingerprint) {
+        throw new Error("delegated training authorization binding conflicts with local record");
+      }
+    }
+  }
   const values = [
     importedContext.created_at || now(), importedContext.updated_at || now(), importedContext.creator,
     importedContext.assignee || config.node_id, importedContext.kind,
@@ -2180,6 +2233,53 @@ function activeRuntimeConfig() {
   return JSON.parse(fs.readFileSync(runtimeConfigPath, "utf8"));
 }
 
+function trainerCheckpointStatus(checkpointPath, preserved) {
+  const name = path.basename(checkpointPath);
+  const match = /^checkpoint-(\d+)$/.exec(name);
+  const expectedStep = match ? Number(match[1]) : null;
+  const required = [
+    "pytorch_lora_weights.safetensors",
+    "optimizer.bin",
+    "scheduler.bin",
+    "training_state.json",
+  ];
+  const problems = [];
+  for (const fileName of required) {
+    const filePath = path.join(checkpointPath, fileName);
+    if (!fs.existsSync(filePath)) {
+      problems.push(`missing_required_file:${fileName}`);
+      continue;
+    }
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile()) problems.push(`required_path_not_regular_file:${fileName}`);
+    else if (stat.size <= 0) problems.push(`required_file_empty:${fileName}`);
+  }
+  let globalStep = null;
+  const statePath = path.join(checkpointPath, "training_state.json");
+  if (!problems.some((problem) => problem.endsWith(":training_state.json"))) {
+    try {
+      const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+      globalStep = state?.global_step;
+      if (!Number.isSafeInteger(globalStep) || globalStep < 1) {
+        problems.push("training_state_global_step_invalid");
+      } else if (globalStep !== expectedStep) {
+        problems.push("checkpoint_basename_global_step_mismatch");
+      }
+    } catch {
+      problems.push("training_state_json_invalid");
+    }
+  }
+  return {
+    name,
+    path: checkpointPath,
+    preserved,
+    step: expectedStep,
+    global_step: Number.isSafeInteger(globalStep) ? globalStep : null,
+    complete: problems.length === 0,
+    problems,
+  };
+}
+
 function trainerRunStatus() {
   const runtimeConfig = activeRuntimeConfig();
   const effectiveTraining = runtimeConfig?.training || config.training;
@@ -2267,22 +2367,16 @@ function trainerRunStatus() {
   if (currentJob?.output_dir && fs.existsSync(currentJob.output_dir)) {
     for (const entry of fs.readdirSync(currentJob.output_dir, { withFileTypes: true })) {
       if (entry.isDirectory() && entry.name.startsWith("checkpoint-")) {
-        checkpoints.push({
-          name: entry.name,
-          path: path.join(currentJob.output_dir, entry.name),
-          preserved: false,
-        });
+        const checkpointPath = path.join(currentJob.output_dir, entry.name);
+        checkpoints.push(trainerCheckpointStatus(checkpointPath, false));
       }
     }
     const preservedRoot = path.join(currentJob.output_dir, "PRESERVED_CHECKPOINTS");
     if (fs.existsSync(preservedRoot)) {
       for (const entry of fs.readdirSync(preservedRoot, { withFileTypes: true })) {
         if (entry.isDirectory() && entry.name.startsWith("checkpoint-")) {
-          checkpoints.push({
-            name: entry.name,
-            path: path.join(preservedRoot, entry.name),
-            preserved: true,
-          });
+          const checkpointPath = path.join(preservedRoot, entry.name);
+          checkpoints.push(trainerCheckpointStatus(checkpointPath, true));
         }
       }
     }
@@ -2428,6 +2522,20 @@ function trainerStartAuthorizedJob(args) {
   if (!args.expected_revision_fingerprint) {
     throw new Error("trainer start requires expected_revision_fingerprint");
   }
+  const binding = trainingAuthorizationBinding(job);
+  if (binding.target !== args.target) {
+    throw new Error("trainer start target does not match recorded authorization");
+  }
+  if (binding.revision_fingerprint !== args.expected_revision_fingerprint) {
+    throw new Error("trainer start fingerprint does not match recorded authorization");
+  }
+  const schedulerJobsPath = config.lora_automation?.scheduler_jobs_path;
+  if (schedulerJobsPath && fs.existsSync(path.resolve(schedulerJobsPath))) {
+    const scheduler = JSON.parse(fs.readFileSync(path.resolve(schedulerJobsPath), "utf8"));
+    if ((scheduler.jobs || []).some((entry) => entry.target === args.target)) {
+      throw new Error("queued SimpleTuner targets must be launched by the scheduler");
+    }
+  }
   if (job.state === "authorized") {
     updateJobStatus({ job_id: job.id, state: "queued" });
   }
@@ -2475,6 +2583,10 @@ function trainerQueueControlScript(args) {
 function trainerStopAuthorizedJob(args) {
   if (args._delegated_job) importDelegatedJob(args._delegated_job, args.job_id);
   const job = requireTrackedJob(args.job_id, "training", ["running", "cancel_requested"]);
+  const binding = trainingAuthorizationBinding(job);
+  if (binding.target !== args.target) {
+    throw new Error("trainer stop target does not match recorded authorization");
+  }
   if (job.state === "running") updateJobStatus({ job_id: job.id, state: "cancel_requested" });
   const result = runConfiguredScript(
     "stop_script", "allow_stop", { ...args, _delegated_job: null }, "training", ["cancel_requested"],
@@ -3671,7 +3783,7 @@ const coreTools = [
     description: "Start an exact preconfigured training target when training.allow_start is enabled; readiness and revision checks still apply.",
     inputSchema: {
       type: "object",
-      required: ["job_id"],
+      required: ["job_id", "target", "expected_revision_fingerprint"],
       properties: {
         job_id: { type: "string" },
         target: { type: "string" },
@@ -3694,7 +3806,7 @@ const coreTools = [
     description: "Stop only the exact adapter-managed training target when training.allow_stop is enabled.",
     inputSchema: {
       type: "object",
-      required: ["job_id"],
+      required: ["job_id", "target"],
       properties: {
         job_id: { type: "string" },
         target: { type: "string" },
@@ -3716,7 +3828,7 @@ const coreTools = [
     description: "Package an exact completed training target when training.allow_package is enabled.",
     inputSchema: {
       type: "object",
-      required: ["job_id"],
+      required: ["job_id", "target", "expected_revision_fingerprint"],
       properties: {
         job_id: { type: "string" },
         target: { type: "string" },

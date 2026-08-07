@@ -63,10 +63,27 @@ function request(method, params = {}) {
 const tool = (name, args = {}) => request("tools/call", { name, arguments: args });
 await request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
 
+const missingBinding = await tool("create_job", {
+  kind: "training",
+  title: "Missing exact authorization binding",
+  requires_authorization: true,
+});
+const refusedMissingBinding = await tool("update_job_status", {
+  job_id: missingBinding.result.structuredContent.job_id,
+  state: "authorized",
+  authorization_evidence: "A general instruction is not an exact revision binding.",
+});
+assert.equal(refusedMissingBinding.result.isError, true);
+assert.match(refusedMissingBinding.result.content[0].text, /requires target/);
+
 const created = await tool("create_job", {
   kind: "training",
   title: "State gate",
   requires_authorization: true,
+  metadata: {
+    target: "robot-test",
+    revision_fingerprint: "a".repeat(64),
+  },
 });
 const jobId = created.result.structuredContent.job_id;
 const refused = await tool("trainer_start_authorized_job", {
@@ -77,11 +94,20 @@ assert.equal(refused.result.isError, true);
 assert.match(refused.result.content[0].text, /state awaiting_authorization is not allowed/);
 assert.equal(fs.existsSync(invocationLog), false);
 
-await tool("update_job_status", {
+const authorized = await tool("update_job_status", {
   job_id: jobId,
   state: "authorized",
   authorization_evidence: "Active user instruction for this bounded test.",
 });
+assert.equal(authorized.result.isError, false);
+const refusedBindingMutation = await tool("update_job_status", {
+  job_id: jobId,
+  state: "authorized",
+  authorization_evidence: "Must not replace an existing exact binding.",
+  metadata: { revision_fingerprint: "b".repeat(64) },
+});
+assert.equal(refusedBindingMutation.result.isError, true);
+assert.match(refusedBindingMutation.result.content[0].text, /binding is immutable/);
 const unboundStart = await tool("trainer_start_authorized_job", {
   job_id: jobId,
   target: "robot-test",
@@ -89,6 +115,13 @@ const unboundStart = await tool("trainer_start_authorized_job", {
 assert.equal(unboundStart.result.isError, true);
 assert.match(unboundStart.result.content[0].text, /expected_revision_fingerprint/);
 assert.equal(fs.existsSync(invocationLog), false);
+const mismatchedStart = await tool("trainer_start_authorized_job", {
+  job_id: jobId,
+  target: "robot-test",
+  expected_revision_fingerprint: "b".repeat(64),
+});
+assert.equal(mismatchedStart.result.isError, true);
+assert.match(mismatchedStart.result.content[0].text, /does not match recorded authorization/);
 const started = await tool("trainer_start_authorized_job", {
   job_id: jobId,
   target: "robot-test",

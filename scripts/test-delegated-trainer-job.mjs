@@ -165,7 +165,10 @@ const context = {
   state: "authorized",
   authorization_state: "recorded",
   authorization_evidence: "Active user instruction.",
-  metadata: { target: "robot-test" },
+  metadata: {
+    target: "robot-test",
+    revision_fingerprint: "a".repeat(64),
+  },
 };
 
 const started = await tool("trainer_start_authorized_job", {
@@ -179,6 +182,21 @@ assert.match(fs.readFileSync(invocationLog, "utf8"), new RegExp(`--job-id ${jobI
 let jobs = await tool("list_jobs");
 assert.equal(jobs.result.structuredContent[0].id, jobId);
 assert.equal(jobs.result.structuredContent[0].creator, "controller-test");
+
+const refusedDelegatedBindingDrift = await tool("trainer_stop_authorized_job", {
+  job_id: jobId,
+  target: "robot-test",
+  _delegated_job: {
+    ...context,
+    state: "running",
+    metadata: {
+      ...context.metadata,
+      revision_fingerprint: "b".repeat(64),
+    },
+  },
+});
+assert.equal(refusedDelegatedBindingDrift.result.isError, true);
+assert.match(refusedDelegatedBindingDrift.result.content[0].text, /conflicts with local record/);
 
 const stopped = await tool("trainer_stop_authorized_job", {
   job_id: jobId,
@@ -240,13 +258,19 @@ const resumedEligibility = await tool("trainer_queue_control", {
 });
 assert.equal(resumedEligibility.result.isError, false, resumedEligibility.result.content?.[0]?.text);
 assert.equal(resumedEligibility.result.structuredContent.authorization_job_id, jobId);
-const resumed = await tool("trainer_start_authorized_job", {
+const refusedSchedulerBypass = await tool("trainer_start_authorized_job", {
   job_id: jobId,
   target: "robot-test",
   expected_revision_fingerprint: "a".repeat(64),
 });
-assert.equal(resumed.result.isError, false, resumed.result.content?.[0]?.text);
-assert.match(fs.readFileSync(invocationLog, "utf8"), /--expected-revision-fingerprint a{64}/);
+assert.equal(refusedSchedulerBypass.result.isError, true);
+assert.match(refusedSchedulerBypass.result.content[0].text, /launched by the scheduler/);
+fs.writeFileSync(activeMarker, "scheduler-launched\n");
+await tool("update_job_status", {
+  job_id: jobId,
+  state: "running",
+  metadata: { phase: "training" },
+});
 jobs = await tool("list_jobs", { job_id: jobId });
 assert.equal(jobs.result.structuredContent[0].state, "running");
 

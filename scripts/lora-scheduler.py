@@ -71,7 +71,12 @@ def training_active(process_match: str) -> bool:
     )
 
 
-def durable_job(database_path: pathlib.Path, job_id: str, target: str) -> tuple[dict | None, str | None]:
+def durable_job(
+    database_path: pathlib.Path,
+    job_id: str,
+    target: str,
+    revision_fingerprint: str,
+) -> tuple[dict | None, str | None]:
     if not database_path.exists():
         return None, "durable job database is missing"
     database = sqlite3.connect(database_path, timeout=5)
@@ -90,12 +95,19 @@ def durable_job(database_path: pathlib.Path, job_id: str, target: str) -> tuple[
     if job["state"] not in {"authorized", "queued"}:
         return job, f"durable job state {job['state']} is not eligible"
     metadata = json.loads(job.get("metadata_json") or "{}")
-    if metadata.get("target") and metadata["target"] != target:
+    if metadata.get("target") != target:
         return job, "durable job target does not match scheduler target"
+    if metadata.get("revision_fingerprint") != revision_fingerprint:
+        return job, "durable job fingerprint does not match scheduler fingerprint"
     return job, None
 
 
-def mark_durable_job_running(database_path: pathlib.Path, job_id: str, target: str) -> None:
+def mark_durable_job_running(
+    database_path: pathlib.Path,
+    job_id: str,
+    target: str,
+    revision_fingerprint: str,
+) -> None:
     database = sqlite3.connect(database_path, timeout=5)
     try:
         database.execute("PRAGMA busy_timeout = 5000")
@@ -106,6 +118,10 @@ def mark_durable_job_running(database_path: pathlib.Path, job_id: str, target: s
         if row is None or row[0] not in {"authorized", "queued"}:
             raise RuntimeError("durable training job changed before launch completion")
         metadata = json.loads(row[1] or "{}")
+        if metadata.get("target") != target:
+            raise RuntimeError("durable training target changed during scheduler launch")
+        if metadata.get("revision_fingerprint") != revision_fingerprint:
+            raise RuntimeError("durable training fingerprint changed during scheduler launch")
         metadata.update({"target": target, "phase": "training"})
         timestamp = now()
         database.execute(
@@ -220,7 +236,12 @@ def main() -> int:
                     for value in (target, authorization_job_id, revision_fingerprint)
                 ):
                     continue
-                _, authorization_error = durable_job(database_path, authorization_job_id, target)
+                _, authorization_error = durable_job(
+                    database_path,
+                    authorization_job_id,
+                    target,
+                    revision_fingerprint,
+                )
                 if authorization_error:
                     record["state"] = "invalid-authorization"
                     record["phase"] = "admission-rejected"
@@ -290,7 +311,12 @@ def main() -> int:
         state["current"] = job["target"] if result.returncode == 0 else None
         state["decision"] = record["state"]
     if result.returncode == 0:
-        mark_durable_job_running(database_path, job["authorization_job_id"], job["target"])
+        mark_durable_job_running(
+            database_path,
+            job["authorization_job_id"],
+            job["target"],
+            job["revision_fingerprint"],
+        )
     return result.returncode
 
 

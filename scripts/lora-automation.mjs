@@ -161,23 +161,117 @@ function fileSetRevisionSha256(root, filePaths) {
 
 function checkpointEvidence(checkpointPath) {
   const target = path.resolve(checkpointPath);
+  const checkpointName = path.basename(target);
+  const checkpointMatch = checkpointName.match(/^checkpoint-(\d+)$/);
   const required = [
     "pytorch_lora_weights.safetensors",
     "optimizer.bin",
     "scheduler.bin",
     "training_state.json",
   ];
-  const missing = required.filter((name) =>
-    !fs.existsSync(path.join(target, name)));
+  const exists = fs.existsSync(target) && fs.lstatSync(target).isDirectory();
+  const files = {};
+  const problems = [];
+  if (!exists) problems.push("checkpoint_directory_missing_or_not_regular");
+  if (!checkpointMatch) problems.push("checkpoint_basename_must_be_checkpoint_N");
+  if (exists) {
+    for (const name of required) {
+      const filePath = path.join(target, name);
+      if (!fs.existsSync(filePath)) {
+        problems.push(`missing_required_file:${name}`);
+        continue;
+      }
+      const stat = fs.lstatSync(filePath);
+      if (!stat.isFile()) {
+        problems.push(`required_path_not_regular_file:${name}`);
+        continue;
+      }
+      if (stat.size <= 0) {
+        problems.push(`required_file_empty:${name}`);
+        continue;
+      }
+      files[name] = {
+        path: filePath,
+        size_bytes: stat.size,
+        sha256: sha256(filePath),
+      };
+    }
+  }
+  let trainingState = null;
+  if (files["training_state.json"]) {
+    try {
+      trainingState = JSON.parse(fs.readFileSync(files["training_state.json"].path, "utf8"));
+      if (!trainingState || typeof trainingState !== "object" || Array.isArray(trainingState)) {
+        problems.push("training_state_json_must_be_an_object");
+      }
+    } catch {
+      problems.push("training_state_json_invalid");
+    }
+  }
+  const expectedStep = checkpointMatch ? Number(checkpointMatch[1]) : null;
+  const globalStep = trainingState?.global_step;
+  if (trainingState && (!Number.isSafeInteger(globalStep) || globalStep < 1)) {
+    problems.push("training_state_global_step_invalid");
+  } else if (trainingState && expectedStep !== null && globalStep !== expectedStep) {
+    problems.push("checkpoint_basename_global_step_mismatch");
+  }
+  const complete = problems.length === 0;
   return {
     path: target,
-    exists: fs.existsSync(target) && fs.statSync(target).isDirectory(),
-    complete: missing.length === 0,
-    missing,
-    bytes: fs.existsSync(target) ? directoryBytes(target) : 0,
-    revision_sha256: missing.length === 0
+    checkpoint_name: checkpointName,
+    step: expectedStep,
+    global_step: Number.isSafeInteger(globalStep) && globalStep > 0 ? globalStep : null,
+    exists,
+    complete,
+    missing: problems.filter((problem) => problem.startsWith("missing_required_file:"))
+      .map((problem) => problem.slice("missing_required_file:".length)),
+    problems,
+    required_files: files,
+    bytes: exists ? directoryBytes(target) : 0,
+    revision_sha256: complete
       ? directoryRevisionSha256(target)
       : null,
+  };
+}
+
+function pathWithin(candidate, root) {
+  return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+
+function canonicalPath(candidate) {
+  const resolved = path.resolve(candidate);
+  return fs.existsSync(resolved) ? fs.realpathSync(resolved) : resolved;
+}
+
+function recoveryCheckpointProvenance(checkpointPath, sourceJob) {
+  const checkpoint = canonicalPath(checkpointPath);
+  const sourceOutput = canonicalPath(sourceJob.output_dir);
+  const configuredPreservation = automation.preservation_root
+    ? canonicalPath(path.join(
+        automation.preservation_root,
+        path.basename(sourceOutput),
+        "PRESERVED_CHECKPOINTS",
+      ))
+    : null;
+  const roots = [
+    { kind: "source_output", path: sourceOutput },
+    ...(configuredPreservation
+      ? [{ kind: "source_job_preservation_root", path: configuredPreservation }]
+      : []),
+  ];
+  const matched = roots.find((root) => pathWithin(checkpoint, root.path));
+  if (!matched) {
+    throw new Error(
+      "recovery checkpoint must be under the source job output or configured preservation root",
+    );
+  }
+  return {
+    source_job_id: sourceJob.job_id,
+    source_checkpoint_path: checkpoint,
+    source_output_root: sourceOutput,
+    configured_preservation_root: configuredPreservation,
+    matched_root_kind: matched.kind,
+    matched_root_path: matched.path,
   };
 }
 
@@ -824,6 +918,7 @@ function prepareVersionedJob(args) {
     : null;
   let recoveryCheckpoint = null;
   let stagedRecoveryCheckpoint = null;
+  let recoveryProvenance = null;
   if (requestedRecoveryCheckpoint) {
     recoveryCheckpoint = checkpointEvidence(requestedRecoveryCheckpoint);
     if (!recoveryCheckpoint.complete) {
@@ -831,6 +926,13 @@ function prepareVersionedJob(args) {
         `recovery checkpoint is incomplete: ${JSON.stringify(recoveryCheckpoint)}`,
       );
     }
+    recoveryProvenance = {
+      ...recoveryCheckpointProvenance(requestedRecoveryCheckpoint, sourceJob),
+      checkpoint_name: recoveryCheckpoint.checkpoint_name,
+      step: recoveryCheckpoint.step,
+      global_step: recoveryCheckpoint.global_step,
+      revision_sha256: recoveryCheckpoint.revision_sha256,
+    };
     stagedRecoveryCheckpoint = path.join(
       targetOutputDir,
       path.basename(requestedRecoveryCheckpoint),
@@ -846,7 +948,8 @@ function prepareVersionedJob(args) {
         }
       } else {
         fs.mkdirSync(targetOutputDir, { recursive: true });
-        const temporary = `${stagedRecoveryCheckpoint}.tmp-${process.pid}`;
+        const temporaryRoot = fs.mkdtempSync(path.join(targetOutputDir, ".checkpoint-stage-"));
+        const temporary = path.join(temporaryRoot, path.basename(stagedRecoveryCheckpoint));
         try {
           fs.cpSync(requestedRecoveryCheckpoint, temporary, {
             recursive: true,
@@ -860,8 +963,9 @@ function prepareVersionedJob(args) {
           }
           fs.renameSync(temporary, stagedRecoveryCheckpoint);
         } catch (error) {
-          fs.rmSync(temporary, { recursive: true, force: true });
           throw error;
+        } finally {
+          fs.rmSync(temporaryRoot, { recursive: true, force: true });
         }
       }
     }
@@ -947,6 +1051,7 @@ function prepareVersionedJob(args) {
     staged_recovery_checkpoint: stagedRecoveryCheckpoint,
     recovery_checkpoint_revision_sha256:
       recoveryCheckpoint?.revision_sha256 || null,
+    recovery_checkpoint_provenance: recoveryProvenance,
   };
   const {
     hawkspan_revision: _sourceHawkSpanRevision,
@@ -1002,6 +1107,7 @@ function prepareVersionedJob(args) {
     target_job: targetJob,
     files: Object.keys(proposed),
     recovery_checkpoint: recoveryCheckpoint,
+    recovery_checkpoint_provenance: recoveryProvenance,
     staged_recovery_checkpoint: stagedRecoveryCheckpoint,
     training_started: false,
   };
@@ -2146,24 +2252,7 @@ function recoveryPlan(jobId = null) {
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
       if (!entry.isDirectory() || !/^checkpoint-\d+$/.test(entry.name)) continue;
       const checkpointPath = path.join(root, entry.name);
-      const statePath = path.join(checkpointPath, "training_state.json");
-      const state = readJson(statePath, {});
-      const required = [
-        "pytorch_lora_weights.safetensors",
-        "optimizer.bin",
-        "scheduler.bin",
-        "training_state.json",
-      ];
-      const missing = required.filter((name) =>
-        !fs.existsSync(path.join(checkpointPath, name)));
-      candidates.push({
-        path: checkpointPath,
-        step: Number(entry.name.slice("checkpoint-".length)),
-        global_step: Number(state.global_step || 0),
-        complete: missing.length === 0,
-        missing,
-        bytes: directoryBytes(checkpointPath),
-      });
+      candidates.push(checkpointEvidence(checkpointPath));
     }
   }
   candidates.sort((a, b) => b.step - a.step);
