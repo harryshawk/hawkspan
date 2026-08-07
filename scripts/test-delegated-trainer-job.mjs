@@ -120,6 +120,13 @@ fs.writeFileSync(schedulerJobs, `${JSON.stringify({
     priority: 20,
   }],
 }, null, 2)}\n`);
+const refusedReadyQueuedResume = await tool("trainer_queue_control", {
+  action: "resume-job",
+  target: "queued-pause-test",
+  reason: "must not resume an already-ready queued job",
+});
+assert.equal(refusedReadyQueuedResume.result.isError, true);
+assert.match(refusedReadyQueuedResume.result.content[0].text, /job state queued is not allowed/);
 const pausedQueuedJob = await tool("trainer_queue_control", {
   action: "pause-job",
   target: "queued-pause-test",
@@ -137,6 +144,13 @@ const queuedPauseState = JSON.parse(fs.readFileSync(schedulerState, "utf8"));
 assert.equal(queuedPauseState.jobs["queue-queued-pause-test"].state, "queued");
 let queuedPauseJobs = await tool("list_jobs", { job_id: queuedPauseJobId });
 assert.equal(queuedPauseJobs.result.structuredContent[0].state, "queued");
+const refusedSecondQueuedResume = await tool("trainer_queue_control", {
+  action: "resume-job",
+  target: "queued-pause-test",
+  reason: "must not resume twice",
+});
+assert.equal(refusedSecondQueuedResume.result.isError, true);
+assert.match(refusedSecondQueuedResume.result.content[0].text, /job state queued is not allowed/);
 
 const jobId = "job-delegated-training-test";
 const context = {

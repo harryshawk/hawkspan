@@ -7,7 +7,11 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { auditLocalRelease } from "./audit-release-authority.mjs";
-import { readHawkspanEnv, writeHawkspanEnv } from "./hawkspan-env.mjs";
+import {
+  HAWKSPAN_OPERATIONAL_ENV_DEFAULTS,
+  readHawkspanEnv,
+  writeHawkspanEnv,
+} from "./hawkspan-env.mjs";
 import { readReleaseAuthority, validateLiveReleaseConfiguration } from "./release-authority.mjs";
 
 const sourceRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -183,13 +187,11 @@ assert.equal(fs.readlinkSync(authority.stable_release_root), stableTargetBeforeP
 
 const envValues = readHawkspanEnv(path.join(stateRoot, "hawkspan.env"));
 assert.equal(envValues.HAWKSPAN_ACTIVE_RELEASE_ROOT, resolvedReleaseRoot);
-assert.equal(envValues.HAWKSPAN_LINK_OPERATION_RETRY_DELAYS_MS, "2000,5000,10000,20000");
-assert.equal(envValues.HAWKSPAN_LINK_OPERATION_ATTEMPT_TIMEOUT_MS, "15000");
+for (const [name, value] of Object.entries(HAWKSPAN_OPERATIONAL_ENV_DEFAULTS)) {
+  const expected = name === "HAWKSPAN_LINK_CONNECT_TIMEOUT_MS" ? "7000" : value;
+  assert.equal(envValues[name], expected, `activation must materialize ${name}`);
+}
 assert.equal(envValues.HAWKSPAN_LINK_CONNECT_TIMEOUT_MS, "7000");
-assert.equal(envValues.HAWKSPAN_LINK_CYCLE_TIMEOUT_MS, "120000");
-assert.equal(envValues.HAWKSPAN_LINK_SERVER_ALIVE_INTERVAL_SECONDS, "15");
-assert.equal(envValues.HAWKSPAN_LINK_SERVER_ALIVE_COUNT_MAX, "3");
-assert.equal(envValues.HAWKSPAN_LINK_PRIMARY_REPROBE_MS, "60000");
 assert.equal(Object.hasOwn(envValues, "HAWKSPAN_PLUGIN_ROOT"), false);
 assert.equal(Object.hasOwn(envValues, "HAWKSPAN_REMOTE_PLUGIN_ROOT"), false);
 assert.equal(Object.hasOwn(envValues, "HAWKSPAN_REMOTE_CALL_TOOL"), false);

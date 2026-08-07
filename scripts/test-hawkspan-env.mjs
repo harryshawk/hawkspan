@@ -5,8 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  applyHawkspanEnv, minimalChildEnvironment, parseHawkspanEnv, readHawkspanEnv,
-  writeHawkspanEnv,
+  applyHawkspanEnv, HAWKSPAN_OPERATIONAL_ENV_DEFAULTS, minimalChildEnvironment,
+  parseHawkspanEnv, readHawkspanEnv, writeHawkspanEnv,
 } from "./hawkspan-env.mjs";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "hawkspan-env-"));
@@ -108,6 +108,9 @@ const example = parseHawkspanEnv(fs.readFileSync(
   "utf8",
 ));
 assert.equal(example.HAWKSPAN_REMOTE_STATE_DIR, "/Users/peeruser/.hawkspan");
+for (const [name, value] of Object.entries(HAWKSPAN_OPERATIONAL_ENV_DEFAULTS)) {
+  assert.equal(example[name], value, `example must contain operational default ${name}`);
+}
 assert.equal(Object.hasOwn(example, "HAWKSPAN_REMOTE_PLUGIN_ROOT"), false);
 assert.equal(Object.hasOwn(example, "HAWKSPAN_REMOTE_CALL_TOOL"), false);
 
