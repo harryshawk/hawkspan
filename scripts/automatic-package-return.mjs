@@ -178,6 +178,7 @@ function confirmReceipt(pending, receiverReceipt) {
       state: nextDurableState,
       metadata: {
         phase: terminal ? "receipt-confirmed" : "awaiting-validation",
+        packet: pending.packet_path,
         packet_path: pending.packet_path,
         packet_sha256: pending.sha256,
         package_return_artifact_id: pending.artifact_id,

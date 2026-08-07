@@ -255,6 +255,7 @@ const replacementUpdate = fs.readFileSync(fakeLog, "utf8").trim().split("\n")
   .at(-1);
 const replacementUpdateArgs = JSON.parse(replacementUpdate.slice("update_job_status ".length));
 assert.equal(replacementUpdateArgs.state, "completed");
+assert.equal(replacementUpdateArgs.metadata.packet, replacementPacket);
 assert.equal(replacementUpdateArgs.metadata.packet_path, replacementPacket);
 assert.equal(replacementUpdateArgs.metadata.packet_sha256, replacementSha256);
 assert.equal(replacementUpdateArgs.metadata.package_return_artifact_id, "artifact-test");
