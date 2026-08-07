@@ -5,8 +5,10 @@
 - Request: Exercise multiple real 100-step LoRA plus ControlNet jobs and queue
   controls through HawkSpan.
 - Source branch: `fix/atomic-upgrade`, based on public `v0.3.1`.
-- Runtime implementation commits: candidate history through `7d9221a`, plus
-  the pending two-stage package lifecycle commit.
+- Runtime implementation commits: candidate history through `7d9221a` and
+  two-stage package lifecycle commit `a7cdf05`.
+- Staging repository and branch: `harryshawk/hawkspan-clean-staging`,
+  `hawkspan-v0.3.2-staging`.
 - Scope: Validate durable training jobs at admission and launch, permit queued
   admission while a trainer is active, reject duplicate targets, and report a
   successful launch as running rather than finished.
@@ -14,8 +16,9 @@
   return, and managed-runner tests pass. The real R20 training run remains on
   installed public v0.3.1 until training stops; its old runner cannot complete
   the newly specified two-stage validation lifecycle. The 0.3.2 candidate has
-  not been installed or published.
-- Production update: Pending real M2/M4 acceptance and explicit approval.
+  not yet been installed.
+- Production update: Explicitly approved in the controlling Codex task after
+  the complete 28-test source gate and independent lifecycle review passed.
 
 ## 2026-08-06 - HawkSpan 0.3.1 upgrade repair
 
