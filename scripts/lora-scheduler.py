@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import re
+import sqlite3
 import subprocess
 import sys
 
@@ -54,8 +55,59 @@ def training_active(process_match: str) -> bool:
     )
 
 
+def durable_job(database_path: pathlib.Path, job_id: str, target: str) -> tuple[dict | None, str | None]:
+    if not database_path.exists():
+        return None, "durable job database is missing"
+    database = sqlite3.connect(database_path, timeout=5)
+    database.row_factory = sqlite3.Row
+    try:
+        row = database.execute(
+            "SELECT id,kind,state,metadata_json FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()
+    finally:
+        database.close()
+    if row is None:
+        return None, "durable authorization job is missing"
+    job = dict(row)
+    if job["kind"] != "training":
+        return job, "durable job kind must be training"
+    if job["state"] not in {"authorized", "queued"}:
+        return job, f"durable job state {job['state']} is not eligible"
+    metadata = json.loads(job.get("metadata_json") or "{}")
+    if metadata.get("target") and metadata["target"] != target:
+        return job, "durable job target does not match scheduler target"
+    return job, None
+
+
+def mark_durable_job_running(database_path: pathlib.Path, job_id: str, target: str) -> None:
+    database = sqlite3.connect(database_path, timeout=5)
+    try:
+        database.execute("PRAGMA busy_timeout = 5000")
+        database.execute("BEGIN IMMEDIATE")
+        row = database.execute(
+            "SELECT state,metadata_json FROM jobs WHERE id=? AND kind='training'", (job_id,)
+        ).fetchone()
+        if row is None or row[0] not in {"authorized", "queued"}:
+            raise RuntimeError("durable training job changed before launch completion")
+        metadata = json.loads(row[1] or "{}")
+        metadata.update({"target": target, "phase": "training"})
+        timestamp = now()
+        database.execute(
+            "UPDATE jobs SET state='running',updated_at=?,metadata_json=? WHERE id=?",
+            (timestamp, json.dumps(metadata, sort_keys=True), job_id),
+        )
+        database.execute("COMMIT")
+    except Exception:
+        database.execute("ROLLBACK")
+        raise
+    finally:
+        database.close()
+
+
 def main() -> int:
     selected_config_path = CONFIG
+    state_root = pathlib.Path(os.environ.get("HAWKSPAN_STATE_DIR", selected_config_path.parent))
+    database_path = state_root / "spool.sqlite3"
     base_config = load(selected_config_path, {})
     config = base_config
     pointer_path = pathlib.Path(
@@ -125,7 +177,7 @@ def main() -> int:
             candidates = []
             for candidate_job in jobs_doc.get("jobs", []):
                 candidate_id = candidate_job.get("job_id")
-                record = state["jobs"].get(candidate_id, {})
+                record = state["jobs"].setdefault(candidate_id, {})
                 if record.get("state") in {"running", "returning", "completed"}:
                     continue
                 target = candidate_job.get("target")
@@ -149,6 +201,13 @@ def main() -> int:
                     isinstance(value, str) and safe.fullmatch(value)
                     for value in (target, authorization_job_id, revision_fingerprint)
                 ):
+                    continue
+                _, authorization_error = durable_job(database_path, authorization_job_id, target)
+                if authorization_error:
+                    record["state"] = "invalid-authorization"
+                    record["phase"] = "admission-rejected"
+                    record["error"] = authorization_error
+                    record["updated_at"] = now()
                     continue
                 candidates.append((
                     int(candidate_job.get("priority", 1000)), candidate_id, candidate_job,
@@ -199,14 +258,21 @@ def main() -> int:
         "schema_version": 1, "created_at": now(), "jobs": {}, "current": None,
     }) as state:
         record = state["jobs"].setdefault(job_id, {})
-        record["finished_at"] = now()
-        record["exit_code"] = result.returncode
         record["state"] = "running" if result.returncode == 0 else "failed"
         record["phase"] = "training" if result.returncode == 0 else "start-failed"
         record["target"] = job["target"]
         record["revision_fingerprint"] = job["revision_fingerprint"]
+        if result.returncode == 0:
+            record["accepted_at"] = now()
+            record.pop("finished_at", None)
+            record.pop("exit_code", None)
+        else:
+            record["finished_at"] = now()
+            record["exit_code"] = result.returncode
         state["current"] = job["target"] if result.returncode == 0 else None
         state["decision"] = record["state"]
+    if result.returncode == 0:
+        mark_durable_job_running(database_path, job["authorization_job_id"], job["target"])
     return result.returncode
 
 
