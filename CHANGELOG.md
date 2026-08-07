@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 - 2026-08-06
+
+- Migrated explicitly retired environment variables during release activation
+  instead of rejecting legitimate upgrades before migration.
+- Restored the prior environment, configuration, launchd files, stable link,
+  and installed authority when release publication fails.
+
 ## 0.3.0 - 2026-08-06
 
 - Documented standalone HawkSpan operation and the optional Codex Personal

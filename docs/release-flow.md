@@ -1,5 +1,17 @@
 # Release Flow
 
+## 2026-08-06 - HawkSpan 0.3.1 upgrade repair
+
+- Request: Publish the approved release-upgrade migration and rollback repair while preserving `v0.3.0`.
+- Source branch: `fix/atomic-upgrade`, based directly on public `v0.3.0`.
+- Implementation commit: `7862d3b`.
+- Staging repository: `harryshawk/hawkspan-clean-staging`.
+- Production repository and branch: `harryshawk/hawkspan`, `main`.
+- Production tag: `v0.3.1`; existing tags and releases remain unchanged.
+- Verification: The complete 27-test release gate passed. M4 upgraded from active revision `3338a32` through HawkSpan, removed both retired environment entries, reported ready on candidate `7862d3b`, and subsequently launched ChatGPT through HawkSpan `run_command`.
+- Known issue: Long peer commands may be repeated after an outcome-unknown transport timeout; tracked publicly as issue #3 and not introduced by this repair.
+- Production approval: Explicitly granted in the controlling Codex task on 2026-08-06.
+
 ## 2026-08-06 - HawkSpan 0.3.0 candidate
 
 - Request: Document operation with or without the optional Codex Personal plugin and preserve the existing standalone runtime behavior.
