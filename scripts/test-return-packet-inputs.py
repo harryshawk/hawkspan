@@ -54,6 +54,7 @@ with tempfile.TemporaryDirectory() as temporary:
             {
                 "controls_are_relative_to": "dataset",
                 "seed_policy": "Use seed 20260801 for every mapped prompt.",
+                "fixed_settings": {"seeds": [20260801]},
                 "prompts": [
                     {
                         "id": "robot",
@@ -65,35 +66,105 @@ with tempfile.TemporaryDirectory() as temporary:
             }
         )
     )
-    (output / "validation-result.json").write_text(
+    lora = output / "pytorch_lora_weights.safetensors"
+    lora.write_bytes(b"synthetic-lora")
+    lora_sha256 = module.sha256(lora)
+    validation_plan = root / "validation-plan.json"
+    validation_plan.write_text(
         json.dumps(
             {
-                "checkpoint": "final",
-                "score": 8.5,
-                "lora_sha256": "a" * 64,
-                "renders": [
+                "job_id": "output",
+                "lora_path": str(lora),
+                "lora_sha256": lora_sha256,
+                "fixed_settings": {"seeds": [20260801]},
+                "prompts": [
                     {
-                        "prompt_id": "robot",
-                        "seed": 20260801,
-                        "image_path": "render.png",
-                        "live_metadata": {"lora_weight": 0.7},
-                        "score": 8.5,
+                        "id": "robot",
+                        "prompt": "test robot",
+                        "control_image_path": str(conditioning / "robot.png"),
+                        "control_image_sha256": module.sha256(
+                            conditioning / "robot.png"
+                        ),
                     }
                 ],
             }
         )
     )
+    draw_plan = root / "draw-things-plan.json"
+    draw_plan.write_text(
+        json.dumps(
+            {
+                "job_id": "output",
+                "selected_checkpoint": "final",
+                "lora_path": str(lora),
+                "lora_sha256": lora_sha256,
+                "validation_plan_path": str(validation_plan),
+                "validation_plan_sha256": module.sha256(validation_plan),
+                "import": {
+                    "imported_name": "output final",
+                    "expected_base_model": "test-model",
+                },
+            }
+        )
+    )
+    validation_result = {
+        "checkpoint": "final",
+        "score": 8.5,
+        "draw_things_plan_path": str(draw_plan),
+        "draw_things_plan_sha256": module.sha256(draw_plan),
+        "validation_plan_path": str(validation_plan),
+        "validation_plan_sha256": module.sha256(validation_plan),
+        "lora_path": str(lora),
+        "lora_sha256": lora_sha256,
+        "imported_name": "output final",
+        "base_model": "test-model",
+        "settings": {"seeds": [20260801]},
+        "renders": [
+            {
+                "prompt_id": "robot",
+                "seed": 20260801,
+                "image_path": "render.png",
+                "live_metadata": {
+                    "imported_name": "output final",
+                    "lora_weight": 0.7,
+                    "base_model": "test-model",
+                    "control": {
+                        "input_sha256": module.sha256(conditioning / "robot.png"),
+                        "model": "synthetic-controlnet",
+                        "weight": 1.0,
+                        "start": 0.0,
+                        "end": 1.0,
+                    },
+                },
+                "score": 8.5,
+            }
+        ],
+    }
+    result_path = output / "validation-result.json"
+    result_path.write_text(json.dumps(validation_result))
     rendered = module.controlled_validation_samples(
-        output, samples, library, "a" * 64
+        output, samples, library, lora_sha256
     )
     assert len(rendered) == 1
     portable = json.loads((samples / "validation-result.json").read_text())
     assert portable["renders"][0]["image_path"] == (
         "VALIDATION_SAMPLES/robot--seed-20260801.png"
     )
-    evidence_before = module.validation_evidence_sha256(output, "a" * 64)
+    wrong_control = json.loads(result_path.read_text())
+    wrong_control["renders"][0]["live_metadata"]["control"]["input_sha256"] = (
+        "f" * 64
+    )
+    result_path.write_text(json.dumps(wrong_control))
+    try:
+        module.controlled_validation_samples(output, samples, library, lora_sha256)
+    except RuntimeError as error:
+        assert "wrong control input" in str(error)
+    else:
+        raise AssertionError("wrong ControlNet input was accepted")
+    result_path.write_text(json.dumps(validation_result))
+    evidence_before = module.validation_evidence_sha256(output, lora_sha256)
     (output / "render.png").write_bytes(b"changed render")
-    evidence_after = module.validation_evidence_sha256(output, "a" * 64)
+    evidence_after = module.validation_evidence_sha256(output, lora_sha256)
     assert evidence_before != evidence_after
     try:
         module.validation_evidence_sha256(output, "b" * 64)

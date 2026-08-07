@@ -122,6 +122,9 @@ settings, common seed set, actual render files, scores, and live Draw Things
 metadata. Controlled prompts additionally require the exact planned control
 image SHA-256 and the recorded ControlNet model, weight, start, and end values.
 A different but internally valid LoRA, base model, or control input is rejected.
+The validated return-packet builder repeats these checks before copying any
+render evidence, so modifying the intermediate result after ingestion cannot
+produce a validated package.
 
 The dedicated adapters remain useful for repeatable SimpleTuner operations, but
 they are not a restriction on routine coordination. M2 can invoke
