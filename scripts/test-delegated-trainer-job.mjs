@@ -102,6 +102,42 @@ function request(method, params = {}) {
 const tool = (name, args = {}) => request("tools/call", { name, arguments: args });
 await request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
 
+const queuedPauseJob = await tool("create_job", {
+  kind: "training",
+  title: "Queued pause and resume test",
+  metadata: { target: "queued-pause-test" },
+});
+const queuedPauseJobId = queuedPauseJob.result.structuredContent.job_id;
+await tool("update_job_status", { job_id: queuedPauseJobId, state: "queued" });
+fs.writeFileSync(schedulerJobs, `${JSON.stringify({
+  schema_version: 2,
+  jobs: [{
+    job_id: "queue-queued-pause-test",
+    target: "queued-pause-test",
+    authorization_job_id: queuedPauseJobId,
+    revision_fingerprint: "b".repeat(64),
+    authorized: true,
+    priority: 20,
+  }],
+}, null, 2)}\n`);
+const pausedQueuedJob = await tool("trainer_queue_control", {
+  action: "pause-job",
+  target: "queued-pause-test",
+  reason: "exercise queued pause",
+});
+assert.equal(pausedQueuedJob.result.isError, false, pausedQueuedJob.result.content?.[0]?.text);
+const resumedQueuedJob = await tool("trainer_queue_control", {
+  action: "resume-job",
+  target: "queued-pause-test",
+  reason: "exercise queued resume",
+});
+assert.equal(resumedQueuedJob.result.isError, false, resumedQueuedJob.result.content?.[0]?.text);
+assert.equal(resumedQueuedJob.result.structuredContent.authorization_job_id, queuedPauseJobId);
+const queuedPauseState = JSON.parse(fs.readFileSync(schedulerState, "utf8"));
+assert.equal(queuedPauseState.jobs["queue-queued-pause-test"].state, "queued");
+let queuedPauseJobs = await tool("list_jobs", { job_id: queuedPauseJobId });
+assert.equal(queuedPauseJobs.result.structuredContent[0].state, "queued");
+
 const jobId = "job-delegated-training-test";
 const context = {
   id: jobId,

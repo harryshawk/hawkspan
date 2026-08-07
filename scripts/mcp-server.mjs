@@ -2502,10 +2502,18 @@ function trainerQueueControl(args) {
     const retryingPendingAuthorization = durableJob.state === "queued" &&
       metadata.phase === `${args.action}-pending-scheduler` &&
       metadata.target === args.target;
-    if (durableJob.state === "queued" && !retryingPendingAuthorization) {
+    const schedulerStatePath = config.lora_automation?.scheduler_state_path;
+    const schedulerState = schedulerStatePath && fs.existsSync(schedulerStatePath)
+      ? JSON.parse(fs.readFileSync(schedulerStatePath, "utf8"))
+      : { jobs: {} };
+    const resumingQueuedPausedJob = args.action === "resume-job" &&
+      durableJob.state === "queued" &&
+      schedulerState.jobs?.[schedulerJob.job_id]?.state === "paused";
+    if (durableJob.state === "queued" &&
+        !retryingPendingAuthorization && !resumingQueuedPausedJob) {
       throw new Error(`job state ${durableJob.state} is not allowed for this operation`);
     }
-    originalDurableState = expectedState;
+    originalDurableState = resumingQueuedPausedJob ? "queued" : expectedState;
     originalDurableMetadata = metadata;
     if (durableJob.state !== "queued") {
       updateJobStatus({
