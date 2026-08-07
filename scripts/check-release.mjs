@@ -36,16 +36,22 @@ for (const relativePath of [
 }
 
 const scriptsRoot = path.join(releaseRoot, "scripts");
+const pythonExecutable = process.env.PYTHON || "python3";
 const tests = fs.readdirSync(scriptsRoot)
   .filter((name) => /^test-.*\.(mjs|py)$/.test(name))
   .sort();
 
 for (const test of tests) {
-  const executable = test.endsWith(".py") ? "python3" : process.execPath;
+  const executable = test.endsWith(".py") ? pythonExecutable : process.execPath;
   const result = spawnSync(executable, [path.join(scriptsRoot, test)], {
     cwd: releaseRoot,
     encoding: "utf8",
-    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+    env: {
+      ...process.env,
+      NODE: process.execPath,
+      PYTHON: pythonExecutable,
+      PYTHONDONTWRITEBYTECODE: "1",
+    },
     stdio: "inherit",
   });
   if (result.error) throw result.error;

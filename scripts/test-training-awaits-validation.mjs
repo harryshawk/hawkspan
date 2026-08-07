@@ -64,7 +64,7 @@ print(f"PACKAGED {spec['run_name']} {packet}")
 `, { mode: 0o755 });
 
 const fakeNode = path.join(root, "fake-node.mjs");
-fs.writeFileSync(fakeNode, `#!/usr/bin/env node
+fs.writeFileSync(fakeNode, `#!${process.execPath}
 import crypto from "node:crypto";
 import fs from "node:fs";
 const args = process.argv.slice(2);

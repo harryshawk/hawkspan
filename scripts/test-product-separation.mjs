@@ -43,7 +43,10 @@ try {
 
   const releaseGate = spawnSync(path.join(root, "scripts", "check-release.sh"), [
     "--release-root", contaminated,
-  ], { encoding: "utf8" });
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, NODE: process.execPath },
+  });
   assert.notEqual(releaseGate.status, 0);
   assert.match(releaseGate.stderr, /product separation failed/i);
 } finally {

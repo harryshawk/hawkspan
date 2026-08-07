@@ -19,17 +19,23 @@ function now() {
 }
 
 function readBootTime() {
-  const result = spawnSync("sysctl", ["-n", "kern.boottime"], { encoding: "utf8" });
+  const result = spawnSync("/usr/sbin/sysctl", ["-n", "kern.boottime"], { encoding: "utf8" });
+  if (result.error || result.status !== 0) {
+    throw new Error(`unable to read boot time: ${result.error?.message || result.stderr || `exit ${result.status}`}`);
+  }
   const match = result.stdout.match(/sec = (\d+)/);
   return match ? new Date(Number(match[1]) * 1000) : null;
 }
 
 function readProcesses() {
-  const result = spawnSync("ps", ["axww", "-o", "pid=,ppid=,comm=,args="], {
+  const result = spawnSync("/bin/ps", ["axww", "-o", "pid=,ppid=,comm=,args="], {
     encoding: "utf8",
     timeout: 5000,
   });
-  return (result.stdout || "").split("\n").map((line) => line.trim()).filter(Boolean);
+  if (result.error || result.status !== 0) {
+    throw new Error(`unable to read process table: ${result.error?.message || result.stderr || `exit ${result.status}`}`);
+  }
+  return result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
 function readJson(filePath, fallback = null) {
