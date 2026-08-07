@@ -9,6 +9,7 @@ fingerprint. The fixed trainer adapter rechecks the fingerprint before launch.
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
 import os
 import pathlib
@@ -26,6 +27,21 @@ CONFIG = pathlib.Path(
         os.environ.get("HAWKSPAN_CONFIG_PATH", os.environ.get("HAWKSPAN_CONFIG", "~/.hawkspan/config.json")),
     )
 ).expanduser()
+
+_INVOCATION_LOCKS = []
+
+
+def acquire_invocation_lock(path: pathlib.Path) -> bool:
+    """Hold one scheduler invocation lock until this process exits."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return False
+    _INVOCATION_LOCKS.append(handle)
+    return True
 
 
 def load(path: pathlib.Path, fallback):
@@ -129,6 +145,8 @@ def main() -> int:
     scheduler_root = pathlib.Path(
         base_automation.get("scheduler_root", CONFIG.parent / "lora-scheduler")
     ).expanduser()
+    if not acquire_invocation_lock(scheduler_root / "scheduler-invocation.lock"):
+        return 0
     jobs_path = pathlib.Path(
         base_automation.get("scheduler_jobs_path", scheduler_root / "lora-jobs.json")
     )

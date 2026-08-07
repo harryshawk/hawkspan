@@ -3,7 +3,7 @@
 Durable coordination between two trusted Macs, usable either as standalone
 software or as an optional Codex Personal plugin.
 
-This source tree is HawkSpan 0.3.2. The original 0.1.0 release remains
+This source tree is HawkSpan 0.3.3. The original 0.1.0 release remains
 available under its existing `v0.1.0` tag. See [CHANGELOG.md](CHANGELOG.md).
 
 HawkSpan provides:

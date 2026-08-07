@@ -1,5 +1,19 @@
 # Release Flow
 
+## 2026-08-06 - HawkSpan 0.3.3 scheduler serialization repair
+
+- Request: Queue multiple real 100-step LoRA plus ControlNet runs and exercise
+  lifecycle controls on the public release.
+- Source branch: `fix/atomic-upgrade`, based on public `v0.3.2`.
+- Scope: Hold one process-wide scheduler lock from candidate selection through
+  trainer launch and durable-state update.
+- Defect evidence: Two overlapping launchd invocations selected R23 and R24;
+  R24 started and R23 correctly refused its readiness gate because training
+  had become active.
+- Verification: The cross-process regression starts two scheduler processes
+  simultaneously and requires exactly one trainer adapter invocation; the
+  complete release gate is required before publication.
+
 ## 2026-08-06 - HawkSpan 0.3.2 queue-admission candidate
 
 - Request: Exercise multiple real 100-step LoRA plus ControlNet jobs and queue

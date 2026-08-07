@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.3 - 2026-08-06
+
+- Serialized each complete SimpleTuner scheduler invocation from candidate
+  selection through trainer launch so overlapping launchd invocations cannot
+  start competing queue items.
+- Added a real cross-process regression test that invokes the scheduler twice
+  concurrently and requires exactly one trainer adapter call.
+
 ## 0.3.2 - 2026-08-06
 
 - Enforced the durable `training` job contract both when a SimpleTuner item is
