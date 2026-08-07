@@ -1495,6 +1495,31 @@ const delegatedTrainerTools = new Set([
   "trainer_package_authorized_job",
 ]);
 
+const replaySafePeerTools = new Set([
+  "link_status",
+  "receive_messages",
+  "list_messages",
+  "acknowledge_message",
+  "list_jobs",
+  "verify_artifact",
+  "send_artifact",
+  "list_artifacts",
+  "receive_artifacts",
+  "flush_outbox",
+  "list_audit_events",
+  "list_queues",
+  "queue_status",
+  "list_queue_adapters",
+  "trainer_status",
+  "trainer_run_status",
+  "trainer_queue_status",
+  "trainer_queue_detail",
+  "trainer_validate_dataset",
+  "trainer_tail_log",
+  "trainer_audit_checkpoint_retention",
+  "trainer_preservation_status",
+]);
+
 function delegatedJobRecord(row) {
   return {
     id: row.id,
@@ -1577,6 +1602,7 @@ function peerCallTool(args) {
     throw new Error(`peer tool is not allowed: ${args.tool_name}`);
   }
   const remoteNode = config.peer.remote_node || "node";
+  const replaySafe = replaySafePeerTools.has(args.tool_name);
   const forwardedArguments = { ...(args.arguments || {}) };
   if (delegatedTrainerTools.has(args.tool_name) && forwardedArguments.job_id) {
     let job = db.prepare("SELECT * FROM jobs WHERE id=?").get(forwardedArguments.job_id);
@@ -1637,6 +1663,21 @@ function peerCallTool(args) {
       });
       if (result.status !== 0) {
         recordRouteFailure(host);
+        if (!replaySafe) {
+          attempts.at(-1).phase = "tool_dispatch";
+          attempts.at(-1).outcome = "unknown";
+          audit("call", "peer_tool", args.tool_name, "outcome_unknown", {
+            attempts,
+            replay_suppressed: true,
+          });
+          return {
+            tool_name: args.tool_name,
+            error: "remote outcome unknown; dispatched tool was not replayed",
+            outcome: "unknown",
+            replay_suppressed: true,
+            attempts,
+          };
+        }
         continue;
       }
       let output;
@@ -1645,6 +1686,21 @@ function peerCallTool(args) {
       } catch {
         attempts.at(-1).error = `invalid JSON: ${result.stdout.slice(0, 1000)}`;
         recordRouteFailure(host);
+        if (!replaySafe) {
+          attempts.at(-1).phase = "tool_response";
+          attempts.at(-1).outcome = "unknown";
+          audit("call", "peer_tool", args.tool_name, "outcome_unknown", {
+            attempts,
+            replay_suppressed: true,
+          });
+          return {
+            tool_name: args.tool_name,
+            error: "remote outcome unknown; invalid response was not replayed",
+            outcome: "unknown",
+            replay_suppressed: true,
+            attempts,
+          };
+        }
         continue;
       }
       recordRouteSuccess(host);
