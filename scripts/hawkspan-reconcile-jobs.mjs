@@ -307,6 +307,20 @@ function classify(job, bootTime, processes, liveManagedByJobId) {
   const activeStates = new Set(["running", "started", "stop_requested", "cancel_requested"]);
   const pendingStates = new Set(["queued", "authorized"]);
   const terminalStates = new Set(["completed", "verified", "cancelled", "failed"]);
+  const receiptPath = metadata.packet_sha256
+    ? path.join(stateRoot, "automatic-package-returns", `${metadata.packet_sha256}.json`)
+    : null;
+  const receipt = receiptPath ? readJson(receiptPath, null) : null;
+  if (job.state === "completed" && metadata.terminal === false) {
+    return {
+      classification: receipt?.state === "receipt-confirmed"
+        ? "nonterminal_return_receipt_confirmed"
+        : "completed_nonterminal_return_pending",
+      process_evidence: processEvidence,
+      metadata,
+      receipt,
+    };
+  }
   if (terminalStates.has(job.state)) {
     return {
       classification: processEvidence.live ? "settled_with_live_managed_process" : "terminal",
@@ -322,13 +336,12 @@ function classify(job, bootTime, processes, liveManagedByJobId) {
     };
   }
   if (job.state === "returning") {
-    const digest = metadata.packet_sha256;
-    const receiptPath = digest
-      ? path.join(stateRoot, "automatic-package-returns", `${digest}.json`)
-      : null;
-    const receipt = receiptPath ? readJson(receiptPath, null) : null;
     return {
-      classification: receipt?.state === "receipt-confirmed" ? "return_receipt_confirmed" : "return_pending",
+      classification: receipt?.state === "receipt-confirmed"
+        ? (receipt.terminal === false
+          ? "nonterminal_return_receipt_confirmed"
+          : "terminal_return_receipt_confirmed")
+        : "return_pending",
       process_evidence: processEvidence,
       metadata,
       receipt,
@@ -375,7 +388,12 @@ const closable = classified.filter((job) => [
   "stale_after_boot",
   "stale_no_process",
 ].includes(job.classification));
-const deliveredReturns = classified.filter((job) => job.classification === "return_receipt_confirmed");
+const deliveredTerminalReturns = classified.filter(
+  (job) => job.classification === "terminal_return_receipt_confirmed",
+);
+const deliveredNonterminalReturns = classified.filter(
+  (job) => job.classification === "nonterminal_return_receipt_confirmed",
+);
 
 if (apply && closable.length) {
   const update = db.prepare("UPDATE jobs SET state=?,updated_at=?,metadata_json=? WHERE id=?");
@@ -411,13 +429,25 @@ if (apply && closable.length) {
   }
 }
 
-if (apply && deliveredReturns.length) {
+if (apply && deliveredTerminalReturns.length) {
   const update = db.prepare("UPDATE jobs SET state='completed',updated_at=?,metadata_json=? WHERE id=?");
-  for (const job of deliveredReturns) {
+  for (const job of deliveredTerminalReturns) {
     update.run(now(), JSON.stringify({
       ...job.metadata,
       phase: "receipt-confirmed",
       package_return_state: "receipt-confirmed",
+    }), job.id);
+  }
+}
+
+if (apply && deliveredNonterminalReturns.length) {
+  const update = db.prepare("UPDATE jobs SET state='returning',updated_at=?,metadata_json=? WHERE id=?");
+  for (const job of deliveredNonterminalReturns) {
+    update.run(now(), JSON.stringify({
+      ...job.metadata,
+      phase: "awaiting-validation",
+      package_return_state: "receipt-confirmed",
+      terminal: false,
     }), job.id);
   }
 }
@@ -441,8 +471,10 @@ const summary = {
       kind: job.kind,
       state: apply && closable.some((entry) => entry.id === job.id)
         ? "failed"
-        : apply && deliveredReturns.some((entry) => entry.id === job.id)
+        : apply && deliveredTerminalReturns.some((entry) => entry.id === job.id)
           ? "completed"
+        : apply && deliveredNonterminalReturns.some((entry) => entry.id === job.id)
+          ? "returning"
         : job.state,
       previous_state: job.state,
       classification: job.classification,

@@ -14,6 +14,7 @@ const control = path.join(root, "trainer-control");
 const scheduler = path.join(root, "lora-scheduler");
 const recoverableOutput = path.join(root, "outputs", "recoverable");
 const runtimeQueue = path.join(root, "runtime-queue");
+const returnReceipts = path.join(root, "automatic-package-returns");
 const terminalOutput = path.join(root, "outputs", "terminal-package-failure");
 const liveTarget = "settled-but-live";
 const unrelatedTarget = "target-mentioned-by-status-command";
@@ -24,6 +25,7 @@ fs.mkdirSync(control, { recursive: true });
 fs.mkdirSync(path.join(recoverableOutput, "checkpoint-25"), { recursive: true });
 fs.mkdirSync(path.join(terminalOutput, "checkpoint-100"), { recursive: true });
 fs.mkdirSync(runtimeQueue, { recursive: true });
+fs.mkdirSync(returnReceipts, { recursive: true });
 fs.writeFileSync(managedRunner, "setInterval(() => {}, 1000);\n");
 const liveRunner = spawn(
   process.execPath,
@@ -141,6 +143,20 @@ const insertJob = database.prepare(`
      authorization_state,authorization_evidence,metadata_json)
   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 `);
+const terminalReceiptSha = "a".repeat(64);
+const nonterminalReceiptSha = "b".repeat(64);
+const legacyNonterminalReceiptSha = "c".repeat(64);
+for (const [sha256, terminal] of [
+  [terminalReceiptSha, true],
+  [nonterminalReceiptSha, false],
+  [legacyNonterminalReceiptSha, false],
+]) {
+  fs.writeFileSync(path.join(returnReceipts, `${sha256}.json`), JSON.stringify({
+    state: "receipt-confirmed",
+    sha256,
+    terminal,
+  }));
+}
 for (const [id, state] of [
   ["pending-authorized", "authorized"],
   ["pending-queued", "queued"],
@@ -149,6 +165,9 @@ for (const [id, state] of [
   ["job-settled-live", "failed"],
   ["job-pid-reused", "running"],
   ["job-unrelated-target", "running"],
+  ["terminal-return", "returning"],
+  ["nonterminal-return", "returning"],
+  ["legacy-completed-nonterminal", "completed"],
 ]) {
   const metadata = id === "job-pid-reused"
     ? { pid: process.pid, target: "pid-reuse-target" }
@@ -156,7 +175,13 @@ for (const [id, state] of [
       ? { target: unrelatedTarget }
       : id === "job-settled-live"
         ? { target: liveTarget }
-        : {};
+        : id === "terminal-return"
+          ? { packet_sha256: terminalReceiptSha, terminal: true }
+          : id === "nonterminal-return"
+            ? { packet_sha256: nonterminalReceiptSha, terminal: false }
+            : id === "legacy-completed-nonterminal"
+              ? { packet_sha256: legacyNonterminalReceiptSha, terminal: false }
+              : {};
   insertJob.run(
     id, new Date().toISOString(), new Date().toISOString(), "test", "test",
     "training", id, "", state, state === "authorized" ? "recorded" : "not_required",
@@ -227,6 +252,15 @@ assert.equal(
   reconciled.prepare("SELECT state FROM jobs WHERE id=?").get("job-unrelated-target").state,
   "failed",
 );
+assert.equal(reconciled.prepare("SELECT state FROM jobs WHERE id=?").get("terminal-return").state, "completed");
+for (const id of ["nonterminal-return", "legacy-completed-nonterminal"]) {
+  const row = reconciled.prepare("SELECT state,metadata_json FROM jobs WHERE id=?").get(id);
+  assert.equal(row.state, "returning");
+  const metadata = JSON.parse(row.metadata_json);
+  assert.equal(metadata.phase, "awaiting-validation");
+  assert.equal(metadata.package_return_state, "receipt-confirmed");
+  assert.equal(metadata.terminal, false);
+}
 reconciled.close();
 
 process.kill(-liveRunner.pid, "SIGTERM");

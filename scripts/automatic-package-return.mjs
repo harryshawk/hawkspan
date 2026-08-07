@@ -168,7 +168,11 @@ function confirmReceipt(pending, receiverReceipt) {
   const job = jobs[0];
   const terminal = pending.terminal !== false;
   const nextDurableState = terminal ? "completed" : "returning";
-  if (job && ["running", "returning"].includes(job.state)) {
+  const maySettleDurableJob = job && (
+    ["running", "returning"].includes(job.state) ||
+    (job.state === "completed" && terminal)
+  );
+  if (maySettleDurableJob) {
     call("update_job_status", {
       job_id: pending.durable_job_id,
       state: nextDurableState,
@@ -182,6 +186,10 @@ function confirmReceipt(pending, receiverReceipt) {
         terminal,
       },
     });
+  } else if (job?.state === "completed" && !terminal) {
+    throw new Error(
+      "nonterminal package receipt cannot preserve an incorrectly completed durable job; run startup reconciliation first",
+    );
   }
   settleSchedulerItem(
     pending.simpletuner_queue_item_id,

@@ -231,6 +231,35 @@ const replayedScheduler = JSON.parse(fs.readFileSync(schedulerState, "utf8"));
 assert.equal(replayedScheduler.jobs["queue-r-test"].state, "completed");
 assert.equal(replayedScheduler.current, "queue-r-next");
 
+// A terminal repackage of an already completed job must refresh the durable
+// packet identity instead of leaving the prior artifact and receipt attached.
+const replacementPacket = path.join(packetRoot, "r-test__replacement-return-packet.zip");
+fs.writeFileSync(replacementPacket, "replacement terminal package bytes\n");
+const replacementSha256 = crypto.createHash("sha256")
+  .update(fs.readFileSync(replacementPacket))
+  .digest("hex");
+const replacementQueued = run(
+  { DELIVERY_MODE: "queued", JOB_STATE: "completed" },
+  true,
+  { packet: replacementPacket, sha256: replacementSha256 },
+);
+assert.equal(replacementQueued.status, 0, replacementQueued.stderr);
+const replacementConfirmed = run({
+  RECEIVER_RECEIPT: "yes",
+  JOB_STATE: "completed",
+  PACKET_SHA256: replacementSha256,
+}, true, { packet: replacementPacket, sha256: replacementSha256 });
+assert.equal(replacementConfirmed.status, 0, replacementConfirmed.stderr);
+const replacementUpdate = fs.readFileSync(fakeLog, "utf8").trim().split("\n")
+  .filter((line) => line.startsWith("update_job_status "))
+  .at(-1);
+const replacementUpdateArgs = JSON.parse(replacementUpdate.slice("update_job_status ".length));
+assert.equal(replacementUpdateArgs.state, "completed");
+assert.equal(replacementUpdateArgs.metadata.packet_path, replacementPacket);
+assert.equal(replacementUpdateArgs.metadata.packet_sha256, replacementSha256);
+assert.equal(replacementUpdateArgs.metadata.package_return_artifact_id, "artifact-test");
+assert.equal(replacementUpdateArgs.metadata.receiver_receipt_message_id, "receiver-receipt-test");
+
 // A received training packet is durable evidence, but it is not terminal.
 // It releases the scheduler slot and keeps the lifecycle awaiting validation.
 const trainingPacket = path.join(packetRoot, "r-test__training__return-packet.zip");
