@@ -1447,6 +1447,18 @@ function loraAutomation(args) {
   if (!allowedActions.has(action)) {
     throw new Error(`unsupported LoRA automation action: ${action}`);
   }
+  if (action === "scheduler-enqueue") {
+    const authorizationJobId = String(args.authorization_job_id || "").trim();
+    const authorizationJob = requireTrackedJob(
+      authorizationJobId,
+      "training",
+      ["authorized", "queued"],
+    );
+    const metadata = JSON.parse(authorizationJob.metadata_json || "{}");
+    if (metadata.target && metadata.target !== args.job_id) {
+      throw new Error("training authorization target does not match scheduler target");
+    }
+  }
   const operationArgs = { ...args };
   delete operationArgs.action;
   delete operationArgs.timeout_ms;

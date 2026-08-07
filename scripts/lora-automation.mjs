@@ -649,7 +649,9 @@ function trainingReadiness(args) {
     });
   }
   const telemetry = processSnapshot(args.ignore_process_group);
-  if (telemetry.active) problems.push({ issue: "training_already_active" });
+  if (telemetry.active && args.allow_active_training_for_enqueue !== true) {
+    problems.push({ issue: "training_already_active" });
+  }
 
   const evidence = {
     schema_version: 1,
@@ -957,7 +959,12 @@ function schedulerEnqueue(args) {
     safe.test(value))) {
     throw new Error("job_id, authorization_job_id, and revision_fingerprint are required");
   }
-  const readiness = trainingReadiness({ job_id: target });
+  // Admission validates immutable inputs while another queue item may be
+  // running. The scheduler still enforces single-trainer execution.
+  const readiness = trainingReadiness({
+    job_id: target,
+    allow_active_training_for_enqueue: true,
+  });
   if (!readiness.ready) {
     throw new Error(`cannot enqueue a job that fails readiness: ${readiness.readiness_path}`);
   }
@@ -993,6 +1000,10 @@ function schedulerEnqueue(args) {
   };
   const existing = (document.jobs || []).filter((job) => job.job_id === schedulerJobId);
   if (existing.length > 1) throw new Error(`duplicate scheduler job: ${schedulerJobId}`);
+  const targetEntries = (document.jobs || []).filter((job) => job.target === target);
+  if (targetEntries.some((job) => job.job_id !== schedulerJobId)) {
+    throw new Error(`scheduler target already has a different queue item: ${target}`);
+  }
   if (existing.length === 1) {
     const stableKeys = [
       "target", "authorization_job_id", "revision_fingerprint", "authorized",

@@ -548,6 +548,25 @@ const unauthorizedSchedulerEnqueue = await tool("lora_automation", {
 });
 assert.equal(unauthorizedSchedulerEnqueue.result.isError, true);
 
+const wrongKindSchedulerJob = await tool("create_job", {
+  kind: "simpletuner-lora",
+  title: "Wrong scheduler authorization kind",
+  metadata: { target: "cap-test" },
+});
+await tool("update_job_status", {
+  job_id: wrongKindSchedulerJob.result.structuredContent.job_id,
+  state: "queued",
+});
+const wrongKindSchedulerEnqueue = await tool("lora_automation", {
+  action: "scheduler-enqueue",
+  job_id: "cap-test",
+  scheduler_job_id: "scheduler-cap-test-wrong-kind",
+  authorization_job_id: wrongKindSchedulerJob.result.structuredContent.job_id,
+  revision_fingerprint: "a".repeat(64),
+});
+assert.equal(wrongKindSchedulerEnqueue.result.isError, true);
+assert.match(wrongKindSchedulerEnqueue.result.content[0].text, /job kind must be training/);
+
 const automationQueue = await tool("lora_automation", { action: "queue" });
 assert.equal(automationQueue.result.isError, false);
 assert.deepEqual(
