@@ -51,6 +51,43 @@ Feature: HawkSpan-managed 100-step robot ControlNet LoRA lifecycle
     And M2 verifies the artifact identity, size, and SHA-256 digest
     And only the receipt-confirmed phase completes the SimpleTuner queue item
 
+  Scenario Outline: Complete four independent 100-step ControlNet LoRA runs
+    Given <target> owns a distinct staged runtime and durable training job
+    And its scheduler item is bound to the current HawkSpan revision
+    When <target> reaches step 100 without interruption
+    Then its LoRA plus ControlNet-conditioned training exits successfully
+    And its automatic return packet is independently registered and verified
+    And no output, checkpoint, receipt, or package is borrowed from another run
+
+    Examples:
+      | target                              |
+      | hawkspan-robot-100-v6-d-queue-r20  |
+      | hawkspan-robot-100-v9-d-queue-r23  |
+      | hawkspan-robot-100-v10-d-queue-r24 |
+      | hawkspan-robot-100-v11-d-queue-r25 |
+
+  Scenario: Pause one queued job while another job continues
+    Given one exact target is training and another exact target is queued
+    When M2 pauses only the queued target
+    Then the queued target remains unstarted
+    And the active target continues under the same PID and revision
+    And the whole queue remains running
+
+  Scenario: Skip and explicitly retry a real queued job
+    Given an exact target is queued but has not started
+    When M2 skips that target
+    Then the scheduler advances without launching it
+    When M2 explicitly retries the same durable target
+    Then its attempt count is reset and the same target becomes eligible
+
+  Scenario: Kill an active test job through the guarded stop control
+    Given an exact test target has a live runner, launcher, and trainer process tree
+    When M2 stops that exact durable training job
+    Then every process in the recorded process group exits
+    And no unrelated trainer or queue item is terminated
+    And the stopped attempt produces no return package
+    And its checkpoints remain available for an explicitly authorized resume
+
   Scenario: Automatically return every successful training package
     When an authorized training target exits zero with a valid final LoRA
     Then the same managed run builds the matching return packet
