@@ -5,6 +5,7 @@
 - Request: Exercise multiple real 100-step LoRA plus ControlNet jobs and queue
   controls through HawkSpan.
 - Source branch: `fix/atomic-upgrade`, based on public `v0.3.1`.
+- Runtime implementation commits: `db06b95` and `1e7abab`.
 - Scope: Validate durable training jobs at admission and launch, permit queued
   admission while a trainer is active, reject duplicate targets, and report a
   successful launch as running rather than finished.
