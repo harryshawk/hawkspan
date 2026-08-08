@@ -188,3 +188,9 @@ not load dynamic MCP tools.
 Background artifact intake reuses an already verified manifest/database match
 instead of hashing every large artifact again on every two-minute pass. This
 keeps the link agent responsive when multi-gigabyte training packets exist.
+
+## License
+
+HawkSpan software is licensed under the [MIT License](LICENSE). The Help-page
+videos under `static/media/help` retain the separate terms recorded in
+[NOTICE](NOTICE) and [their media README](static/media/help/README.md).

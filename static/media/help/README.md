@@ -1,7 +1,7 @@
 # HawkSpan Help videos
 
 These MP4 files are separately licensed media. They are not covered by the
-MIT license for HawkSpan software.
+MIT License for HawkSpan software.
 
 ## Videos 1–4: CC BY-ND 4.0
 

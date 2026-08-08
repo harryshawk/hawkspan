@@ -1,5 +1,17 @@
 # Release Flow
 
+## 2026-08-07 - Owner-authorized license correction
+
+- Request: Apply the owner-specified MIT License to every public HawkSpan
+  version from its original publication point and remove the unauthorized
+  alternative license notices.
+- Scope: Rewrite every public branch and release tag while preserving each
+  version's product files apart from the license correction; retain the
+  separately stated media terms.
+- Verification: Every rewritten public ref contains the normalized SPDX MIT
+  text with Harry Hawk as copyright holder, the superseded notices are absent,
+  and the complete release gate passes before publication.
+
 ## 2026-08-07 - HawkSpan 0.3.5 validation-input staging repair
 
 - Release intent: ensure every immutable runtime job contains the fixed

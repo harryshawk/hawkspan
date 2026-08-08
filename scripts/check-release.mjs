@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import assert from "node:assert/strict";
 import { assertProductSeparated } from "./product-separation.mjs";
 
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -19,6 +20,20 @@ if (rootArgument !== -1 && !process.argv[rootArgument + 1]) {
 
 const separation = assertProductSeparated(releaseRoot);
 process.stdout.write(`Product separation passed for ${separation.root}\n`);
+
+const license = fs.readFileSync(path.join(releaseRoot, "LICENSE"), "utf8");
+assert.match(license, /^MIT License$/m);
+assert.match(license, /Copyright \(c\) 2026 Harry Hawk/);
+assert.match(license, /Permission is hereby granted, free of charge/);
+
+for (const relativePath of [
+  "README.md",
+  "NOTICE",
+  "static/media/help/README.md",
+]) {
+  const text = fs.readFileSync(path.join(releaseRoot, relativePath), "utf8");
+  assert.match(text, /MIT License/);
+}
 
 const scriptsRoot = path.join(releaseRoot, "scripts");
 const tests = fs.readdirSync(scriptsRoot)
