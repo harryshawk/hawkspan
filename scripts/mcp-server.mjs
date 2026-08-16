@@ -113,6 +113,72 @@ const defaultConfig = {
   },
 };
 
+const EXACT_TOOL_NAME = /^[a-z][a-z0-9_]{0,127}$/;
+
+function assertExactToolNames(value, label) {
+  if (value === "current") return;
+  if (!Array.isArray(value) ||
+      value.some((name) => typeof name !== "string" || !EXACT_TOOL_NAME.test(name))) {
+    throw new Error(`${label} must be "current" or an array of exact tool names`);
+  }
+}
+
+function assertDirectionalBooleans(value, label) {
+  if (value === undefined || value === null) return;
+  if (typeof value === "boolean") return;
+  const valid = value && typeof value === "object" && !Array.isArray(value)
+    && (value.inbound === undefined || typeof value.inbound === "boolean")
+    && (value.outbound === undefined || typeof value.outbound === "boolean")
+    && Object.keys(value).every((key) => key === "inbound" || key === "outbound");
+  if (!valid) {
+    throw new Error(`${label} must be a boolean or an inbound/outbound boolean object`);
+  }
+}
+
+function assertPeerCommandConfiguration(configuration) {
+  const roleProfile = configuration.role_profile;
+  if (roleProfile !== undefined && roleProfile !== null &&
+      !["symmetric", "controller-worker"].includes(roleProfile)) {
+    throw new Error("role_profile must be symmetric or controller-worker");
+  }
+  const nodeRole = configuration.node_role;
+  if (nodeRole !== undefined && nodeRole !== null &&
+      !["controller", "worker"].includes(nodeRole)) {
+    throw new Error("node_role must be controller or worker");
+  }
+  if (roleProfile === "controller-worker" && (nodeRole === undefined || nodeRole === null || nodeRole === "")) {
+    throw new Error("node_role is required for controller-worker");
+  }
+  const features = configuration.features;
+  if (features !== undefined && features !== null) {
+    if (typeof features !== "object" || Array.isArray(features)) {
+      throw new Error("features must be an object");
+    }
+    if (features.allowed_peer_tools !== undefined) {
+      const allowed = features.allowed_peer_tools;
+      if (!allowed || typeof allowed !== "object" || Array.isArray(allowed) ||
+          Object.keys(allowed).some((key) => key !== "inbound" && key !== "outbound")) {
+        throw new Error("features.allowed_peer_tools must be an object with inbound and/or outbound lists");
+      }
+      if (Object.hasOwn(allowed, "inbound")) {
+        assertExactToolNames(allowed.inbound, "features.allowed_peer_tools.inbound");
+      }
+      if (Object.hasOwn(allowed, "outbound")) {
+        assertExactToolNames(allowed.outbound, "features.allowed_peer_tools.outbound");
+      }
+    }
+    assertDirectionalBooleans(features.allow_peer_commands, "features.allow_peer_commands");
+    assertDirectionalBooleans(features.enable_broad_run_command, "features.enable_broad_run_command");
+  }
+  if (configuration.peer?.allowed_tools !== undefined) {
+    const extra = configuration.peer.allowed_tools;
+    if (!Array.isArray(extra) ||
+        extra.some((name) => typeof name !== "string" || !EXACT_TOOL_NAME.test(name))) {
+      throw new Error("peer.allowed_tools must be an array of exact tool names");
+    }
+  }
+}
+
 function readConfig() {
   const loaded = fs.existsSync(CONFIG_PATH)
     ? JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"))
@@ -138,6 +204,7 @@ function readConfig() {
 }
 
 const config = readConfig();
+assertPeerCommandConfiguration(config);
 if (fs.existsSync(installedRevisionPath(STATE_ROOT))) {
   const authority = readReleaseAuthority(STATE_ROOT);
   assertExecutingRelease(authority, path.dirname(SCRIPT_ROOT));
@@ -1397,6 +1464,66 @@ const peerToolAllowlist = new Set([
   "lora_automation",
 ]);
 
+const PEER_COMMAND_TOOLS = new Set(["run_command"]);
+
+function configuredPeerToolAllowlist(direction) {
+  const configured = config.features?.allowed_peer_tools?.[direction];
+  if (Array.isArray(configured)) {
+    return new Set(configured.filter((name) => typeof name === "string" && name.trim()));
+  }
+  // Unset reverse-path lists stay empty in controller-worker unless explicitly set
+  // to "current" or an exact name list. Symmetric / forward paths keep the built-in list.
+  if (configured === undefined && isReverseWorkerCommandPath(direction)) {
+    return new Set();
+  }
+  const allowed = new Set(peerToolAllowlist);
+  if (direction === "outbound" && Array.isArray(config.peer?.allowed_tools)) {
+    for (const name of config.peer.allowed_tools) {
+      if (typeof name === "string" && name.trim()) allowed.add(name);
+    }
+  }
+  return allowed;
+}
+
+function directionalFeature(name, direction, defaultValue) {
+  const value = config.features?.[name];
+  if (value === true || value === false) return value;
+  if (value && typeof value === "object" && Object.hasOwn(value, direction)) {
+    return value[direction] === true;
+  }
+  return defaultValue;
+}
+
+function isReverseWorkerCommandPath(direction) {
+  if (config.role_profile !== "controller-worker") return false;
+  if (config.node_role === "controller" && direction === "inbound") return true;
+  if (config.node_role === "worker" && direction === "outbound") return true;
+  return false;
+}
+
+function assertPeerCommandBoundary(toolName, direction) {
+  const allowlist = configuredPeerToolAllowlist(direction);
+  if (!allowlist.has(toolName)) {
+    throw new Error(
+      direction === "inbound"
+        ? `inbound peer tool is not allowed: ${toolName}`
+        : `peer tool is not allowed: ${toolName}`,
+    );
+  }
+  if (!PEER_COMMAND_TOOLS.has(toolName)) return;
+  if (!directionalFeature("enable_broad_run_command", direction, true)) {
+    throw new Error(`broad run_command is disabled for ${direction} peer use`);
+  }
+  const reverse = isReverseWorkerCommandPath(direction);
+  if (!directionalFeature("allow_peer_commands", direction, !reverse)) {
+    throw new Error(
+      reverse
+        ? "worker cannot command the controller unless allow_peer_commands is explicitly enabled"
+        : `peer commands are disabled for ${direction} use`,
+    );
+  }
+}
+
 function runCommand(args) {
   const command = String(args.command || "").trim();
   if (!command) throw new Error("command is required");
@@ -1652,9 +1779,7 @@ function importDelegatedJob(context, expectedJobId, options = {}) {
 
 function peerCallTool(args) {
   if (!config.peer) throw new Error("peer is not configured");
-  if (!peerToolAllowlist.has(args.tool_name)) {
-    throw new Error(`peer tool is not allowed: ${args.tool_name}`);
-  }
+  assertPeerCommandBoundary(args.tool_name, "outbound");
   const remoteNode = config.peer.remote_node || "node";
   const replaySafe = replaySafePeerTools.has(args.tool_name);
   const forwardedArguments = { ...(args.arguments || {}) };
@@ -3260,7 +3385,7 @@ const coreTools = [
   },
   {
     name: "run_command",
-    description: "Run a shell command on this trusted Mac and record an audit event. The consequential flag classifies the audit entry; the active user instruction is the authority.",
+    description: "Run a shell command on this trusted Mac and record an audit event. Peer use is gated by the active allowlists, enable_broad_run_command, and allow_peer_commands; a worker cannot command the controller unless that flag is explicitly enabled. The consequential flag classifies the audit entry; the active user instruction is the authority.",
     inputSchema: {
       type: "object",
       required: ["command"],
@@ -3373,7 +3498,7 @@ const coreTools = [
   },
   {
     name: "peer_call_tool",
-    description: "Call one allowlisted HawkSpan-D tool on the paired Mac over the preferred private route with fallback. The active user instruction remains authoritative.",
+    description: "Call one allowlisted HawkSpan-D tool on the paired Mac over the preferred private route with fallback. Outbound features.allowed_peer_tools, peer.allowed_tools, enable_broad_run_command, and allow_peer_commands are enforced before dispatch. The active user instruction remains authoritative.",
     inputSchema: {
       type: "object",
       required: ["tool_name"],
@@ -3884,6 +4009,9 @@ async function callToolInternal(name, args = {}, origin = "local", pluginId = nu
   if (!tool) throw new Error(`unknown tool: ${name}`);
   if (tool.allowedOrigins && !tool.allowedOrigins.has(origin)) {
     throw new Error(`${name} does not allow ${origin} access`);
+  }
+  if (origin === "peer") {
+    assertPeerCommandBoundary(name, "inbound");
   }
   if (origin === "plugin") {
     const globalAllowlist = config.application_plugins?.core_tool_allowlist || [];

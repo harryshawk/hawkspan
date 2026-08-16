@@ -17,7 +17,7 @@ select and parameterize that existing tool map; they do not replace it.
 
 ## Present in C or otherwise already implemented, but deferred
 
-- role and directional capability profiles;
+- browser editors for role and directional capability profiles;
 - browser-based connection editing;
 - expanded package lifecycle and specialized package catalog;
 - richer trainer and dashboard controls;
@@ -26,6 +26,14 @@ select and parameterize that existing tool map; they do not replace it.
 
 These are retained as an implementation inventory for later work. Add them
 only as bounded controls over HawkSpan-D MCP operations.
+
+The existing config keys those editors would change are already the
+authorization for the peer/command boundary: `role_profile`, `node_role`,
+`features.allowed_peer_tools`, `features.enable_broad_run_command`,
+`features.allow_peer_commands`, and `peer.allowed_tools` are enforced even
+while the browser editors stay deferred. In `controller-worker` mode,
+controller inbound and worker outbound peer-tool lists stay empty unless
+explicitly configured.
 
 ## Excluded architecture
 

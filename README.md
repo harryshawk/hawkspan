@@ -3,7 +3,7 @@
 Durable coordination between two trusted Macs, usable either as standalone
 software or as an optional Codex Personal plugin.
 
-This source tree is HawkSpan 0.3.8. The original 0.1.0 release remains
+This source tree is HawkSpan 0.3.9. The original 0.1.0 release remains
 available under its existing `v0.1.0` tag. See [CHANGELOG.md](CHANGELOG.md).
 
 HawkSpan provides:
@@ -60,7 +60,7 @@ release with its exact commit SHA and verify its services:
 ```sh
 node scripts/package-release.mjs \
   --output-root "$HOME/.local/share/hawkspan/releases" \
-  --published-remote staging --published-ref hawkspan-v0.3.8-staging
+  --published-remote staging --published-ref hawkspan-v0.3.9-staging
 node RELEASE_ROOT/scripts/activate-release.mjs --release-root RELEASE_ROOT --revision COMMIT_SHA
 node RELEASE_ROOT/scripts/hawkspan-startup.mjs
 node RELEASE_ROOT/scripts/audit-release-authority.mjs

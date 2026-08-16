@@ -290,7 +290,7 @@ input:focus,textarea:focus{border-color:rgba(113,183,255,.68);box-shadow:0 0 0 3
       <section class="card safety"><div class="safety-title"><span class="dot"></span> Private by design</div><p>Requests stay on this Mac and use the same guarded HawkSpan handlers as agent tools. Hover or focus any <strong>?</strong> for help.</p></section>
       <section class="card help-copy"><p class="eyebrow">Package help</p><h2>Packages and quick starts</h2><p>Reviewed packages add application operations. Their quick starts select only which operations are enabled and do not replace HawkSpan-D control behavior.</p></section>
       <section class="card help-copy"><p class="eyebrow">Configuration</p><h2>Machine-local settings</h2><p>Peer addresses, paths, and the local web port belong in the protected <code>hawkspan.env</code> file. Package presets never overwrite them.</p></section>
-      <section class="card help-copy"><p class="eyebrow">Later additions</p><h2>Retained feature inventory</h2><p>Role profiles, browser connection editing, and richer trainer controls are documented in <code>docs/DEFERRED-FEATURES.md</code> and are not active in this build.</p></section>
+      <section class="card help-copy"><p class="eyebrow">Later additions</p><h2>Retained feature inventory</h2><p>Browser editors for profiles and connections remain deferred. The active config still enforces inbound/outbound peer-tool allowlists, <code>enable_broad_run_command</code>, and <code>allow_peer_commands</code>, including empty reverse-path lists in controller-worker mode unless those lists are set, and the worker-to-controller command gate.</p></section>
     </div>
   </section>
 </main>

@@ -9,7 +9,10 @@ second control or transport implementation. The first release exposes status,
 durable messages, jobs, artifacts, audit history, installed packages, and
 operation-selection presets. Connection editing and role/capability profiles
 are retained for later work and are not enabled by the first-release tool
-allowlist.
+allowlist. The same role, allowlist, broad-command, and
+`allow_peer_commands` keys in the active config are still enforced at the
+peer/command boundary. Controller inbound and worker outbound peer-tool
+lists stay empty in controller-worker mode unless those lists are set.
 
 ```json
 {

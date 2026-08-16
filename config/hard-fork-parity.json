@@ -114,6 +114,7 @@
     "scripts/test-local-control-help-videos.mjs",
     "scripts/test-lora-readiness-policy.mjs",
     "scripts/test-lora-queue-control.mjs",
+    "scripts/test-peer-command-boundary.mjs",
     "scripts/test-queue-best-practices.mjs",
     "scripts/test-readiness-monitor.mjs",
     "scripts/test-release-authority.mjs",

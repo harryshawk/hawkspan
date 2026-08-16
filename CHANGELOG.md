@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.9 - 2026-08-15
+
+- Enforced configured inbound and outbound peer-tool allowlists and peer
+  command flags at both sides of the transport boundary.
+- Made controller inbound and worker outbound peer-tool lists empty by default
+  in controller-worker mode while preserving symmetric compatibility.
+- Rejected malformed role, directional feature, and peer-tool configuration at
+  startup, with side-effect and real dispatch coverage for the boundary.
+
 ## 0.3.8 - 2026-08-15
 
 - Corrected full-package provenance verification to compare the complete file
