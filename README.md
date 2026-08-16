@@ -245,6 +245,14 @@ roles, allowlists, and configuration authority remain unchanged. Record the
 receiver IDs and config backups in the deployment receipt so a later maintainer
 does not replace them with whichever interactive task happens to be open.
 
+Run release-readiness acceptance from a host context that permits ICMP and the
+configured SSH routes. A Codex task's network sandbox can make both routes fail
+with `ping: sendto: Operation not permitted` even when the peer is reachable;
+that is a test-context denial, not link evidence. Do not accept or diagnose the
+link from that receipt. Re-run the exact installed revision's readiness monitor
+with its normal host network access, then require a terminal `ready` receipt
+whose agent layer reports the installed peer revision.
+
 If wakeup is the failed coordination prerequisite, repair and verify it before
 starting unrelated network, GitHub, application, or workload checks. Send one
 blocking instruction at a time and explicitly supersede any earlier sequence;

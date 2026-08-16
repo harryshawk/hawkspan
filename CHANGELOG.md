@@ -23,6 +23,10 @@
 - Recorded that restoring the durable message/wakeup path is a blocking repair;
   unrelated readiness checks must remain deferred until bidirectional wakeup
   acceptance passes.
+- Documented the network-sandbox readiness false negative: `ping: sendto:
+  Operation not permitted` from a restricted Codex shell is not link-failure
+  evidence, and acceptance must use the exact installed monitor with normal
+  host network access.
 
 ## 0.3.9 - 2026-08-15
 
