@@ -1,0 +1,8 @@
+# Merge this table into the trusted user-level ~/.grok/config.toml after
+# replacing every absolute placeholder. Do not put credentials in this file.
+[mcp_servers.hawkgrokspan]
+command = "/usr/bin/env"
+args = ["node", "/ABSOLUTE/HAWKSPAN/RELEASE/scripts/mcp-server.mjs"]
+env = { HAWKSPAN_STATE_DIR = "/home/GROK_VM_USER/.hawkgrokspan", HAWKSPAN_CONFIG = "/home/GROK_VM_USER/.hawkgrokspan/config.json", HAWKSPAN_LOCAL_CONTROL_DISABLED = "1" }
+startup_timeout_sec = 30
+tool_timeout_sec = 300

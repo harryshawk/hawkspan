@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Added the same-codebase HawkGrokSpan profile for an isolated M2/Grok-VM
+  message and verified-file link. The server exposes only thirteen link,
+  message, acknowledgement, and artifact tools; direct calls to commands,
+  peer tools, jobs, queues, plugins, and trainers fail closed.
+- Required dedicated SSH identity and pinned `known_hosts` files for the
+  HawkGrokSpan profile, bounded outgoing artifact roots against normal and
+  symlink path escape, and accepted either `shasum` or Linux `sha256sum` for
+  remote verification.
+- Added real two-server envelope, acknowledgement, artifact, malformed-startup,
+  tool-surface, strict-transport, and file-boundary tests plus a Grok VM handoff
+  guide and configuration templates.
+
 - Documented safe recovery when an existing Codex task remains read-only after
   Full Access is selected: continue in a new Full Access task, reverify the
   unchanged plugin packet, and do not substitute Computer Use, peer commands,

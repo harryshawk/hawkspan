@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "node_id": "grok-vm",
+  "surface_profile": "message-files",
+  "application_plugins": {
+    "enabled": false
+  },
+  "local_control": {
+    "enabled": false
+  },
+  "queue_supervisor": {
+    "enabled": false
+  },
+  "transfer": {
+    "allowed_artifact_roots": [
+      "/home/GROK_VM_USER/HawkGrokSpan/Exchange"
+    ]
+  },
+  "peer": {
+    "node_id": "m2-hawkgrokspan",
+    "user": "M2_USER",
+    "allow_remote_wake": false,
+    "primary_enabled": true,
+    "primary_host": "M2_PRIVATE_HOST",
+    "fallback_enabled": false,
+    "ssh_identity": "/home/GROK_VM_USER/.ssh/hawkgrokspan_ed25519",
+    "known_hosts": "/home/GROK_VM_USER/.hawkgrokspan/known_hosts",
+    "remote_inbox": "/Users/M2_USER/.hawkgrokspan/inbox",
+    "remote_artifacts": "/Users/M2_USER/.hawkgrokspan/artifacts",
+    "remote_audit": "/Users/M2_USER/.hawkgrokspan/audit"
+  },
+  "features": {
+    "allowed_peer_tools": {
+      "inbound": [],
+      "outbound": []
+    },
+    "allow_peer_commands": false,
+    "enable_broad_run_command": false
+  },
+  "training": {
+    "allow_start": false,
+    "allow_stop": false,
+    "allow_package": false
+  }
+}

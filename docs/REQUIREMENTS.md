@@ -22,3 +22,22 @@
 
 See `docs/DEFERRED-FEATURES.md`. Deferred behavior is not a first-integration
 requirement and must not be presented as implemented.
+
+## HawkGrokSpan
+
+- Reuse the exact HawkSpan source and release identity with separate
+  `~/.hawkgrokspan` state; do not fork the transport or join the M2/M4 pair.
+- Expose and dispatch only link, durable-message, acknowledgement, and
+  verified-artifact operations.
+- Keep local control, application plugins, peer calls, commands, jobs, queues,
+  training, and wake disabled and unreachable through the restricted MCP
+  surface.
+- Restrict outgoing files to explicit real exchange roots and reject symlink
+  escape, malformed manifests, and non-regular received payloads.
+- Require a dedicated owner-only SSH identity, a dedicated pinned
+  `known_hosts`, strict checking, and no global-host fallback.
+- Package the Grok side with exact commit and SHA-256 evidence; configure no
+  Grok or GitHub credential on the owner's behalf.
+- Accept the deployment only after real bidirectional messages,
+  acknowledgements, harmless files, matching digests, and a rejected
+  outside-root transfer pass between M2 and the VM.

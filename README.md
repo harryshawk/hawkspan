@@ -3,7 +3,7 @@
 Durable coordination between two trusted Macs, usable either as standalone
 software or as an optional Codex Personal plugin.
 
-This source tree is HawkSpan 0.3.9. The original 0.1.0 release remains
+This source tree is the HawkSpan 0.4.0 candidate. The original 0.1.0 release remains
 available under its existing `v0.1.0` tag. See [CHANGELOG.md](CHANGELOG.md).
 
 HawkSpan provides:
@@ -37,6 +37,11 @@ HawkSpan provides:
 - five-minute autonomous M4 packet sending and M2 packet receiving that do not
   consume Codex heartbeats or tokens.
 
+For a separate, messages-and-files-only link to a trusted Grok VM, see
+[HawkGrokSpan](docs/HAWKGROKSPAN.md). HawkGrokSpan uses the same source release
+with isolated state and a server-enforced restricted MCP surface; it does not
+turn the existing single M2/M4 peer pair into a three-node control mesh.
+
 ## Run with or without the Codex plugin
 
 Both modes run the same HawkSpan release, services, queues, state, security
@@ -60,7 +65,7 @@ release with its exact commit SHA and verify its services:
 ```sh
 node scripts/package-release.mjs \
   --output-root "$HOME/.local/share/hawkspan/releases" \
-  --published-remote staging --published-ref hawkspan-v0.3.9-staging
+  --published-remote staging --published-ref hawkspan-v0.4.0-staging
 node RELEASE_ROOT/scripts/activate-release.mjs --release-root RELEASE_ROOT --revision COMMIT_SHA
 node RELEASE_ROOT/scripts/hawkspan-startup.mjs
 node RELEASE_ROOT/scripts/audit-release-authority.mjs

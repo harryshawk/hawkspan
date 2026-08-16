@@ -115,6 +115,22 @@ const defaultConfig = {
 
 const EXACT_TOOL_NAME = /^[a-z][a-z0-9_]{0,127}$/;
 const CODEX_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SURFACE_PROFILES = new Set(["full", "message-files"]);
+const MESSAGE_FILE_TOOLS = new Set([
+  "link_status",
+  "send_message",
+  "retry_message",
+  "receive_messages",
+  "list_messages",
+  "acknowledge_message",
+  "register_artifact",
+  "verify_artifact",
+  "send_artifact",
+  "queue_artifact_delivery",
+  "list_artifacts",
+  "receive_artifacts",
+  "flush_outbox",
+]);
 
 function assertExactToolNames(value, label) {
   if (value === "current") return;
@@ -137,6 +153,16 @@ function assertDirectionalBooleans(value, label) {
 }
 
 function assertPeerConfiguration(configuration) {
+  const surfaceProfile = configuration.surface_profile || "full";
+  if (!SURFACE_PROFILES.has(surfaceProfile)) {
+    throw new Error("surface_profile must be full or message-files");
+  }
+  const artifactRoots = configuration.transfer?.allowed_artifact_roots;
+  if (artifactRoots !== undefined &&
+      (!Array.isArray(artifactRoots) || artifactRoots.length === 0 ||
+       artifactRoots.some((root) => typeof root !== "string" || !path.isAbsolute(root)))) {
+    throw new Error("transfer.allowed_artifact_roots must be a nonempty array of absolute paths");
+  }
   const roleProfile = configuration.role_profile;
   if (roleProfile !== undefined && roleProfile !== null &&
       !["symmetric", "controller-worker"].includes(roleProfile)) {
@@ -179,6 +205,65 @@ function assertPeerConfiguration(configuration) {
     }
   }
   const peer = configuration.peer;
+  if (surfaceProfile === "message-files") {
+    if (configuration.application_plugins?.enabled !== false) {
+      throw new Error("message-files surface requires application_plugins.enabled=false");
+    }
+    if (configuration.local_control?.enabled !== false) {
+      throw new Error("message-files surface requires local_control.enabled=false");
+    }
+    if (!artifactRoots) {
+      throw new Error("message-files surface requires transfer.allowed_artifact_roots");
+    }
+    if (!peer) throw new Error("message-files surface requires a configured peer");
+    if (peer.allow_remote_wake !== false) {
+      throw new Error("message-files surface requires peer.allow_remote_wake=false");
+    }
+    for (const [key, label] of [
+      ["ssh_identity", "peer.ssh_identity"],
+      ["known_hosts", "peer.known_hosts"],
+    ]) {
+      if (typeof peer[key] !== "string" || !path.isAbsolute(peer[key])) {
+        throw new Error(`${label} must be an absolute path for message-files`);
+      }
+      if (!/^\/[A-Za-z0-9_./-]+$/.test(peer[key]) || path.normalize(peer[key]) !== peer[key]) {
+        throw new Error(`${label} must use a normalized path without shell metacharacters`);
+      }
+      const stat = fs.lstatSync(peer[key]);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        throw new Error(`${label} must be a regular non-symbolic-link file`);
+      }
+      if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+        throw new Error(`${label} must be owned by the current user`);
+      }
+    }
+    if ((fs.statSync(peer.ssh_identity).mode & 0o077) !== 0) {
+      throw new Error("peer.ssh_identity must not be accessible by group or other users");
+    }
+    if (typeof peer.user !== "string" || !/^[A-Za-z_][A-Za-z0-9._-]{0,63}$/.test(peer.user)) {
+      throw new Error("peer.user is invalid for message-files");
+    }
+    const hosts = [
+      peer.primary_enabled === false ? null : peer.primary_host,
+      peer.fallback_enabled === false ? null : peer.fallback_host,
+    ].filter(Boolean);
+    if (hosts.length === 0 || hosts.some((host) =>
+      typeof host !== "string" || !/^[A-Za-z0-9][A-Za-z0-9.:%_-]{0,252}$/.test(host))) {
+      throw new Error("message-files requires at least one valid peer host");
+    }
+    for (const key of ["remote_inbox", "remote_artifacts", "remote_audit"]) {
+      if (typeof peer[key] !== "string" || !path.posix.isAbsolute(peer[key]) ||
+          !/^\/[A-Za-z0-9_./-]+$/.test(peer[key]) || path.posix.normalize(peer[key]) !== peer[key]) {
+        throw new Error(`peer.${key} must be an absolute POSIX path for message-files`);
+      }
+    }
+    for (const root of artifactRoots) {
+      const stat = fs.lstatSync(root);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error("transfer.allowed_artifact_roots entries must be non-symbolic-link directories");
+      }
+    }
+  }
   if (!peer) return;
   if (peer.allow_remote_wake !== undefined && typeof peer.allow_remote_wake !== "boolean") {
     throw new Error("peer.allow_remote_wake must be a boolean");
@@ -443,8 +528,17 @@ function ingestInbox() {
     const filePath = path.join(INBOX, name);
     let envelope;
     try {
+      const stat = fs.lstatSync(filePath);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) {
+        throw new Error("message envelope must be a regular file no larger than 1 MiB");
+      }
       envelope = JSON.parse(fs.readFileSync(filePath, "utf8"));
-      if (!envelope.id || !envelope.sender || !envelope.recipient) {
+      if (typeof envelope.id !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(envelope.id) ||
+          typeof envelope.sender !== "string" || envelope.sender.length > 256 ||
+          typeof envelope.recipient !== "string" || envelope.recipient.length > 256 ||
+          typeof envelope.subject !== "string" || envelope.subject.length > 4096 ||
+          typeof envelope.body !== "string" || Buffer.byteLength(envelope.body) > 512 * 1024) {
         throw new Error("missing required envelope fields");
       }
       const exists = db.prepare("SELECT 1 FROM messages WHERE id=?").get(envelope.id);
@@ -511,6 +605,14 @@ function sshArgs(host, remoteCommand) {
   const connectSeconds = Math.max(1, Math.ceil(config.link.connect_timeout_ms / 1000));
   args.push(
     "-o", "BatchMode=yes",
+    ...(config.peer.ssh_identity ? ["-o", "IdentitiesOnly=yes"] : []),
+    ...(config.peer.known_hosts
+      ? [
+          "-o", "StrictHostKeyChecking=yes",
+          "-o", `UserKnownHostsFile=${config.peer.known_hosts}`,
+          "-o", "GlobalKnownHostsFile=/dev/null",
+        ]
+      : []),
     "-o", `ConnectTimeout=${connectSeconds}`,
     "-o", `ServerAliveInterval=${config.link.server_alive_interval_seconds}`,
     "-o", `ServerAliveCountMax=${config.link.server_alive_count_max}`,
@@ -635,6 +737,14 @@ function rsyncFile(localPath, remoteDir, remoteName = null) {
         "ssh",
         ...(config.peer.ssh_identity ? ["-i", config.peer.ssh_identity] : []),
         "-o", "BatchMode=yes",
+        ...(config.peer.ssh_identity ? ["-o", "IdentitiesOnly=yes"] : []),
+        ...(config.peer.known_hosts
+          ? [
+              "-o", "StrictHostKeyChecking=yes",
+              "-o", `UserKnownHostsFile=${config.peer.known_hosts}`,
+              "-o", "GlobalKnownHostsFile=/dev/null",
+            ]
+          : []),
         "-o", `ConnectTimeout=${Math.max(1, Math.ceil(config.link.connect_timeout_ms / 1000))}`,
         "-o", `ServerAliveInterval=${config.link.server_alive_interval_seconds}`,
         "-o", `ServerAliveCountMax=${config.link.server_alive_count_max}`,
@@ -715,6 +825,12 @@ function retryMessage(args) {
 }
 
 function sendMessage(args, { onEnvelopeWritten = null } = {}) {
+  if (typeof args.subject !== "string" || args.subject.length === 0 || args.subject.length > 4096) {
+    throw new Error("message subject must be 1 to 4096 characters");
+  }
+  if (typeof args.body !== "string" || Buffer.byteLength(args.body) > 512 * 1024) {
+    throw new Error("message body must be a string no larger than 512 KiB");
+  }
   const messageId = id("msg");
   const envelope = {
     schema_version: 1,
@@ -1240,9 +1356,20 @@ function jobCountSummary() {
 }
 
 function registerArtifact(args) {
-  const filePath = path.resolve(args.path);
+  const filePath = fs.realpathSync(path.resolve(args.path));
   const stat = fs.statSync(filePath);
   if (!stat.isFile()) throw new Error("artifact path must be a regular file");
+  const allowedRoots = config.transfer?.allowed_artifact_roots || [];
+  if (allowedRoots.length) {
+    const insideAllowedRoot = allowedRoots.some((configuredRoot) => {
+      const root = fs.realpathSync(configuredRoot);
+      const relative = path.relative(root, filePath);
+      return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
+    });
+    if (!insideAllowedRoot) {
+      throw new Error("artifact path is outside transfer.allowed_artifact_roots");
+    }
+  }
   const artifactId = id("artifact");
   const digest = sha256(filePath);
   db.prepare(`
@@ -1319,13 +1446,21 @@ function sendArtifact(args) {
     audit("send", "artifact", row.id, "source_changed", { delivery });
     return { artifact_id: row.id, delivery };
   }
-  const remoteFileName = `${row.id}-${path.basename(row.path)}`;
+  const safeBaseName = path.basename(row.path).replace(/[^A-Za-z0-9._-]/g, "_");
+  const remoteFileName = `${row.id}-${safeBaseName}`;
   const delivery = rsyncFile(row.path, config.peer.remote_artifacts, remoteFileName);
   if (delivery.ok) {
     const remotePath = path.posix.join(config.peer.remote_artifacts, remoteFileName);
+    const remoteDigestCommand = [
+      "if command -v shasum >/dev/null 2>&1; then",
+      `shasum -a 256 ${shellQuote(remotePath)}`,
+      "; elif command -v sha256sum >/dev/null 2>&1; then",
+      `sha256sum ${shellQuote(remotePath)}`,
+      "; else printf '%s\\n' 'no SHA-256 utility available' >&2; exit 127; fi",
+    ].join(" ");
     const verified = spawnSync(
       "ssh",
-      sshArgs(delivery.host, `shasum -a 256 ${shellQuote(remotePath)}`),
+      sshArgs(delivery.host, remoteDigestCommand),
       { encoding: "utf8", timeout: config.link.operation_attempt_timeout_ms },
     );
     const remoteSha256 = verified.status === 0
@@ -1459,10 +1594,31 @@ function receiveArtifacts() {
     if (!name.endsWith(".artifact.json")) continue;
     const manifestPath = path.join(ARTIFACTS, name);
     try {
+      const manifestStat = fs.lstatSync(manifestPath);
+      if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.size > 1024 * 1024) {
+        throw new Error("artifact manifest must be a regular file no larger than 1 MiB");
+      }
       const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      if (typeof manifest.artifact_id !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(manifest.artifact_id)) {
+        throw new Error("artifact manifest ID is invalid");
+      }
+      if (typeof manifest.file_name !== "string" ||
+          path.basename(manifest.file_name) !== manifest.file_name ||
+          !/^[A-Za-z0-9._-]+$/.test(manifest.file_name)) {
+        throw new Error("artifact manifest file_name is invalid");
+      }
+      if (!Number.isSafeInteger(manifest.size_bytes) || manifest.size_bytes < 0 ||
+          typeof manifest.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(manifest.sha256)) {
+        throw new Error("artifact manifest size or SHA-256 is invalid");
+      }
       const filePath = path.join(ARTIFACTS, manifest.file_name);
       if (!fs.existsSync(filePath)) throw new Error(`artifact file is missing: ${manifest.file_name}`);
-      const stat = fs.statSync(filePath);
+      const fileStat = fs.lstatSync(filePath);
+      if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
+        throw new Error("artifact payload must be a regular non-symbolic-link file");
+      }
+      const stat = fileStat;
       const existing = db.prepare(
         "SELECT size_bytes,sha256,state FROM artifacts WHERE id=?"
       ).get(manifest.artifact_id);
@@ -4198,6 +4354,11 @@ const presetTools = [
 
 const tools = [...coreTools, ...presetTools, ...pluginFramework.tools];
 toolMap = new Map(tools.map((tool) => [tool.name, tool]));
+const surfaceProfile = config.surface_profile || "full";
+const exposedTools = surfaceProfile === "message-files"
+  ? tools.filter((tool) => MESSAGE_FILE_TOOLS.has(tool.name))
+  : tools;
+const exposedToolMap = new Map(exposedTools.map((tool) => [tool.name, tool]));
 for (const tool of pluginFramework.tools) {
   if (tool.allowedOrigins?.has("peer")) peerToolAllowlist.add(tool.name);
 }
@@ -4207,7 +4368,7 @@ const localControl = await startLocalControlSurface(
     : {
         ...config.local_control,
         allowed_tools: (config.local_control?.allowed_tools || [])
-          .filter((name) => toolMap.has(name)),
+          .filter((name) => exposedToolMap.has(name)),
       },
   callToolInternal,
 );
@@ -4230,7 +4391,10 @@ async function handle(request) {
     success(requestId, {
       protocolVersion: request.params?.protocolVersion || "2025-06-18",
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: "hawkspan", version: "0.1.0" },
+      serverInfo: {
+        name: surfaceProfile === "message-files" ? "hawkgrokspan" : "hawkspan",
+        version: "0.1.0",
+      },
     });
     return;
   }
@@ -4240,12 +4404,12 @@ async function handle(request) {
   }
   if (request.method === "tools/list") {
     success(requestId, {
-      tools: tools.map(({ handler, allowedOrigins, applicationPlugin, ...definition }) => definition),
+      tools: exposedTools.map(({ handler, allowedOrigins, applicationPlugin, ...definition }) => definition),
     });
     return;
   }
   if (request.method === "tools/call") {
-    const tool = toolMap.get(request.params?.name);
+    const tool = exposedToolMap.get(request.params?.name);
     if (!tool) {
       failure(requestId, -32602, `unknown tool: ${request.params?.name}`);
       return;

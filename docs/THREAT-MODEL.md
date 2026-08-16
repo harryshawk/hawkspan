@@ -27,6 +27,13 @@ or a security boundary against a malicious administrator.
 - immutable artifact registration and SHA-256 verification;
 - namespace, state, service, and installation isolation.
 
+For HawkGrokSpan, the Grok VM is trusted to exchange messages and selected
+files but is not trusted with the M2/M4 control surface. The server therefore
+removes command, peer-tool, job, queue, application-plugin, trainer, and wake
+operations from discovery and dispatch; requires bounded artifact roots; and
+requires an exclusive pinned-host SSH configuration. Prompt instructions and
+an MCP client's displayed tool list are not treated as the enforcement layer.
+
 ## Residual risks
 
 Plugins are native JavaScript loaded into the server process and are not
@@ -42,3 +49,7 @@ and SSH identities where practical, pin host keys, protect configuration and
 state permissions, keep wake receivers in dedicated directories with unrelated
 writable roots removed, and reconcile external application state before
 retrying interrupted work.
+
+Grok's own built-in tools remain outside HawkGrokSpan's control. The restricted
+profile limits only what the VM can reach through HawkGrokSpan, so the VM and
+its Grok sandbox remain separate trust decisions.

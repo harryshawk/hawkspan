@@ -3,6 +3,12 @@
 Each Mac has the same plugin, a machine-specific configuration, a SQLite
 spool, and a two-minute launch agent.
 
+HawkGrokSpan is a second deployment of the same source, not a third member of
+this peer pair. It uses isolated `~/.hawkgrokspan` state and connects only M2
+and one trusted Grok VM. Its `message-files` profile filters both MCP discovery
+and dispatch to thirteen link, message, acknowledgement, and verified-artifact
+tools. It has no command, job, queue, plugin, trainer, or wake surface.
+
 ## Transport
 
 - Preferred: Thunderbolt Bridge (`192.0.2.10` ↔ `192.0.2.11`)
@@ -108,6 +114,13 @@ artifact is terminally marked `source_changed` or `source_missing`; the current
 file must be registered as a new immutable artifact. Receivers cache verified
 manifest/database matches and do not re-hash multi-gigabyte files on every
 background cycle.
+
+HawkGrokSpan additionally requires outgoing files to resolve under configured
+exchange roots, rejects symlink escape, sanitizes remote filenames, and rejects
+non-regular, oversized, path-escaping, or malformed inbound manifests and
+payloads. Its SSH transport requires a dedicated identity, `IdentitiesOnly`,
+strict checking against a dedicated `known_hosts`, and no global-known-hosts
+fallback. Remote verification selects either `shasum` or Linux `sha256sum`.
 
 ## Draw Things validation bridge
 
