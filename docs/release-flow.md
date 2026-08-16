@@ -1,5 +1,29 @@
 # Release Flow
 
+## 2026-08-15 - HawkSpan 0.3.9 peer-command boundary enforcement
+
+- Request: Make the configured symmetric or controller-worker relationship a
+  real enforcement boundary and deploy every HawkSpan release to both peers.
+- Source branch: `agent/hawkspan-0.3.9`, based on public `v0.3.8`.
+- Scope: Validate role and allowlist configuration at startup; enforce inbound
+  and outbound exact-tool allowlists; default controller inbound and worker
+  outbound access to empty in controller-worker mode; preserve documented
+  boolean and partial-direction compatibility; keep broad shell access off in
+  both live directions.
+- Staging repository and branch: `harryshawk/hawkspan-clean-staging`,
+  `hawkspan-v0.3.9-staging`.
+- Production repository, branch, and tag: `harryshawk/hawkspan`, `main`,
+  `v0.3.9`. The immutable tag identifies the exact commit containing this
+  entry.
+- Two-peer deployment invariant: M2 and M4 must activate and audit the same
+  packaged commit before production promotion; a one-sided HawkSpan deployment
+  is not accepted.
+- Verification: Complete release gate, byte-identical plugin-cache checks on
+  both Macs, exact release-authority audits, dual-route readiness, and real
+  allowed/denied cross-peer dispatch probes are required before promotion.
+- Production approval: Explicitly granted in the controlling Codex task after
+  staging review on 2026-08-15.
+
 ## 2026-08-15 - HawkSpan 0.3.8 package-verifier roll-forward
 
 - Defect evidence: 0.3.7 activation failed closed before writing authority;
