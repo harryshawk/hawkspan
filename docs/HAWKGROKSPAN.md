@@ -59,7 +59,10 @@ run `tailscaled` in userspace-networking mode, publish only its local SSH server
 to the tailnet with a private TCP forwarder, and configure
 `peer.transport.kind` as `tailscale-nc` so outbound OpenSSH and rsync streams go
 through the exact root- or owner-controlled Tailscale executable recorded in
-`peer.transport.command`.
+`peer.transport.command`. When the VM runs a user-scoped daemon without
+systemd, `peer.transport.socket` records its normalized absolute socket path
+under the persistent HawkGrokSpan directory; the SSH proxy passes that path to
+the Tailscale client explicitly.
 
 The server rejects other proxy kinds, relative or metacharacter-bearing paths,
 symlinks, non-executable files, executables owned by unrelated users, and

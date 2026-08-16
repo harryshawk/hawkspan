@@ -19,6 +19,7 @@ const writableProxyCommand = path.join(bin, "writable-proxy");
 const symlinkProxyCommand = path.join(bin, "symlink-proxy");
 const transportLog = path.join(root, "transport.log");
 const configPath = path.join(root, "config.json");
+const tailscaleSocket = path.join(root, "tailscaled.sock");
 fs.mkdirSync(allowed);
 fs.mkdirSync(outside);
 fs.mkdirSync(bin);
@@ -52,6 +53,7 @@ const config = {
     transport: {
       kind: "tailscale-nc",
       command: tailscaleCommand,
+      socket: tailscaleSocket,
     },
     remote_state_dir: "/home/grok/.hawkgrokspan",
     remote_inbox: "/home/grok/.hawkgrokspan/inbox",
@@ -218,7 +220,7 @@ for (const expected of [
   "-o StrictHostKeyChecking=yes",
   `-o UserKnownHostsFile=${knownHosts}`,
   "-o GlobalKnownHostsFile=/dev/null",
-  `-o ProxyCommand=${tailscaleCommand} nc %h %p`,
+  `-o ProxyCommand=${tailscaleCommand} --socket=${tailscaleSocket} nc %h %p`,
 ]) assert.match(transport, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 assert.match(transport, /name_with_shell\.txt/);
 assert.doesNotMatch(transport, /\.hawkgrokspan\/artifacts\/[^\n]*name;with shell\.txt/);
@@ -236,6 +238,7 @@ for (const mutation of [
   (value) => { value.peer.transport.kind = "arbitrary-proxy"; },
   (value) => { value.peer.transport.command = writableProxyCommand; },
   (value) => { value.peer.transport.command = symlinkProxyCommand; },
+  (value) => { value.peer.transport.socket = "relative.sock"; },
   (value) => { value.peer.allow_remote_wake = true; },
   (value) => { value.peer.remote_artifacts = "/home/grok/elsewhere"; },
   (value) => { value.transfer.allowed_artifact_roots = [outside, "relative"]; },

@@ -16,6 +16,7 @@ const config = {
     transport: {
       kind: "tailscale-nc",
       command: "/usr/bin/tailscale",
+      socket: "/run/user/501/hawkgrokspan-tailscaled.sock",
     },
   },
   readiness: {
@@ -44,7 +45,9 @@ const sshArgs = __test.sshArgs(config, "10.44.45.3", "true");
 assert(sshArgs.includes("ConnectTimeout=9"));
 assert(sshArgs.includes("ServerAliveInterval=11"));
 assert(sshArgs.includes("ServerAliveCountMax=4"));
-assert(sshArgs.includes("ProxyCommand=/usr/bin/tailscale nc %h %p"));
+assert(sshArgs.includes(
+  "ProxyCommand=/usr/bin/tailscale --socket=/run/user/501/hawkgrokspan-tailscaled.sock nc %h %p",
+));
 assert.equal(__test.sshOperationTimeout(config), 54000);
 
 process.stdout.write("hawkspan readiness monitor tests passed\n");

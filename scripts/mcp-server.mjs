@@ -212,7 +212,8 @@ function assertPeerConfiguration(configuration) {
     const transport = peer.transport;
     if (!transport || typeof transport !== "object" || Array.isArray(transport) ||
         transport.kind !== "tailscale-nc" ||
-        Object.keys(transport).some((key) => key !== "kind" && key !== "command")) {
+        Object.keys(transport).some((key) =>
+          key !== "kind" && key !== "command" && key !== "socket")) {
       throw new Error("peer.transport must be a tailscale-nc transport object");
     }
     if (typeof transport.command !== "string" || !path.isAbsolute(transport.command) ||
@@ -229,6 +230,12 @@ function assertPeerConfiguration(configuration) {
     }
     if ((stat.mode & 0o022) !== 0 || (stat.mode & 0o111) === 0) {
       throw new Error("peer.transport.command must be executable and not group- or other-writable");
+    }
+    if (transport.socket !== undefined &&
+        (typeof transport.socket !== "string" || !path.isAbsolute(transport.socket) ||
+         !/^\/[A-Za-z0-9_./-]+$/.test(transport.socket) ||
+         path.normalize(transport.socket) !== transport.socket)) {
+      throw new Error("peer.transport.socket must be a normalized absolute path without shell metacharacters");
     }
   }
   if (surfaceProfile === "message-files") {
@@ -672,7 +679,12 @@ function sshClientArgs() {
         ]
       : []),
     ...(config.peer.transport?.kind === "tailscale-nc"
-      ? ["-o", `ProxyCommand=${config.peer.transport.command} nc %h %p`]
+      ? [
+          "-o",
+          `ProxyCommand=${config.peer.transport.command}` +
+            `${config.peer.transport.socket ? ` --socket=${config.peer.transport.socket}` : ""}` +
+            " nc %h %p",
+        ]
       : []),
     "-o", `ConnectTimeout=${connectSeconds}`,
     "-o", `ServerAliveInterval=${config.link.server_alive_interval_seconds}`,
