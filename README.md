@@ -218,7 +218,10 @@ selects that exact supported store before invoking `codex exec resume`. A task
 ID present only in another Codex store will fail with `no rollout found` even
 though message delivery succeeded. Keep unattended receivers workspace-bound;
 when a wrapper is required, it should also insert `-s workspace-write` before
-the `resume` subcommand instead of inheriting a broader user default.
+the `resume` subcommand, pin `-C` to the receiver's dedicated directory, and
+clear unrelated configured writable roots instead of inheriting broader user
+defaults. The Codex store itself may remain external; the model's command
+workspace does not need write access to the entire storage volume.
 
 Do not target a task that remains loaded in Codex Desktop. A task can emit
 `task_complete` and still retain the desktop app's writer lease; an external
