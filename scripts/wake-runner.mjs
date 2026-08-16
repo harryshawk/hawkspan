@@ -126,6 +126,10 @@ function validateRequest(raw) {
   ]) {
     if (!path.isAbsolute(raw[key])) throw new Error(`wake request ${key} must be absolute`);
   }
+  if (raw.target_thread_id !== null && raw.target_thread_id !== undefined &&
+      (typeof raw.target_thread_id !== "string" || !raw.target_thread_id.trim())) {
+    throw new Error("wake request target_thread_id must be a non-empty string when provided");
+  }
   const auditDir = path.resolve(raw.audit_dir);
   for (const key of ["log_path", "lease_path", "result_path"]) {
     if (path.dirname(path.resolve(raw[key])) !== auditDir) {
@@ -357,7 +361,9 @@ function acknowledgeUnderLeaseGuard(request, leasePath, token) {
     const acknowledgement = callLocalTool(request, "acknowledge_message", {
       message_id: request.message_id,
       deliver: true,
-      note: "Accepted by the addressed Codex task.",
+      note: request.target_thread_id
+        ? `Accepted after handoff to Codex task ${request.target_thread_id}.`
+        : "Accepted by the bounded HawkSpan receiver.",
     });
     if (!acknowledgement.ok) {
       return {
@@ -378,6 +384,7 @@ function writeWakeResult(request, result) {
     wake_id: request.wake_id,
     message_id: request.message_id,
     thread_id: request.thread_id,
+    target_thread_id: request.target_thread_id || null,
     completed_at: new Date().toISOString(),
     ...result,
   });

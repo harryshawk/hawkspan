@@ -199,12 +199,14 @@ control creates a separate `validated` packet. Only receipt confirmation for
 that validated packet completes the original training job and queue item.
 
 The immutable message body is embedded in the peer wake prompt. A bounded
-receiver runner imports the envelope outside the Codex sandbox, resumes an
-explicitly addressed Codex task (or the configured receiver for a symbolic
-node recipient), requires exact structured acceptance for the same message ID,
-and only then writes the application acknowledgement. A token-fenced lease,
-timeout, and TERM/KILL escalation prevent a hung task from retaining the task
-writer indefinitely.
+receiver runner imports the envelope outside the Codex sandbox and wakes one
+reliable configured receiver. When the envelope carries `target_thread_id`, the
+receiver forwards the message through supported Codex inter-thread messaging;
+otherwise it handles the message itself. Exact structured acceptance is valid
+only after the target handoff succeeds or receiver handling completes, and only
+then does the runner write the application acknowledgement. A token-fenced
+lease, timeout, and TERM/KILL escalation prevent a hung receiver from retaining
+the task writer indefinitely.
 The immutable `wake_requested` field prevents background flushes, restarts, or
 queue retries from upgrading a message originally sent with `wake: false`.
 A delivered wake-requested message remains durably `wake_pending` until its

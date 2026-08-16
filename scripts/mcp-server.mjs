@@ -748,12 +748,17 @@ function retryMessage(args) {
 function sendMessage(args, { onEnvelopeWritten = null } = {}) {
   const messageId = id("msg");
   const wakeRequested = args.wake !== false;
+  const recipient = args.recipient || config.peer?.node_id || "peer";
+  const targetThreadId = typeof args.target_thread_id === "string" && args.target_thread_id.trim()
+    ? args.target_thread_id.trim()
+    : (CODEX_TASK_ID.test(String(recipient)) ? recipient : null);
   const envelope = {
     schema_version: 1,
     id: messageId,
     created_at: now(),
     sender: config.node_id,
-    recipient: args.recipient || config.peer?.node_id || "peer",
+    recipient,
+    target_thread_id: targetThreadId,
     kind: args.kind || "message",
     subject: args.subject,
     body: args.body,
@@ -839,17 +844,33 @@ function wakePeerThread(args) {
   }
   const storedMessage = args.message_id
     ? db.prepare(`
-        SELECT recipient,subject,body FROM messages
+        SELECT recipient,subject,body,envelope_path FROM messages
         WHERE id=? AND direction='outbound'
       `).get(args.message_id)
     : null;
-  const targetThreadId = CODEX_TASK_ID.test(String(storedMessage?.recipient || ""))
-    ? storedMessage.recipient
-    : config.peer?.thread_id;
-  if (!targetThreadId) {
+  let storedEnvelope = null;
+  if (storedMessage?.envelope_path) {
+    try {
+      storedEnvelope = JSON.parse(fs.readFileSync(storedMessage.envelope_path, "utf8"));
+    } catch (error) {
+      return {
+        ok: false,
+        error: `immutable message envelope is unreadable: ${String(error.message || error)}`,
+        attempts: [],
+      };
+    }
+  }
+  const explicitTarget = storedEnvelope?.target_thread_id;
+  const targetThreadId = typeof explicitTarget === "string" && explicitTarget.trim()
+    ? explicitTarget.trim()
+    : (CODEX_TASK_ID.test(String(storedEnvelope?.recipient || storedMessage?.recipient || ""))
+        ? (storedEnvelope?.recipient || storedMessage.recipient)
+        : null);
+  const receiverThreadId = config.peer?.thread_id;
+  if (!receiverThreadId) {
     return {
       ok: false,
-      error: "message recipient is not a Codex task ID and peer.thread_id is not configured",
+      error: "peer.thread_id receiver is not configured",
       attempts: [],
     };
   }
@@ -886,17 +907,30 @@ function wakePeerThread(args) {
   const resultPath = path.posix.join(auditDir, `${wakeId}.result.json`);
   const leasePath = path.posix.join(
     auditDir,
-    `wake-${String(targetThreadId).replace(/[^A-Za-z0-9._-]/g, "_")}.lock`,
+    `wake-${String(receiverThreadId).replace(/[^A-Za-z0-9._-]/g, "_")}.lock`,
   );
   const subject = args.subject || storedMessage?.subject || "";
   const body = args.body || storedMessage?.body || "";
-  const prompt = [
-    `HawkSpan-D delivered message ${args.message_id || "unknown"}.`,
+  const forwardedPrompt = [
+    `HawkSpan durable message ${args.message_id || "unknown"}.`,
     subject ? `Subject: ${subject}.` : "",
     body ? `Message body: ${body}` : "",
-    "The wake runner has imported the durable envelope; the embedded body is authoritative.",
-    "Process this message in the context of this addressed task's existing work.",
-    "Do not create, adopt, complete, or modify a persistent goal merely to accept this message.",
+    "Treat repeated delivery of the same HawkSpan message ID idempotently.",
+  ].filter(Boolean).join(" ");
+  const prompt = [
+    `HawkSpan-D receiver imported durable message ${args.message_id || "unknown"}.`,
+    targetThreadId
+      ? `Its immutable target_thread_id is ${targetThreadId}.`
+      : "It has no target_thread_id, so handle it in this receiver turn.",
+    targetThreadId
+      ? `Call the available Codex inter-thread send_message_to_thread capability exactly once ` +
+        `with threadId ${JSON.stringify(targetThreadId)} and prompt ${JSON.stringify(forwardedPrompt)}. ` +
+        `Do not execute the forwarded message in the receiver.`
+      : forwardedPrompt,
+    targetThreadId
+      ? "The target handoff is accepted only if that inter-thread call reports success."
+      : "Receiver handling is accepted only after the message has been processed.",
+    "Do not call acknowledge_message; the fenced runner owns durable acknowledgement.",
     `If and only if the message is accepted, return only JSON ` +
       `{"message_id":"${args.message_id || "unknown"}","status":"accepted"}.`,
     "If it cannot be accepted, exit without returning that acceptance object.",
@@ -905,7 +939,8 @@ function wakePeerThread(args) {
     schema_version: 1,
     wake_id: wakeId,
     message_id: args.message_id || "unknown",
-    thread_id: targetThreadId,
+    thread_id: receiverThreadId,
+    target_thread_id: targetThreadId,
     prompt,
     codex_command: codexCommand,
     node_command: remoteNode,
@@ -957,13 +992,14 @@ function wakePeerThread(args) {
       });
       if (result.status === 0 && marker?.status === "started") {
         recordRouteSuccess(host);
-        audit("wake", "thread", targetThreadId, "started", {
+        audit("wake", "thread", receiverThreadId, "started", {
           host,
           peer_revision: peerRelease.revision,
           wake_id: wakeId,
           log_path: logPath,
           result_path: resultPath,
           message_id: args.message_id || null,
+          target_thread_id: targetThreadId,
           runner_pid: marker.pid || null,
         });
         return {
@@ -972,34 +1008,38 @@ function wakePeerThread(args) {
           wake_id: wakeId,
           log_path: logPath,
           result_path: resultPath,
+          target_thread_id: targetThreadId,
           attempts,
         };
       }
       if (marker?.status === "busy") {
         recordRouteSuccess(host);
-        audit("wake", "thread", targetThreadId, "busy", {
+        audit("wake", "thread", receiverThreadId, "busy", {
           host,
           wake_id: wakeId,
           message_id: args.message_id || null,
+          target_thread_id: targetThreadId,
           marker,
         });
         return {
           ok: false,
           skipped: true,
           busy: true,
-          error: "peer task is already active",
+          error: "peer receiver is already active",
           host,
           wake_id: wakeId,
+          target_thread_id: targetThreadId,
           attempts,
         };
       }
       if (marker?.status === "failed" || result.status === 0) {
         recordRouteSuccess(host);
         const error = marker?.error || "invalid wake runner response";
-        audit("wake", "thread", targetThreadId, "failed", {
+        audit("wake", "thread", receiverThreadId, "failed", {
           host,
           wake_id: wakeId,
           message_id: args.message_id || null,
+          target_thread_id: targetThreadId,
           error,
           marker,
         });
@@ -1007,7 +1047,10 @@ function wakePeerThread(args) {
       }
       recordRouteFailure(host);
   }
-  audit("wake", "thread", targetThreadId, "failed", { attempts });
+  audit("wake", "thread", receiverThreadId, "failed", {
+    target_thread_id: targetThreadId,
+    attempts,
+  });
   return { ok: false, error: "all routes failed", wake_id: wakeId, attempts };
 }
 
@@ -3679,6 +3722,11 @@ const coreTools = [
       required: ["subject", "body"],
       properties: {
         recipient: { type: "string" },
+        target_thread_id: {
+          type: "string",
+          minLength: 1,
+          description: "Codex task to receive the message after the reliable peer receiver wakes.",
+        },
         kind: { type: "string" },
         subject: { type: "string" },
         body: { type: "string" },

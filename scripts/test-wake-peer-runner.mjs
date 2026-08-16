@@ -94,12 +94,17 @@ function tool(name, args, marker = "started") {
 }
 
 const message = tool("send_message", {
-  recipient: "00000000-0000-0000-0000-000000000003",
+  recipient: "peer",
+  target_thread_id: "00000000-0000-0000-0000-000000000003",
   subject: "wake runner marker test",
   body: "test body",
   deliver: false,
   wake: true,
 });
+assert.equal(
+  JSON.parse(fs.readFileSync(message.envelope_path, "utf8")).target_thread_id,
+  "00000000-0000-0000-0000-000000000003",
+);
 
 const started = tool("wake_peer_thread", { message_id: message.message_id }, "started");
 assert.equal(started.ok, true);
@@ -110,7 +115,10 @@ const startedWakeLine = fs.readFileSync(log, "utf8").split("\n")
 const encodedWakeRequest = startedWakeLine?.match(/\blaunch '([A-Za-z0-9+/=]+)'/)?.[1];
 assert.ok(encodedWakeRequest, "wake request must be present in the SSH command");
 const wakeRequest = JSON.parse(Buffer.from(encodedWakeRequest, "base64").toString("utf8"));
-assert.equal(wakeRequest.thread_id, "00000000-0000-0000-0000-000000000003");
+assert.equal(wakeRequest.thread_id, "00000000-0000-0000-0000-000000000002");
+assert.equal(wakeRequest.target_thread_id, "00000000-0000-0000-0000-000000000003");
+assert.match(wakeRequest.prompt, /send_message_to_thread/);
+assert.match(wakeRequest.prompt, /00000000-0000-0000-0000-000000000003/);
 
 const beforeBusy = fs.readFileSync(log, "utf8").split("\n").filter(Boolean).length;
 const busy = tool("wake_peer_thread", { message_id: message.message_id }, "busy");

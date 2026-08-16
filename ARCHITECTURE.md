@@ -34,14 +34,16 @@ deadline, and only its current token can remove the lease.
 
 ## Codex coordination
 
-A delivered message is imported by the receiver runner before the
-`codex exec resume` wakeup. When the immutable envelope recipient is an explicit
-Codex task ID, the runner resumes exactly that addressed task; symbolic node
-recipients use the configured receiver task. Codex must return an exact
-structured acceptance for that immutable message ID. The runner, outside the
-Codex sandbox, writes the application acknowledgement only after the resumed
-task returns that match; process exit, malformed or mismatched output, signal,
-timeout, and routing failure do not acknowledge.
+A delivered message is imported before `codex exec resume` wakes the configured
+reliable receiver task. An optional immutable `target_thread_id` identifies a
+working Codex task. The receiver forwards the durable message ID, subject, and
+body to that exact task through supported Codex inter-thread messaging; without
+a target it handles the message itself. The receiver returns exact structured
+acceptance only after the target handoff is accepted or its own handling
+completes. The fenced runner then writes the application acknowledgement.
+Process exit, rejected handoff, malformed or mismatched output, signal, timeout,
+and routing failure do not acknowledge, so the immutable message remains
+available for retry.
 
 ## Trusted remote operations
 
