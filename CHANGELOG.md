@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Documented safe recovery when an existing Codex task remains read-only after
+  Full Access is selected: continue in a new Full Access task, reverify the
+  unchanged plugin packet, and do not substitute Computer Use, peer commands,
+  permission changes, or HawkSpan service/IPC workarounds for the reviewed
+  local installer.
+
 ## 0.3.9 - 2026-08-15
 
 - Enforced configured inbound and outbound peer-tool allowlists and peer
