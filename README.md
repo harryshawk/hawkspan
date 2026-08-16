@@ -20,7 +20,8 @@ HawkSpan provides:
 - primary and fallback private routes;
 - broad audited command execution on either trusted Mac, including through the
   peer tool bridge;
-- immutable retry of queued messages after either Mac is temporarily offline;
+- immutable retry of queued messages after either Mac is temporarily offline,
+  plus wake-only retry after delivery until application acknowledgement;
 - a two-minute background launch agent that drains the durable outbox after a
   peer or route returns;
 - SimpleTuner queue, dataset, process, and log inspection;
@@ -197,9 +198,17 @@ After that evidence is ingested back into the run output, the normal package
 control creates a separate `validated` packet. Only receipt confirmation for
 that validated packet completes the original training job and queue item.
 
-The immutable message body is embedded in the peer wake prompt. The prompt also
-provides a direct `call-tool.mjs` fallback for Codex exec environments that do
-not load dynamic MCP tools.
+The immutable message body is embedded in the peer wake prompt. A bounded
+receiver runner imports the envelope outside the Codex sandbox, requires an
+exact structured acceptance for the same message ID, and only then writes the
+application acknowledgement. A token-fenced lease, timeout, and TERM/KILL
+escalation prevent a hung receiver from retaining the task writer indefinitely.
+The immutable `wake_requested` field prevents background flushes, restarts, or
+queue retries from upgrading a message originally sent with `wake: false`.
+A delivered wake-requested message remains durably `wake_pending` until its
+acknowledgement arrives. Retries reuse the same remote envelope and issue only
+the wake, so a busy receiver or sender restart cannot strand the message or
+duplicate its delivery.
 
 Background artifact intake reuses an already verified manifest/database match
 instead of hashing every large artifact again on every two-minute pass. This

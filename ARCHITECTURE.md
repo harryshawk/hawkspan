@@ -22,17 +22,23 @@ The background agent retries queued work. A temporary disconnect, sleep,
 screen lock, or stopped SSH service therefore delays delivery without losing
 the instruction or creating a duplicate.
 
-Peer wakeups are not sent for acknowledgement envelopes. A per-task remote
-lease serializes other wakeups so repeated delivery cannot create concurrent
-`codex exec resume` processes for one task.
+Peer wakeups are not sent for acknowledgement envelopes. Each outbound message
+persists immutable wake intent in both SQLite and its envelope; a retry may
+suppress a requested wake for that attempt but cannot upgrade `wake: false`.
+A successfully delivered wake-requested message enters `wake_pending`, and its
+durable queue item is deferred until the sender ingests the application
+acknowledgement. Wake-only retries never rsync or recreate that envelope.
+A token-fenced per-task remote lease serializes wakeups. The bounded runner
+reports `STARTED`, `BUSY`, or `FAILED`, terminates a hung process group after its
+deadline, and only its current token can remove the lease.
 
 ## Codex coordination
 
-A delivered message is imported from the durable inbox by the peer task. The
-configured `codex exec resume` wakeup lets an idle task continue without the owner
-relaying the instruction. The peer acknowledges the immutable message ID,
-performs authorized work, and replies with the original ID as the correlation
-boundary.
+A delivered message is imported by the receiver runner before the configured
+`codex exec resume` wakeup. Codex must return an exact structured acceptance for
+that immutable message ID. The runner, outside the Codex sandbox, writes the
+application acknowledgement only after that match; process exit, malformed or
+mismatched output, signal, timeout, and routing failure do not acknowledge.
 
 ## Trusted remote operations
 

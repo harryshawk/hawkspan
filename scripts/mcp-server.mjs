@@ -253,6 +253,7 @@ execWithRetry(`
     envelope_path TEXT NOT NULL,
     delivered_via TEXT,
     acknowledged_at TEXT,
+    wake_requested INTEGER NOT NULL DEFAULT 1,
     metadata_json TEXT NOT NULL
   );
 
@@ -295,6 +296,15 @@ execWithRetry(`
     details_json TEXT NOT NULL
   );
 `);
+
+const messageColumns = new Set(
+  db.prepare("PRAGMA table_info(messages)").all().map((row) => row.name),
+);
+if (!messageColumns.has("wake_requested")) {
+  execWithRetry(
+    "ALTER TABLE messages ADD COLUMN wake_requested INTEGER NOT NULL DEFAULT 1",
+  );
+}
 
 const queueRegistry = createQueueRegistry(db, {
   retryDelaysMs: config.queue_supervisor.worker_restart_delays_ms,
@@ -388,6 +398,20 @@ function enqueueDeliveryReference(queueId, itemIdValue, payload, priority = 1000
   return result;
 }
 
+function clearMessageWakeRetry(messageId) {
+  const itemIdValue = `message-${messageId}`;
+  const item = db.prepare(`
+    SELECT state FROM queue_items WHERE id=? AND queue_id='hawkspan-messages'
+  `).get(itemIdValue);
+  if (!item || !new Set(["queued", "paused", "failed"]).has(item.state)) return null;
+  return queueRegistry.control({
+    queue_id: "hawkspan-messages",
+    item_id: itemIdValue,
+    action: "cancel-item",
+    reason: "message acknowledgement cleared wake retry",
+  }).item;
+}
+
 function sha256(filePath) {
   const hash = crypto.createHash("sha256");
   const fd = fs.openSync(filePath, "r");
@@ -453,6 +477,7 @@ function ingestInbox() {
           SET state='acknowledged', acknowledged_at=?
           WHERE id=? AND direction='outbound'
         `).run(envelope.created_at || now(), envelope.correlation_id);
+        clearMessageWakeRetry(envelope.correlation_id);
       }
       audit("ingest", "message", envelope.id, "received", { file_path: filePath });
       imported += 1;
@@ -651,6 +676,7 @@ function rsyncFile(localPath, remoteDir, remoteName = null) {
 }
 
 function retryMessage(args) {
+  ingestInbox();
   const row = db.prepare(`
     SELECT * FROM messages WHERE id=? AND direction='outbound'
   `).get(args.message_id);
@@ -659,6 +685,8 @@ function retryMessage(args) {
     return {
       message_id: row.id,
       envelope_path: row.envelope_path,
+      wake_requested: row.wake_requested !== 0,
+      wake_pending: false,
       delivery: { ok: true, already_delivered: true, host: row.delivered_via || null, attempts: [] },
       wake: null,
     };
@@ -666,34 +694,59 @@ function retryMessage(args) {
   if (!fs.existsSync(row.envelope_path)) {
     throw new Error(`immutable envelope is missing: ${row.envelope_path}`);
   }
-  if (!config.peer?.remote_inbox) throw new Error("peer.remote_inbox is not configured");
-  const delivery = rsyncFile(row.envelope_path, config.peer.remote_inbox);
-  if (delivery.ok) {
-    db.prepare("UPDATE messages SET state='delivered', delivered_via=? WHERE id=?")
-      .run(delivery.host, row.id);
+  const envelope = JSON.parse(fs.readFileSync(row.envelope_path, "utf8"));
+  const wakeRequested = row.wake_requested !== 0 && envelope.wake_requested !== false;
+  const shouldWake = wakeRequested && args.wake !== false;
+  const wakeEligible = row.kind !== "acknowledgement" && wakeRequested;
+  let delivery;
+  if (row.state === "wake_pending") {
+    delivery = {
+      ok: true,
+      already_delivered: true,
+      host: row.delivered_via || null,
+      attempts: [],
+    };
+  } else {
+    if (!config.peer?.remote_inbox) throw new Error("peer.remote_inbox is not configured");
+    delivery = rsyncFile(row.envelope_path, config.peer.remote_inbox);
+    if (delivery.ok) {
+      db.prepare("UPDATE messages SET state=?, delivered_via=? WHERE id=?")
+        .run(wakeEligible ? "wake_pending" : "delivered", delivery.host, row.id);
+    }
   }
   let wake = null;
-  if (delivery.ok && row.kind !== "acknowledgement" && args.wake !== false) {
+  if (delivery.ok && row.kind !== "acknowledgement" && shouldWake) {
     wake = wakePeerThread({
       message_id: row.id,
       subject: row.subject,
       body: row.body,
     });
   }
-  audit("retry", "message", row.id, delivery.ok ? "delivered" : "queued", {
+  const wakePending = delivery.ok && wakeEligible;
+  audit("retry", "message", row.id, delivery.ok ? (wakePending ? "wake_pending" : "delivered") : "queued", {
     delivery,
     wake,
+    wake_requested: wakeRequested,
+    wake_attempted: shouldWake,
   });
-  if (!delivery.ok) {
+  if (!delivery.ok || wakePending) {
     enqueueDeliveryReference(
-      "hawkspan-messages", `message-${row.id}`, { message_id: row.id, wake: args.wake !== false }, 100,
+      "hawkspan-messages", `message-${row.id}`, { message_id: row.id, wake: wakeRequested }, 100,
     );
   }
-  return { message_id: row.id, envelope_path: row.envelope_path, delivery, wake };
+  return {
+    message_id: row.id,
+    envelope_path: row.envelope_path,
+    wake_requested: wakeRequested,
+    wake_pending: wakePending,
+    delivery,
+    wake,
+  };
 }
 
 function sendMessage(args, { onEnvelopeWritten = null } = {}) {
   const messageId = id("msg");
+  const wakeRequested = args.wake !== false;
   const envelope = {
     schema_version: 1,
     id: messageId,
@@ -704,6 +757,7 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
     subject: args.subject,
     body: args.body,
     correlation_id: args.correlation_id || null,
+    wake_requested: wakeRequested,
     metadata: args.metadata || {},
   };
   const envelopePath = writeEnvelope(envelope);
@@ -712,8 +766,8 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
     db.prepare(`
       INSERT INTO messages
         (id,created_at,sender,recipient,kind,subject,body,correlation_id,
-         direction,state,envelope_path,metadata_json)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+         direction,state,envelope_path,wake_requested,metadata_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       messageId,
       envelope.created_at,
@@ -726,6 +780,7 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
       "outbound",
       "queued",
       envelopePath,
+      wakeRequested ? 1 : 0,
       json(envelope.metadata),
     );
   } catch (error) {
@@ -736,28 +791,40 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
   if (args.deliver !== false && config.peer?.remote_inbox) {
     delivery = rsyncFile(envelopePath, config.peer.remote_inbox);
     if (delivery.ok) {
-      db.prepare("UPDATE messages SET state='delivered', delivered_via=? WHERE id=?")
-        .run(delivery.host, messageId);
+      const wakePending = envelope.kind !== "acknowledgement" && wakeRequested;
+      db.prepare("UPDATE messages SET state=?, delivered_via=? WHERE id=?")
+        .run(wakePending ? "wake_pending" : "delivered", delivery.host, messageId);
     }
   }
   let wake = null;
-  if (delivery?.ok && envelope.kind !== "acknowledgement" && args.wake !== false) {
+  if (delivery?.ok && envelope.kind !== "acknowledgement" && wakeRequested) {
     wake = wakePeerThread({
       message_id: messageId,
       subject: envelope.subject,
       body: envelope.body,
     });
   }
-  audit("send", "message", messageId, delivery?.ok ? "delivered" : "queued", {
+  const wakePending = Boolean(
+    delivery?.ok && envelope.kind !== "acknowledgement" && wakeRequested,
+  );
+  audit("send", "message", messageId, delivery?.ok ? (wakePending ? "wake_pending" : "delivered") : "queued", {
     delivery,
     wake,
+    wake_requested: wakeRequested,
   });
-  if (args.deliver !== false && !delivery?.ok) {
+  if (args.deliver !== false && (!delivery?.ok || wakePending)) {
     enqueueDeliveryReference(
-      "hawkspan-messages", `message-${messageId}`, { message_id: messageId, wake: args.wake !== false }, 100,
+      "hawkspan-messages", `message-${messageId}`, { message_id: messageId, wake: wakeRequested }, 100,
     );
   }
-  return { message_id: messageId, envelope_path: envelopePath, delivery, wake };
+  return {
+    message_id: messageId,
+    envelope_path: envelopePath,
+    wake_requested: wakeRequested,
+    wake_pending: wakePending,
+    delivery,
+    wake,
+  };
 }
 
 function wakePeerThread(args) {
@@ -772,6 +839,12 @@ function wakePeerThread(args) {
   if (!config.peer?.thread_id) {
     return { ok: false, error: "peer.thread_id is not configured", attempts: [] };
   }
+  const storedMessage = args.message_id
+    ? db.prepare(`
+        SELECT subject,body FROM messages
+        WHERE id=? AND direction='outbound'
+      `).get(args.message_id)
+    : null;
   const codexCommand = config.peer.codex_command || "codex";
   const remoteNode = config.peer.remote_node || "node";
   let peerRelease = null;
@@ -798,55 +871,51 @@ function wakePeerThread(args) {
     return { ok: false, error: "peer release authority unavailable", attempts: discoveryAttempts };
   }
   const remoteCallTool = path.posix.join(peerRelease.active_release_root, "scripts", "call-tool.mjs");
+  const remoteWakeRunner = path.posix.join(peerRelease.active_release_root, "scripts", "wake-runner.mjs");
   const auditDir = config.peer.remote_audit || `${config.peer.remote_inbox}/../audit`;
   const wakeId = id("wake");
   const logPath = path.posix.join(auditDir, `${wakeId}.log`);
+  const resultPath = path.posix.join(auditDir, `${wakeId}.result.json`);
   const leasePath = path.posix.join(
     auditDir,
     `wake-${String(config.peer.thread_id).replace(/[^A-Za-z0-9._-]/g, "_")}.lock`,
   );
+  const subject = args.subject || storedMessage?.subject || "";
+  const body = args.body || storedMessage?.body || "";
   const prompt = [
     `HawkSpan-D delivered message ${args.message_id || "unknown"}.`,
-    args.subject ? `Subject: ${args.subject}.` : "",
-    args.body ? `Message body: ${args.body}` : "",
-    "Import and acknowledge the durable envelope when MCP tools are available.",
-    "If exec mode cannot load dynamic MCP tools, this embedded message body is authoritative.",
-    `Direct receive fallback: ${remoteNode} ${remoteCallTool} receive_messages '{"limit":20}'`,
-    `Direct acknowledge fallback: ${remoteNode} ${remoteCallTool} acknowledge_message ` +
-      `'{"message_id":"${args.message_id || "unknown"}","deliver":true}'`,
-    "Continue the existing task without repeating completed work.",
+    subject ? `Subject: ${subject}.` : "",
+    body ? `Message body: ${body}` : "",
+    "The bounded receiver runner has imported the durable envelope; the embedded body is authoritative.",
+    "Process this as a one-turn receiver. Do not create, adopt, complete, or modify a persistent goal.",
+    `If and only if the message is accepted, return only JSON ` +
+      `{"message_id":"${args.message_id || "unknown"}","status":"accepted"}.`,
+    "If it cannot be accepted, exit without returning that acceptance object.",
   ].filter(Boolean).join(" ");
-  const resumedCommand = [
-    "trap",
-    shellQuote(`rm -rf ${shellQuote(leasePath)}`),
-    "EXIT HUP INT TERM",
-    ";",
-    shellQuote(codexCommand),
-    "exec",
-    "resume",
-    "--skip-git-repo-check",
-    shellQuote(config.peer.thread_id),
-    shellQuote(prompt),
-  ].join(" ");
+  const launchRequest = {
+    schema_version: 1,
+    wake_id: wakeId,
+    message_id: args.message_id || "unknown",
+    thread_id: config.peer.thread_id,
+    prompt,
+    codex_command: codexCommand,
+    node_command: remoteNode,
+    call_tool_path: remoteCallTool,
+    audit_dir: auditDir,
+    log_path: logPath,
+    lease_path: leasePath,
+    result_path: resultPath,
+    timeout_ms: Number(config.peer.wake_timeout_ms || 120000),
+    termination_grace_ms: Number(config.peer.wake_termination_grace_ms || 5000),
+  };
+  const encodedRequest = Buffer.from(JSON.stringify(launchRequest), "utf8").toString("base64");
   const command = [
     `mkdir -p ${shellQuote(auditDir)}`,
     "&&",
-    "(",
-    `mkdir ${shellQuote(leasePath)} 2>/dev/null`,
-    "||",
-    "exit 0",
-    ")",
-    "&&",
-    "nohup",
-    "/bin/sh",
-    "-c",
-    shellQuote(resumedCommand),
-    ">",
-    shellQuote(logPath),
-    "2>&1",
-    "<",
-    "/dev/null",
-    "&",
+    shellQuote(remoteNode),
+    shellQuote(remoteWakeRunner),
+    "launch",
+    shellQuote(encodedRequest),
   ].join(" ");
   const attempts = [...discoveryAttempts.map((attempt) => ({ ...attempt, phase: "release_discovery" }))];
   for (const { host, cycle, delay_ms: delayMs, is_last_route: isLastRoute } of routeAttemptPlan(
@@ -863,22 +932,69 @@ function wakePeerThread(args) {
           Math.max(15000, config.link.connect_timeout_ms + 5000),
         ),
       });
+      let marker = null;
+      try {
+        const line = String(result.stdout || "").trim().split("\n").filter(Boolean).at(-1);
+        marker = line ? JSON.parse(line) : null;
+      } catch {
+        marker = null;
+      }
       attempts.push({
         cycle,
         host,
         status: result.status,
         error: result.stderr?.trim() || "",
+        marker,
       });
-      if (result.status === 0) {
+      if (result.status === 0 && marker?.status === "started") {
         recordRouteSuccess(host);
         audit("wake", "thread", config.peer.thread_id, "started", {
           host,
           peer_revision: peerRelease.revision,
           wake_id: wakeId,
           log_path: logPath,
+          result_path: resultPath,
           message_id: args.message_id || null,
+          runner_pid: marker.pid || null,
         });
-        return { ok: true, host, wake_id: wakeId, log_path: logPath, attempts };
+        return {
+          ok: true,
+          host,
+          wake_id: wakeId,
+          log_path: logPath,
+          result_path: resultPath,
+          attempts,
+        };
+      }
+      if (marker?.status === "busy") {
+        recordRouteSuccess(host);
+        audit("wake", "thread", config.peer.thread_id, "busy", {
+          host,
+          wake_id: wakeId,
+          message_id: args.message_id || null,
+          marker,
+        });
+        return {
+          ok: false,
+          skipped: true,
+          busy: true,
+          error: "peer receiver is already active",
+          host,
+          wake_id: wakeId,
+          attempts,
+        };
+      }
+      if (marker?.status === "failed" || result.status === 0) {
+        recordRouteSuccess(host);
+        const error = marker?.error || "invalid wake runner response";
+        audit("wake", "thread", config.peer.thread_id, "failed", {
+          host,
+          wake_id: wakeId,
+          message_id: args.message_id || null,
+          error,
+          marker,
+        });
+        return { ok: false, error, host, wake_id: wakeId, attempts };
       }
       recordRouteFailure(host);
   }
@@ -927,12 +1043,14 @@ function listMessages(args) {
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = db.prepare(`
     SELECT id,created_at,sender,recipient,kind,subject,body,correlation_id,
-           direction,state,envelope_path,delivered_via,acknowledged_at,metadata_json
+           direction,state,envelope_path,delivered_via,acknowledged_at,
+           wake_requested,metadata_json
     FROM messages ${where}
     ORDER BY created_at DESC LIMIT ?
   `).all(...values, limit);
   return rows.map((row) => ({
     ...row,
+    wake_requested: row.direction === "outbound" ? row.wake_requested !== 0 : null,
     metadata: JSON.parse(row.metadata_json),
     metadata_json: undefined,
   }));
@@ -1286,9 +1404,10 @@ function queueArtifactDelivery(args) {
 }
 
 function flushOutbox(args) {
+  ingestInbox();
   const messageRows = db.prepare(`
     SELECT id FROM messages
-    WHERE direction='outbound' AND state='queued'
+    WHERE direction='outbound' AND state IN ('queued','wake_pending')
     ORDER BY created_at ASC
   `).all();
   const artifactRows = db.prepare(`
@@ -1300,7 +1419,7 @@ function flushOutbox(args) {
   const artifacts = [];
   for (const row of messageRows) {
     try {
-      messages.push(retryMessage({ message_id: row.id, wake: args.wake !== false }));
+      messages.push(retryMessage({ message_id: row.id, wake: args.wake }));
     } catch (error) {
       messages.push({ message_id: row.id, error: String(error?.message || error) });
     }
@@ -2966,7 +3085,7 @@ function normalizeQueuePayload(queue, payload = {}, rollbackFiles = []) {
       { ...payload, deliver: false },
       { onEnvelopeWritten: (envelopePath) => rollbackFiles.push(envelopePath) },
     );
-    return { message_id: message.message_id, wake: payload.wake !== false };
+    return { message_id: message.message_id, wake: message.wake_requested };
   }
   if (queue.adapter === "artifact" && !payload.artifact_id) {
     if (!payload.path) throw new Error("artifact queue items require artifact_id or path");
@@ -3145,6 +3264,32 @@ async function superviseQueue(args) {
         result = await executeQueueAdapter(queue, claim.item);
       } finally {
         clearInterval(heartbeat);
+      }
+      if (queue.adapter === "message" && result?.wake_pending === true) {
+        const item = queueRegistry.defer({
+          queue_id: queue.queue_id,
+          item_id: claim.item.item_id,
+          worker_id: workerId,
+          lease_token: claim.item.lease_token,
+          delay_ms: Math.max(
+            1000,
+            Number(config.queue_supervisor.poll_interval_ms || 120000),
+          ),
+          reason: "message delivered; waiting for application acknowledgement",
+        });
+        outcomes.push({
+          item_id: item.item_id,
+          state: item.state,
+          deferred: true,
+          next_attempt_at: item.next_attempt_at,
+          result,
+        });
+        audit("defer", "queue_item", item.item_id, "wake_pending", {
+          queue_id: queue.queue_id,
+          message_id: claim.item.payload.message_id,
+          next_attempt_at: item.next_attempt_at,
+        });
+        continue;
       }
       const item = queueRegistry.complete({
         queue_id: queue.queue_id,
@@ -3545,7 +3690,7 @@ const coreTools = [
   },
   {
     name: "retry_message",
-    description: "Retry delivery of the same immutable queued outbound message without creating a duplicate.",
+    description: "Retry one immutable queued message, or retry only the wake for a delivered wake-pending message, without creating or re-sending an envelope.",
     inputSchema: {
       type: "object",
       required: ["message_id"],
@@ -3771,7 +3916,7 @@ const coreTools = [
   },
   {
     name: "flush_outbox",
-    description: "Retry every queued message and previously attempted artifact over the preferred route with automatic fallback.",
+    description: "Retry queued delivery, delivered-but-unacknowledged wake requests, and previously attempted artifacts over the preferred route with automatic fallback.",
     inputSchema: {
       type: "object",
       properties: {

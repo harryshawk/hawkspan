@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Persisted immutable per-message wake intent so outbox flushes, restarts,
+  explicit retries, and message queue adapters cannot upgrade `wake: false`.
+- Kept delivered wake-requested messages durably wake-pending across sender
+  restarts, retrying the wake without another rsync until acknowledgement.
+- Added a bounded, token-fenced peer wake runner with distinct started/busy/
+  failed launch results, structured message acceptance, outside-sandbox
+  acknowledgement, and TERM/KILL cleanup for hung receivers.
+
 ## 0.3.9 - 2026-08-15
 
 - Enforced configured inbound and outbound peer-tool allowlists and peer
