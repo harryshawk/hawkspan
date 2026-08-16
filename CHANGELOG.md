@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allowed the receive-only SSH gateway to accept rsync's safe `--append`
+  receiver option, which appears during real resumable delivery.
 - Allowed the receive-only SSH gateway to accept rsync's safe `--dirs` option,
   which the macOS client adds during real message and artifact delivery.
 - Added the same-codebase HawkGrokSpan profile for an isolated M2/Grok-VM
