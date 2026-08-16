@@ -50,6 +50,26 @@ Do not copy the live M2/M4 HawkSpan configuration, SQLite database, credentials,
 task IDs, or service files. Do not enable remote wake: the first integration is
 message and file exchange only.
 
+## Private overlay transport
+
+When neither node can route to the other's private address, use a private
+Tailscale tailnet rather than exposing SSH through a public router. The M2 uses
+the native Tailscale network interface. A capability-constrained Docker VM may
+run `tailscaled` in userspace-networking mode, publish only its local SSH server
+to the tailnet with a private TCP forwarder, and configure
+`peer.transport.kind` as `tailscale-nc` so outbound OpenSSH and rsync streams go
+through the exact root- or owner-controlled Tailscale executable recorded in
+`peer.transport.command`.
+
+The server rejects other proxy kinds, relative or metacharacter-bearing paths,
+symlinks, non-executable files, executables owned by unrelated users, and
+group- or other-writable proxy executables. Strict host-key checking, the
+dedicated SSH identity, forced-command receiver gateway, empty peer-tool lists,
+disabled commands, and exchange-root restriction remain mandatory. Tailnet
+policy must deny by default and permit only TCP port 22 between the two dedicated
+HawkGrokSpan nodes. Tailscale Funnel and public SSH exposure are not part of this
+design.
+
 ## Why current Grok Build helps
 
 The [official Grok coding agent](https://github.com/xai-org/grok-build) and its
@@ -71,8 +91,9 @@ locally. HawkGrokSpan never transports or stores Grok or GitHub credentials.
 2. Confirm the release Git commit and complete HawkSpan gate recorded by the
    handoff match the extracted files.
 3. Install a Node runtime capable of running this release, OpenSSH client and
-   server, and `rsync`. Linux may provide `sha256sum` instead of macOS
-   `shasum`; HawkSpan accepts either for remote verification.
+   server, `rsync`, and the reviewed Tailscale client when the private overlay
+   is required. Linux may provide `sha256sum` instead of macOS `shasum`;
+   HawkSpan accepts either for remote verification.
 4. Create `~/.hawkgrokspan` and `~/HawkGrokSpan/Exchange` with owner-only
    permissions.
 5. Create a dedicated SSH key, exchange only public keys, independently verify

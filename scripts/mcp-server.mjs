@@ -208,6 +208,29 @@ function assertPeerConfiguration(configuration) {
     }
   }
   const peer = configuration.peer;
+  if (peer?.transport !== undefined) {
+    const transport = peer.transport;
+    if (!transport || typeof transport !== "object" || Array.isArray(transport) ||
+        transport.kind !== "tailscale-nc" ||
+        Object.keys(transport).some((key) => key !== "kind" && key !== "command")) {
+      throw new Error("peer.transport must be a tailscale-nc transport object");
+    }
+    if (typeof transport.command !== "string" || !path.isAbsolute(transport.command) ||
+        !/^\/[A-Za-z0-9_./-]+$/.test(transport.command) ||
+        path.normalize(transport.command) !== transport.command) {
+      throw new Error("peer.transport.command must be a normalized absolute path without shell metacharacters");
+    }
+    const stat = fs.lstatSync(transport.command);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error("peer.transport.command must be a regular non-symbolic-link file");
+    }
+    if (typeof process.getuid === "function" && stat.uid !== 0 && stat.uid !== process.getuid()) {
+      throw new Error("peer.transport.command must be owned by root or the current user");
+    }
+    if ((stat.mode & 0o022) !== 0 || (stat.mode & 0o111) === 0) {
+      throw new Error("peer.transport.command must be executable and not group- or other-writable");
+    }
+  }
   if (surfaceProfile === "message-files") {
     if (configuration.application_plugins?.enabled !== false) {
       throw new Error("message-files surface requires application_plugins.enabled=false");
@@ -634,7 +657,7 @@ function recordRouteSuccess(host) {
   routeRetryAfter.delete(host);
 }
 
-function sshArgs(host, remoteCommand) {
+function sshClientArgs() {
   const args = [];
   if (config.peer.ssh_identity) args.push("-i", config.peer.ssh_identity);
   const connectSeconds = Math.max(1, Math.ceil(config.link.connect_timeout_ms / 1000));
@@ -648,13 +671,22 @@ function sshArgs(host, remoteCommand) {
           "-o", "GlobalKnownHostsFile=/dev/null",
         ]
       : []),
+    ...(config.peer.transport?.kind === "tailscale-nc"
+      ? ["-o", `ProxyCommand=${config.peer.transport.command} nc %h %p`]
+      : []),
     "-o", `ConnectTimeout=${connectSeconds}`,
     "-o", `ServerAliveInterval=${config.link.server_alive_interval_seconds}`,
     "-o", `ServerAliveCountMax=${config.link.server_alive_count_max}`,
-    `${config.peer.user}@${host}`,
-    remoteCommand,
   );
   return args;
+}
+
+function sshArgs(host, remoteCommand) {
+  return [
+    ...sshClientArgs(),
+    `${config.peer.user}@${host}`,
+    remoteCommand,
+  ];
 }
 
 function ensureRemoteDirectory(host, remoteDir, timeout) {
@@ -768,22 +800,7 @@ function rsyncFile(localPath, remoteDir, remoteName = null) {
         recordRouteFailure(host);
         continue;
       }
-      const sshCommand = [
-        "ssh",
-        ...(config.peer.ssh_identity ? ["-i", config.peer.ssh_identity] : []),
-        "-o", "BatchMode=yes",
-        ...(config.peer.ssh_identity ? ["-o", "IdentitiesOnly=yes"] : []),
-        ...(config.peer.known_hosts
-          ? [
-              "-o", "StrictHostKeyChecking=yes",
-              "-o", `UserKnownHostsFile=${config.peer.known_hosts}`,
-              "-o", "GlobalKnownHostsFile=/dev/null",
-            ]
-          : []),
-        "-o", `ConnectTimeout=${Math.max(1, Math.ceil(config.link.connect_timeout_ms / 1000))}`,
-        "-o", `ServerAliveInterval=${config.link.server_alive_interval_seconds}`,
-        "-o", `ServerAliveCountMax=${config.link.server_alive_count_max}`,
-      ].join(" ");
+      const sshCommand = ["ssh", ...sshClientArgs()].map(shellQuote).join(" ");
       const resumeArgs = supportsAppendVerify()
         ? ["--partial", "--append-verify"]
         : ["--partial"];

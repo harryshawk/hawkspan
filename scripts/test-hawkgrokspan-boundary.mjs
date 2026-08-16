@@ -14,6 +14,9 @@ const outside = path.join(root, "private");
 const bin = path.join(root, "bin");
 const identity = path.join(root, "hawkgrokspan_ed25519");
 const knownHosts = path.join(root, "known_hosts");
+const tailscaleCommand = path.join(bin, "tailscale");
+const writableProxyCommand = path.join(bin, "writable-proxy");
+const symlinkProxyCommand = path.join(bin, "symlink-proxy");
 const transportLog = path.join(root, "transport.log");
 const configPath = path.join(root, "config.json");
 fs.mkdirSync(allowed);
@@ -21,6 +24,10 @@ fs.mkdirSync(outside);
 fs.mkdirSync(bin);
 fs.writeFileSync(identity, "test-only-private-key\n", { mode: 0o600 });
 fs.writeFileSync(knownHosts, "grok-vm ssh-ed25519 TEST\n", { mode: 0o600 });
+fs.writeFileSync(tailscaleCommand, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+fs.writeFileSync(writableProxyCommand, "#!/bin/sh\nexit 0\n", { mode: 0o777 });
+fs.chmodSync(writableProxyCommand, 0o777);
+fs.symlinkSync(tailscaleCommand, symlinkProxyCommand);
 fs.writeFileSync(path.join(allowed, "allowed.txt"), "allowed artifact\n");
 fs.writeFileSync(path.join(outside, "private.txt"), "must not transfer\n");
 fs.symlinkSync(path.join(outside, "private.txt"), path.join(allowed, "escape.txt"));
@@ -42,6 +49,10 @@ const config = {
     fallback_enabled: false,
     ssh_identity: identity,
     known_hosts: knownHosts,
+    transport: {
+      kind: "tailscale-nc",
+      command: tailscaleCommand,
+    },
     remote_state_dir: "/home/grok/.hawkgrokspan",
     remote_inbox: "/home/grok/.hawkgrokspan/inbox",
     remote_artifacts: "/home/grok/.hawkgrokspan/artifacts",
@@ -207,6 +218,7 @@ for (const expected of [
   "-o StrictHostKeyChecking=yes",
   `-o UserKnownHostsFile=${knownHosts}`,
   "-o GlobalKnownHostsFile=/dev/null",
+  `-o ProxyCommand=${tailscaleCommand} nc %h %p`,
 ]) assert.match(transport, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 assert.match(transport, /name_with_shell\.txt/);
 assert.doesNotMatch(transport, /\.hawkgrokspan\/artifacts\/[^\n]*name;with shell\.txt/);
@@ -220,6 +232,10 @@ for (const mutation of [
   (value) => { value.features.allowed_peer_tools.outbound = ["run_command"]; },
   (value) => { value.training.allow_start = true; },
   (value) => { delete value.peer.known_hosts; },
+  (value) => { delete value.peer.transport.command; },
+  (value) => { value.peer.transport.kind = "arbitrary-proxy"; },
+  (value) => { value.peer.transport.command = writableProxyCommand; },
+  (value) => { value.peer.transport.command = symlinkProxyCommand; },
   (value) => { value.peer.allow_remote_wake = true; },
   (value) => { value.peer.remote_artifacts = "/home/grok/elsewhere"; },
   (value) => { value.transfer.allowed_artifact_roots = [outside, "relative"]; },

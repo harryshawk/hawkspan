@@ -25,6 +25,10 @@
     "fallback_enabled": false,
     "ssh_identity": "/home/GROK_VM_USER/.ssh/hawkgrokspan_ed25519",
     "known_hosts": "/home/GROK_VM_USER/.hawkgrokspan/known_hosts",
+    "transport": {
+      "kind": "tailscale-nc",
+      "command": "/usr/bin/tailscale"
+    },
     "remote_state_dir": "/Users/M2_USER/.hawkgrokspan",
     "remote_inbox": "/Users/M2_USER/.hawkgrokspan/inbox",
     "remote_artifacts": "/Users/M2_USER/.hawkgrokspan/artifacts",
