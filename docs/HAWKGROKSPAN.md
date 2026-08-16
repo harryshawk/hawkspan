@@ -36,6 +36,11 @@ Use on both nodes:
 - remote inbox, artifact, and audit paths under the peer's
   `~/.hawkgrokspan` directory;
 - a distinct MCP server name, `hawkgrokspan`.
+- a distinct stable release link, normally
+  `~/.local/share/hawkgrokspan/current`, selected during activation with
+  `HAWKSPAN_STABLE_RELEASE_ROOT`;
+- rendered launchd files kept under the isolated state directory unless a
+  separately reviewed HawkGrokSpan background service is added.
 
 Do not copy the live M2/M4 HawkSpan configuration, SQLite database, credentials,
 task IDs, or service files. Do not enable remote wake: the first integration is
@@ -70,10 +75,14 @@ locally. HawkGrokSpan never transports or stores Grok or GitHub credentials.
    verify each host key before writing the dedicated `known_hosts` file.
 6. Customize `config/hawkgrokspan-grok-vm.example.json`; do not enable any
    disabled feature or broaden the artifact root.
-7. Merge `config/hawkgrokspan-grok.config.toml.example` into the trusted
+7. Activate with `HAWKSPAN_STATE_DIR=~/.hawkgrokspan`,
+   `HAWKSPAN_STABLE_RELEASE_ROOT=~/.local/share/hawkgrokspan/current`, and an
+   isolated `HAWKSPAN_LAUNCH_AGENTS_DIR`; do not overwrite normal HawkSpan
+   service definitions.
+8. Merge `config/hawkgrokspan-grok.config.toml.example` into the trusted
    user-level `~/.grok/config.toml` using absolute paths.
-8. Start Grok and confirm it lists only the thirteen `hawkgrokspan__*` tools.
-9. Run acceptance in this order: link status, M2-to-VM message, VM
+9. Start Grok and confirm it lists only the thirteen `hawkgrokspan__*` tools.
+10. Run acceptance in this order: link status, M2-to-VM message, VM
    acknowledgement, VM-to-M2 message, one harmless text file each direction,
    exact SHA-256 comparison, and one outside-root transfer rejection.
 

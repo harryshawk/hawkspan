@@ -13,6 +13,9 @@
 - Added real two-server envelope, acknowledgement, artifact, malformed-startup,
   tool-surface, strict-transport, and file-boundary tests plus a Grok VM handoff
   guide and configuration templates.
+- Added a custom stable-release-root activation boundary so a HawkGrokSpan
+  endpoint can use the same exact source without rewriting the live HawkSpan
+  service link or launchd definitions.
 
 - Documented safe recovery when an existing Codex task remains read-only after
   Full Access is selected: continue in a new Full Access task, reverify the

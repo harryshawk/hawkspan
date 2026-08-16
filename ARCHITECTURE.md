@@ -7,7 +7,9 @@ HawkGrokSpan is a second deployment of the same source, not a third member of
 this peer pair. It uses isolated `~/.hawkgrokspan` state and connects only M2
 and one trusted Grok VM. Its `message-files` profile filters both MCP discovery
 and dispatch to thirteen link, message, acknowledgement, and verified-artifact
-tools. It has no command, job, queue, plugin, trainer, or wake surface.
+tools. It has no command, job, queue, plugin, trainer, or wake surface. Release
+activation uses a separate stable link and an isolated rendered-launchd
+directory, so it cannot rewrite the live M2/M4 HawkSpan service definitions.
 
 ## Transport
 

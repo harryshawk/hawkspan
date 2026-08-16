@@ -50,7 +50,10 @@ for (const name of ["remote_plugin_root", "remote_call_tool"]) {
 const authority = prepareReleaseAuthority(stateRoot, {
   revision,
   activeReleaseRoot: releaseRoot,
-  stableReleaseRoot: path.join(os.homedir(), ".local", "share", "hawkspan", "current"),
+  stableReleaseRoot: path.resolve(
+    process.env.HAWKSPAN_STABLE_RELEASE_ROOT ||
+      path.join(os.homedir(), ".local", "share", "hawkspan", "current"),
+  ),
 });
 const derived = derivedReleasePaths(authority);
 const nodePath = path.resolve(process.env.HAWKSPAN_NODE || process.execPath);

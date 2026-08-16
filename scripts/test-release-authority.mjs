@@ -257,5 +257,37 @@ const mismatches = validateLiveReleaseConfiguration(authority, {
 });
 assert.ok(mismatches.some((entry) => entry.location === "config.json:plugin_root"));
 
+const isolatedStateRoot = path.join(temporaryRoot, "isolated", ".hawkgrokspan");
+const isolatedLaunchAgentsRoot = path.join(isolatedStateRoot, "rendered-launchd");
+const isolatedStableRoot = path.join(homeRoot, ".local", "share", "hawkgrokspan", "current");
+fs.mkdirSync(isolatedStateRoot, { recursive: true });
+fs.writeFileSync(path.join(isolatedStateRoot, "config.json"), `${JSON.stringify({
+  node_role: "controller",
+  peer: { user: "peer" },
+  training: {},
+}, null, 2)}\n`, { mode: 0o600 });
+const isolatedActivation = spawnSync(process.execPath, [
+  path.join(sourceRoot, "scripts", "activate-release.mjs"),
+  "--release-root", releaseRoot,
+  "--revision", testRevision,
+], {
+  encoding: "utf8",
+  env: {
+    ...process.env,
+    HOME: homeRoot,
+    HAWKSPAN_STATE_DIR: isolatedStateRoot,
+    HAWKSPAN_STABLE_RELEASE_ROOT: isolatedStableRoot,
+    HAWKSPAN_LAUNCH_AGENTS_DIR: isolatedLaunchAgentsRoot,
+  },
+});
+assert.equal(isolatedActivation.status, 0, isolatedActivation.stderr);
+const isolatedAuthority = readReleaseAuthority(isolatedStateRoot);
+assert.equal(isolatedAuthority.stable_release_root, isolatedStableRoot);
+assert.equal(fs.realpathSync(isolatedStableRoot), resolvedReleaseRoot);
+assert.equal(fs.readlinkSync(authority.stable_release_root), stableTargetBeforePublishFailure);
+for (const label of launchdLabels) {
+  assert.equal(fs.existsSync(path.join(isolatedLaunchAgentsRoot, `${label}.plist`)), true);
+}
+
 fs.rmSync(temporaryRoot, { recursive: true, force: true });
 process.stdout.write("release authority tests passed\n");

@@ -26,7 +26,8 @@ requirement and must not be presented as implemented.
 ## HawkGrokSpan
 
 - Reuse the exact HawkSpan source and release identity with separate
-  `~/.hawkgrokspan` state; do not fork the transport or join the M2/M4 pair.
+  `~/.hawkgrokspan` state and a separate stable-release link; do not fork the
+  transport, overwrite normal HawkSpan services, or join the M2/M4 pair.
 - Expose and dispatch only link, durable-message, acknowledgement, and
   verified-artifact operations.
 - Keep local control, application plugins, peer calls, commands, jobs, queues,
