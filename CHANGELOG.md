@@ -16,6 +16,8 @@
 - Added a custom stable-release-root activation boundary so a HawkGrokSpan
   endpoint can use the same exact source without rewriting the live HawkSpan
   service link or launchd definitions.
+- Made MCP identity report the installed plugin version and removed M2/M4-only
+  wording from the generic durable message tool used by HawkGrokSpan.
 
 - Documented safe recovery when an existing Codex task remains read-only after
   Full Access is selected: continue in a new Full Access task, reverify the

@@ -116,6 +116,7 @@ function request(method, params = {}) {
 
 const initialized = await request("initialize", { protocolVersion: "2025-06-18" });
 assert.equal(initialized.result.serverInfo.name, "hawkgrokspan");
+assert.equal(initialized.result.serverInfo.version, "0.4.0");
 const listed = await request("tools/list");
 assert.deepEqual(
   listed.result.tools.map(({ name }) => name).sort(),

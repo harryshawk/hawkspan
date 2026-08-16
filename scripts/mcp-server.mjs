@@ -35,6 +35,9 @@ const OUTBOX = path.join(STATE_ROOT, "outbox");
 const ARTIFACTS = path.join(STATE_ROOT, "artifacts");
 const AUDIT = path.join(STATE_ROOT, "audit");
 const SCRIPT_ROOT = path.dirname(fileURLToPath(import.meta.url));
+const SERVER_VERSION = JSON.parse(
+  fs.readFileSync(path.join(SCRIPT_ROOT, "..", ".codex-plugin", "plugin.json"), "utf8"),
+).version;
 const LORA_AUTOMATION_SCRIPT = path.join(SCRIPT_ROOT, "lora-automation.mjs");
 
 for (const dir of [STATE_ROOT, INBOX, OUTBOX, ARTIFACTS, AUDIT]) {
@@ -3781,7 +3784,7 @@ const coreTools = [
   },
   {
     name: "send_message",
-    description: "Send routine private M2/M4 coordination over the already-authorized local HawkSpan-D. This is durable, idempotent IPC, not an external communication or consequential action.",
+    description: "Send routine private coordination to the configured paired node as a durable, idempotent envelope.",
     inputSchema: {
       type: "object",
       required: ["subject", "body"],
@@ -4393,7 +4396,7 @@ async function handle(request) {
       capabilities: { tools: { listChanged: false } },
       serverInfo: {
         name: surfaceProfile === "message-files" ? "hawkgrokspan" : "hawkspan",
-        version: "0.1.0",
+        version: SERVER_VERSION,
       },
     });
     return;
