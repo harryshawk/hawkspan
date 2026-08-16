@@ -91,7 +91,7 @@ const refused = await tool("trainer_start_authorized_job", {
   target: "robot-test",
 });
 assert.equal(refused.result.isError, true);
-assert.match(refused.result.content[0].text, /state awaiting_authorization is not allowed/);
+assert.match(refused.result.content[0].text, /recorded explicit authorization/);
 assert.equal(fs.existsSync(invocationLog), false);
 
 const authorized = await tool("update_job_status", {
@@ -130,7 +130,16 @@ const started = await tool("trainer_start_authorized_job", {
 assert.equal(started.result.isError, false);
 assert.match(fs.readFileSync(invocationLog, "utf8"), /--target robot-test/);
 
-const cancelled = await tool("create_job", { kind: "training", title: "Cancelled state" });
+const cancelled = await tool("create_job", {
+  kind: "training",
+  title: "Cancelled state",
+  requires_authorization: true,
+});
+await tool("update_job_status", {
+  job_id: cancelled.result.structuredContent.job_id,
+  state: "authorized",
+  authorization_evidence: "Active user instruction for this bounded test.",
+});
 await tool("update_job_status", {
   job_id: cancelled.result.structuredContent.job_id,
   state: "cancelled",

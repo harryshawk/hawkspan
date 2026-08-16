@@ -2488,7 +2488,7 @@ function requireTrackedJob(jobId, kind, allowedStates) {
 function runConfiguredScript(scriptKey, allowKey, args, jobKind, allowedStates) {
   if (!config.training[allowKey]) throw new Error(`training.${allowKey} is disabled`);
   if (args._delegated_job) importDelegatedJob(args._delegated_job, args.job_id);
-  const job = requireTrackedJob(args.job_id, jobKind, allowedStates);
+  const job = requireAuthorizedJob(args.job_id, jobKind, allowedStates);
   const scriptPath = path.resolve(config.training[scriptKey] || "");
   if (!scriptPath || !fs.existsSync(scriptPath)) {
     throw new Error(`training.${scriptKey} is not configured to an existing script`);
@@ -2518,7 +2518,7 @@ function runConfiguredScript(scriptKey, allowKey, args, jobKind, allowedStates) 
 
 function trainerStartAuthorizedJob(args) {
   if (args._delegated_job) importDelegatedJob(args._delegated_job, args.job_id);
-  let job = requireTrackedJob(args.job_id, "training", ["authorized", "queued"]);
+  let job = requireAuthorizedJob(args.job_id, "training", ["authorized", "queued"]);
   if (!args.expected_revision_fingerprint) {
     throw new Error("trainer start requires expected_revision_fingerprint");
   }
@@ -2582,7 +2582,7 @@ function trainerQueueControlScript(args) {
 
 function trainerStopAuthorizedJob(args) {
   if (args._delegated_job) importDelegatedJob(args._delegated_job, args.job_id);
-  const job = requireTrackedJob(args.job_id, "training", ["running", "cancel_requested"]);
+  const job = requireAuthorizedJob(args.job_id, "training", ["running", "cancel_requested"]);
   const binding = trainingAuthorizationBinding(job);
   if (binding.target !== args.target) {
     throw new Error("trainer stop target does not match recorded authorization");
@@ -2613,7 +2613,7 @@ function trainerPackageAuthorizedJob(args) {
       preserve_existing: true,
     });
   }
-  let job = requireTrackedJob(args.job_id, "training", ["failed", "returning", "completed"]);
+  let job = requireAuthorizedJob(args.job_id, "training", ["failed", "returning", "completed"]);
   const metadata = JSON.parse(job.metadata_json || "{}");
   if (!args.target || metadata.target !== args.target) {
     throw new Error(
