@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.8 - 2026-08-15
+
+- Corrected full-package provenance verification to compare the complete file
+  set in one deterministic order, including mixed-case root and nested paths.
+
 ## 0.3.7 - 2026-08-15
 
 - Required recorded owner authorization for trainer start, stop, and package

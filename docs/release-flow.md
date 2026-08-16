@@ -1,5 +1,19 @@
 # Release Flow
 
+## 2026-08-15 - HawkSpan 0.3.8 package-verifier roll-forward
+
+- Defect evidence: 0.3.7 activation failed closed before writing authority;
+  its valid 145-file package and receipt contained identical paths but the
+  verifier compared locale-ordered traversal with default-ordered keys.
+- Scope: sort the observed complete file set before comparison and add a
+  mixed-case root plus nested-path regression. No runtime authorization or
+  peer-control behavior changed.
+- Required public ancestor: production 0.3.7 commit `8620378`.
+- Staging repository and branch: `harryshawk/hawkspan-clean-staging`,
+  `hawkspan-v0.3.8-staging`.
+- Production update: pending the complete gate, exact-package activation proof,
+  and explicit owner approval.
+
 ## 2026-08-15 - HawkSpan 0.3.7 authorization and lineage repair
 
 - Release intent: publish the recovered 0.3.6 implementation on the canonical

@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "release_version": "0.3.7",
+  "release_version": "0.3.8",
   "canonical_repository": "https://github.com/harryshawk/hawkspan.git",
   "production_branch": "main",
   "staging_repository": "https://github.com/harryshawk/hawkspan-clean-staging.git",
-  "required_public_ancestor": "9bad60bdab7ebaf38df29057b3bba15ac0a7b2b9"
+  "required_public_ancestor": "86203781e582479aa4f99c8d8315fee54ffc4b8b"
 }

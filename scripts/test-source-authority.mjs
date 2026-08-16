@@ -21,16 +21,19 @@ const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hawkspan-source-aut
 const repositoryRoot = path.join(temporaryRoot, "repository");
 fs.mkdirSync(path.join(repositoryRoot, ".codex-plugin"), { recursive: true });
 fs.mkdirSync(path.join(repositoryRoot, "config"), { recursive: true });
+fs.mkdirSync(path.join(repositoryRoot, "acceptance"), { recursive: true });
 git(repositoryRoot, "init", "-b", "main");
 git(repositoryRoot, "config", "user.name", "HawkSpan Test");
 git(repositoryRoot, "config", "user.email", "hawkspan-test@example.invalid");
 fs.writeFileSync(path.join(repositoryRoot, "baseline.txt"), "public baseline\n");
-git(repositoryRoot, "add", "baseline.txt");
+fs.writeFileSync(path.join(repositoryRoot, "ARCHITECTURE.md"), "Mixed-case root path.\n");
+fs.writeFileSync(path.join(repositoryRoot, "acceptance", "evidence.md"), "Nested path.\n");
+git(repositoryRoot, "add", "baseline.txt", "ARCHITECTURE.md", "acceptance/evidence.md");
 git(repositoryRoot, "commit", "-m", "Public baseline");
 const baseline = git(repositoryRoot, "rev-parse", "HEAD");
 const sourceAuthority = {
   schema_version: 1,
-  release_version: "0.3.7",
+  release_version: "0.3.8",
   canonical_repository: "https://github.com/harryshawk/hawkspan.git",
   production_branch: "main",
   staging_repository: "https://github.com/harryshawk/hawkspan-clean-staging.git",
@@ -38,7 +41,7 @@ const sourceAuthority = {
 };
 fs.writeFileSync(
   path.join(repositoryRoot, ".codex-plugin", "plugin.json"),
-  `${JSON.stringify({ name: "hawkspan", version: "0.3.7" }, null, 2)}\n`,
+  `${JSON.stringify({ name: "hawkspan", version: "0.3.8" }, null, 2)}\n`,
 );
 fs.writeFileSync(
   path.join(repositoryRoot, "config", "source-authority.json"),

@@ -171,7 +171,7 @@ export function verifyPackagedRelease(releaseRoot, revision) {
       !provenance.files || typeof provenance.files !== "object") {
     throw new Error("packaged release provenance does not match source authority");
   }
-  const observedFiles = walkFiles(releaseRoot);
+  const observedFiles = walkFiles(releaseRoot).sort();
   const expectedFiles = Object.keys(provenance.files).sort();
   if (JSON.stringify(observedFiles) !== JSON.stringify(expectedFiles)) {
     throw new Error("packaged release file set differs from provenance");
