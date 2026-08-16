@@ -115,6 +115,7 @@
     "scripts/test-lora-readiness-policy.mjs",
     "scripts/test-lora-queue-control.mjs",
     "scripts/test-peer-command-boundary.mjs",
+    "scripts/test-wake-startup-verification.mjs",
     "scripts/test-queue-best-practices.mjs",
     "scripts/test-readiness-monitor.mjs",
     "scripts/test-release-authority.mjs",

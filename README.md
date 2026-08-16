@@ -216,12 +216,14 @@ SQLite store used by the target task. If that task uses an external or
 otherwise non-default store, use a reviewed remote executable or wrapper that
 selects that exact supported store before invoking `codex exec resume`. A task
 ID present only in another Codex store will fail with `no rollout found` even
-though message delivery succeeded. Keep unattended receivers workspace-bound;
-when a wrapper is required, it should also insert `-s workspace-write` before
-the `resume` subcommand, pin `-C` to the receiver's dedicated directory, and
-clear unrelated configured writable roots instead of inheriting broader user
-defaults. The Codex store itself may remain external; the model's command
-workspace does not need write access to the entire storage volume.
+though message delivery succeeded. Configure `peer.codex_workdir` as the
+receiver's absolute dedicated directory and `peer.codex_sandbox` as
+`workspace-write`. HawkSpan supplies those `-C` and `-s` arguments and clears
+unrelated configured writable roots on each resume. A store-selection wrapper
+should select only the correct Codex home/SQLite store; it does not need to
+reimplement the workspace boundary. The Codex store itself may remain
+external; the model's command workspace does not need write access to the
+entire storage volume.
 
 Do not target a task that remains loaded in Codex Desktop. A task can emit
 `task_complete` and still retain the desktop app's writer lease; an external

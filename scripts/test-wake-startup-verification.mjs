@@ -40,7 +40,7 @@ exit 2
 `, { mode: 0o755 });
 
 const configPath = path.join(root, "config.json");
-fs.writeFileSync(configPath, `${JSON.stringify({
+const baseConfig = {
   schema_version: 1,
   node_id: "wake-test-controller",
   peer: {
@@ -48,6 +48,8 @@ fs.writeFileSync(configPath, `${JSON.stringify({
     user: "peeruser",
     thread_id: "01a008f3-825f-7e71-9e4c-eb29af26d48d",
     codex_command: "/Applications/ChatGPT.app/Contents/Resources/codex",
+    codex_workdir: "/Users/peeruser/Documents/Codex/HawkSpan-Wake-Receiver",
+    codex_sandbox: "workspace-write",
     allow_remote_wake: true,
     remote_node: "/usr/local/bin/node",
     primary_enabled: true,
@@ -66,7 +68,59 @@ fs.writeFileSync(configPath, `${JSON.stringify({
     server_alive_count_max: 1,
     primary_reprobe_ms: 1000,
   },
-}, null, 2)}\n`);
+};
+
+function writeConfig(configuration = baseConfig) {
+  fs.writeFileSync(configPath, `${JSON.stringify(configuration, null, 2)}\n`);
+}
+
+function assertStartupFails(change, pattern) {
+  const configuration = structuredClone(baseConfig);
+  change(configuration);
+  writeConfig(configuration);
+  const result = spawnSync(process.execPath, [
+    path.join(scripts, "call-tool.mjs"),
+    "wake_peer_thread",
+    JSON.stringify({ message_id: "invalid-wake-config" }),
+  ], {
+    encoding: "utf8",
+    timeout: 15000,
+    env: {
+      ...process.env,
+      HAWKSPAN_STATE_DIR: root,
+      HAWKSPAN_CONFIG: configPath,
+      HAWKSPAN_TEST_SSH_LOG: sshLog,
+    },
+  });
+  assert.notEqual(result.status, 0, result.stderr || result.stdout);
+  assert.match(`${result.stderr}\n${result.stdout}`, pattern);
+}
+
+assertStartupFails(
+  (configuration) => { delete configuration.peer.codex_workdir; },
+  /peer.codex_workdir must be an absolute dedicated receiver directory/,
+);
+assertStartupFails(
+  (configuration) => { configuration.peer.codex_workdir = "/Users/peeruser"; },
+  /peer.codex_workdir must not be a filesystem, volume, or user-home root/,
+);
+assertStartupFails(
+  (configuration) => { configuration.peer.codex_sandbox = "danger-full-access"; },
+  /peer.codex_sandbox must be workspace-write/,
+);
+assertStartupFails(
+  (configuration) => { configuration.peer.codex_command = "codex"; },
+  /peer.codex_command must be an absolute executable path/,
+);
+assertStartupFails(
+  (configuration) => { configuration.peer.thread_id = "current"; },
+  /peer.thread_id must be an exact Codex task UUID/,
+);
+assertStartupFails(
+  (configuration) => { configuration.peer.allow_remote_wake = "yes"; },
+  /peer.allow_remote_wake must be a boolean/,
+);
+writeConfig();
 
 function callWake(mode) {
   fs.writeFileSync(sshLog, "");
@@ -111,6 +165,9 @@ assert.equal(success.response.host, "192.0.2.11");
 assert.match(success.response.verification, /startup grace period/);
 assert.match(success.ssh, /wake_check/);
 assert.match(success.ssh, /WAKE_RESUME_FAILED/);
+assert.match(success.ssh, /sandbox_workspace_write\.writable_roots=\[\]/);
+assert.match(success.ssh, /workspace-write/);
+assert.match(success.ssh, /HawkSpan-Wake-Receiver/);
 
 fs.rmSync(root, { recursive: true, force: true });
 process.stdout.write("wake startup verification tests passed\n");

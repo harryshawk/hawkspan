@@ -34,19 +34,28 @@ relaying the instruction. The peer acknowledges the immutable message ID,
 performs authorized work, and replies with the original ID as the correlation
 boundary.
 
+Each node targets a persistent CLI-created receiver task on the other Mac, not
+an interactive task left open in Codex Desktop. Remote wake is fail-closed
+unless the configuration records an exact task UUID, an absolute Codex
+executable or reviewed store-selection wrapper, an absolute dedicated receiver
+directory, and the `workspace-write` sandbox. HawkSpan clears unrelated Codex
+writable roots on every resume and supplies the dedicated directory with `-C`.
+
 ## Trusted remote operations
 
-Either task can call `run_command` locally or invoke it on the peer through
-`peer_call_tool`. This is the broad control path for routine file work,
-configuration, logs, packaging, process inspection, and general coordination.
-Every invocation records the command, working directory, timing, result,
-authorization reference, and output sizes in the local audit database.
+`run_command` is a full shell as the local HawkSpan user. Local and peer use is
+available only when the configured directional tool list and broad-command
+feature allow it. In controller/worker mode the worker-to-controller direction
+defaults closed and requires an explicit `allow_peer_commands` setting. The
+receiver enforces its inbound list independently of the sender's outbound
+list. Every allowed invocation records the command, working directory, timing,
+result, authorization reference, and output sizes in the local audit database.
 
-Routine operations execute directly. Training starts, deletion, and other
-consequential operations are submitted with `consequential: true` and a durable
-job whose authorization evidence records the owner's approval. This keeps the
-boundary simple: broad control between two trusted Macs, with an explicit gate
-only where the owner requested one.
+The `consequential` field classifies the audit entry; it is not a second
+authorization ceremony. Trainer lifecycle operations are narrower: they
+require the existing durable job to contain recorded owner authorization.
+Deletion, publishing, or work broader than the active owner instruction still
+requires an explicit owner instruction.
 
 ## SimpleTuner control
 

@@ -114,6 +114,7 @@ const defaultConfig = {
 };
 
 const EXACT_TOOL_NAME = /^[a-z][a-z0-9_]{0,127}$/;
+const CODEX_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function assertExactToolNames(value, label) {
   if (value === "current") return;
@@ -135,7 +136,7 @@ function assertDirectionalBooleans(value, label) {
   }
 }
 
-function assertPeerCommandConfiguration(configuration) {
+function assertPeerConfiguration(configuration) {
   const roleProfile = configuration.role_profile;
   if (roleProfile !== undefined && roleProfile !== null &&
       !["symmetric", "controller-worker"].includes(roleProfile)) {
@@ -177,6 +178,27 @@ function assertPeerCommandConfiguration(configuration) {
       throw new Error("peer.allowed_tools must be an array of exact tool names");
     }
   }
+  const peer = configuration.peer;
+  if (!peer) return;
+  if (peer.allow_remote_wake !== undefined && typeof peer.allow_remote_wake !== "boolean") {
+    throw new Error("peer.allow_remote_wake must be a boolean");
+  }
+  if (peer.allow_remote_wake !== true) return;
+  if (typeof peer.thread_id !== "string" || !CODEX_THREAD_ID.test(peer.thread_id)) {
+    throw new Error("peer.thread_id must be an exact Codex task UUID when remote wake is enabled");
+  }
+  if (typeof peer.codex_command !== "string" || !path.isAbsolute(peer.codex_command)) {
+    throw new Error("peer.codex_command must be an absolute executable path when remote wake is enabled");
+  }
+  if (typeof peer.codex_workdir !== "string" || !path.isAbsolute(peer.codex_workdir)) {
+    throw new Error("peer.codex_workdir must be an absolute dedicated receiver directory when remote wake is enabled");
+  }
+  if (path.normalize(peer.codex_workdir).split(path.sep).filter(Boolean).length < 3) {
+    throw new Error("peer.codex_workdir must not be a filesystem, volume, or user-home root");
+  }
+  if (peer.codex_sandbox !== "workspace-write") {
+    throw new Error("peer.codex_sandbox must be workspace-write when remote wake is enabled");
+  }
 }
 
 function readConfig() {
@@ -204,7 +226,7 @@ function readConfig() {
 }
 
 const config = readConfig();
-assertPeerCommandConfiguration(config);
+assertPeerConfiguration(config);
 if (fs.existsSync(installedRevisionPath(STATE_ROOT))) {
   const authority = readReleaseAuthority(STATE_ROOT);
   assertExecutingRelease(authority, path.dirname(SCRIPT_ROOT));
@@ -773,6 +795,8 @@ function wakePeerThread(args) {
     return { ok: false, error: "peer.thread_id is not configured", attempts: [] };
   }
   const codexCommand = config.peer.codex_command || "codex";
+  const codexWorkdir = config.peer.codex_workdir;
+  const codexSandbox = config.peer.codex_sandbox;
   const remoteNode = config.peer.remote_node || "node";
   let peerRelease = null;
   const discoveryAttempts = [];
@@ -824,6 +848,12 @@ function wakePeerThread(args) {
     ";",
     shellQuote(codexCommand),
     "exec",
+    "-c",
+    shellQuote("sandbox_workspace_write.writable_roots=[]"),
+    "-s",
+    shellQuote(codexSandbox),
+    "-C",
+    shellQuote(codexWorkdir),
     "resume",
     "--skip-git-repo-check",
     shellQuote(config.peer.thread_id),

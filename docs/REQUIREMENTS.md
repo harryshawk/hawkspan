@@ -3,8 +3,11 @@
 ## First integration
 
 - Preserve HawkSpan-D's durable messages, acknowledgements, jobs, wakeups,
-  universal command control, verified artifacts, SSH routing, trainer tools,
-  and tests.
+  configured directional command control, verified artifacts, SSH routing,
+  trainer tools, and tests.
+- Fail closed when remote wake lacks an exact receiver UUID, absolute Codex
+  executable, absolute dedicated receiver directory, or workspace-write
+  sandbox; clear unrelated writable roots on the generated resume command.
 - Use HawkSpan's own sanitized state, configuration, examples, and public
   namespace without changing HawkSpan-D behavior.
 - Add a loopback-only HTML surface that calls the same MCP tool map.

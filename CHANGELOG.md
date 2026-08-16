@@ -17,6 +17,9 @@
   Codex Desktop, opposite receiver IDs recorded on both peers, and
   resume wrappers pinned to dedicated workspace directories with unrelated
   writable roots removed for external Codex stores.
+- Made that wake boundary executable policy: startup now rejects remote wake
+  without an exact receiver UUID, absolute executable and dedicated workdir,
+  and `workspace-write`; generated resumes clear unrelated writable roots.
 - Recorded that restoring the durable message/wakeup path is a blocking repair;
   unrelated readiness checks must remain deferred until bidirectional wakeup
   acceptance passes.

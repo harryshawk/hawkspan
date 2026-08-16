@@ -22,6 +22,8 @@ or a security boundary against a malicious administrator.
 - loopback-only HTML binding, per-process request token, and HTML allowlist;
 - peer tool allowlisting and BatchMode SSH;
 - durable lifecycle records and interrupted-run recovery;
+- dedicated workspace-bounded Codex wake receivers that are not held open by
+  the desktop app;
 - immutable artifact registration and SHA-256 verification;
 - namespace, state, service, and installation isolation.
 
@@ -37,5 +39,6 @@ partially completed.
 
 Install only reviewed plugins, keep allowlists narrow, use dedicated accounts
 and SSH identities where practical, pin host keys, protect configuration and
-state permissions, and reconcile external application state before retrying
-interrupted work.
+state permissions, keep wake receivers in dedicated directories with unrelated
+writable roots removed, and reconcile external application state before
+retrying interrupted work.
