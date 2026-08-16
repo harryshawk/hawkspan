@@ -10,6 +10,7 @@ import {
   serializeHawkspanEnv,
 } from "./hawkspan-env.mjs";
 import { assertProductSeparated } from "./product-separation.mjs";
+import { verifyActivatableRelease } from "./source-authority.mjs";
 import {
   atomicWrite,
   commitReleaseAuthority,
@@ -32,6 +33,7 @@ const revision = revisionIndex >= 0
   : path.basename(releaseRoot).replace(/^hawkspan-d-/, "").replace(/^hawkspan-/, "");
 
 const separation = assertProductSeparated(releaseRoot);
+const provenance = verifyActivatableRelease(releaseRoot, revision);
 const envPath = path.join(stateRoot, "hawkspan.env");
 const envUpgrade = readHawkspanEnvForUpgrade(envPath);
 const envValues = { ...envUpgrade.values };
@@ -130,6 +132,7 @@ const launchdPaths = renderedLaunchd.map(({ targetPath }) => targetPath);
 process.stdout.write(`${JSON.stringify({
   activated: true,
   product_separation: separation,
+  source_provenance: provenance,
   authority,
   config_path: configPath,
   env_path: envPath,

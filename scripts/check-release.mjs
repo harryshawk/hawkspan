@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { assertProductSeparated } from "./product-separation.mjs";
+import { assertSourceLineage } from "./source-authority.mjs";
 
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
 const defaultRoot = path.dirname(scriptRoot);
@@ -20,6 +21,10 @@ if (rootArgument !== -1 && !process.argv[rootArgument + 1]) {
 
 const separation = assertProductSeparated(releaseRoot);
 process.stdout.write(`Product separation passed for ${separation.root}\n`);
+const lineage = assertSourceLineage(releaseRoot, { requireClean: true });
+process.stdout.write(
+  `Source lineage passed for ${lineage.revision} from ${lineage.authority.required_public_ancestor}\n`,
+);
 
 const license = fs.readFileSync(path.join(releaseRoot, "LICENSE"), "utf8");
 assert.match(license, /^MIT License$/m);

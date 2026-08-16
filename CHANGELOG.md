@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.7 - 2026-08-15
+
+- Required recorded owner authorization for trainer start, stop, and package
+  lifecycle operations while reusing the active owner instruction rather than
+  adding another approval prompt.
+- Added fail-closed source-lineage and content-hashed package provenance so an
+  installed revision must be an exact clean Git commit descended from the last
+  public release line.
+- Defined a single-PR release-coordinator workflow for multiple maintainers;
+  production history and release tags are immutable.
+
 ## 0.3.6 - 2026-08-07
 
 - Preserved settled trainer lifecycle state during reboot reconciliation.

@@ -134,6 +134,10 @@ const cancelled = await tool("create_job", {
   kind: "training",
   title: "Cancelled state",
   requires_authorization: true,
+  metadata: {
+    target: "robot-test",
+    revision_fingerprint: "a".repeat(64),
+  },
 });
 await tool("update_job_status", {
   job_id: cancelled.result.structuredContent.job_id,

@@ -9,7 +9,11 @@ sets.
 Activate and start the HawkSpan release normally:
 
 ```sh
-node scripts/activate-release.mjs --release-root "$PWD" --revision RELEASE_ID
+node scripts/package-release.mjs \
+  --output-root "$HOME/.local/share/hawkspan/releases" \
+  --published-remote staging --published-ref RELEASE_STAGING_BRANCH
+node RELEASE_ROOT/scripts/activate-release.mjs \
+  --release-root RELEASE_ROOT --revision COMMIT_SHA
 node scripts/hawkspan-startup.mjs
 node scripts/audit-release-authority.mjs
 ```

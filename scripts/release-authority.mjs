@@ -52,8 +52,8 @@ export function prepareReleaseAuthority(stateRoot, {
   activeReleaseRoot,
   stableReleaseRoot = path.join(os.homedir(), ".local", "share", "hawkspan", "current"),
 }) {
-  if (typeof revision !== "string" || !/^[A-Za-z0-9._-]+$/.test(revision)) {
-    throw new Error("revision must be a nonempty release identifier");
+  if (typeof revision !== "string" || !/^[a-f0-9]{40}$/.test(revision)) {
+    throw new Error("revision must be an exact 40-character Git commit SHA");
   }
   if (!path.isAbsolute(activeReleaseRoot)) throw new Error("active release root must be absolute");
   const resolvedRoot = fs.realpathSync(activeReleaseRoot);

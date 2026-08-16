@@ -3,7 +3,7 @@
 Durable coordination between two trusted Macs, usable either as standalone
 software or as an optional Codex Personal plugin.
 
-This source tree is HawkSpan 0.3.5. The original 0.1.0 release remains
+This source tree is HawkSpan 0.3.7. The original 0.1.0 release remains
 available under its existing `v0.1.0` tag. See [CHANGELOG.md](CHANGELOG.md).
 
 HawkSpan provides:
@@ -54,12 +54,16 @@ authority for the active immutable release. Activation regenerates the live
 environment, configuration paths, launchd files, and the stable
 `~/.local/share/hawkspan/current` service link from that record.
 
-Activate an immutable installed release, then start and verify its services:
+Package a clean, lineage-checked Git commit, then activate that immutable
+release with its exact commit SHA and verify its services:
 
 ```sh
-node scripts/activate-release.mjs --release-root "$PWD" --revision RELEASE_ID
-node scripts/hawkspan-startup.mjs
-node scripts/audit-release-authority.mjs
+node scripts/package-release.mjs \
+  --output-root "$HOME/.local/share/hawkspan/releases" \
+  --published-remote staging --published-ref hawkspan-v0.3.7-staging
+node RELEASE_ROOT/scripts/activate-release.mjs --release-root RELEASE_ROOT --revision COMMIT_SHA
+node RELEASE_ROOT/scripts/hawkspan-startup.mjs
+node RELEASE_ROOT/scripts/audit-release-authority.mjs
 ```
 
 Before packaging or publishing a candidate, run the complete fail-closed gate:
@@ -68,9 +72,10 @@ Before packaging or publishing a candidate, run the complete fail-closed gate:
 scripts/check-release.sh
 ```
 
-The gate rejects predecessor runtime identifiers, dependencies, symbolic links,
-hard links, or incorrect HawkSpan plugin/MCP identity before running the full
-test suite. Release activation enforces the same separation invariant.
+The gate rejects a dirty or divergent Git lineage, predecessor runtime
+identifiers, dependencies, symbolic links, hard links, or incorrect HawkSpan
+plugin/MCP identity before running the full test suite. Release activation
+requires either that exact clean checkout or its content-hashed release package.
 
 Startup fails instead of repairing paths when any live file disagrees with the
 installed-revision authority. Peer operations discover the peer's active

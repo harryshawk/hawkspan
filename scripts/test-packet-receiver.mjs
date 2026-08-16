@@ -8,6 +8,9 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const sourceRoot = path.dirname(path.dirname(new URL(import.meta.url).pathname));
+const sourceRevision = spawnSync("git", ["-C", sourceRoot, "rev-parse", "HEAD"], {
+  encoding: "utf8",
+}).stdout.trim();
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-packet-receiver-test-"));
 const stateRoot = path.join(root, ".hawkspan");
 const launchAgentsRoot = path.join(root, "Library", "LaunchAgents");
@@ -71,7 +74,7 @@ fs.writeFileSync(configPath, `${JSON.stringify({
 const activation = spawnSync(process.execPath, [
   path.join(sourceRoot, "scripts", "activate-release.mjs"),
   "--release-root", sourceRoot,
-  "--revision", "packet-receiver-test",
+  "--revision", sourceRevision,
 ], {
   encoding: "utf8",
   env: {

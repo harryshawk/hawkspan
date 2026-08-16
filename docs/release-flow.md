@@ -1,5 +1,22 @@
 # Release Flow
 
+## 2026-08-15 - HawkSpan 0.3.7 authorization and lineage repair
+
+- Release intent: publish the recovered 0.3.6 implementation on the canonical
+  MIT history and require recorded owner authorization for trainer lifecycle
+  operations without adding another owner prompt.
+- Recovery evidence: installed authority named unpublished commit `c3bc982`;
+  its 33 post-0.3.5 commits were replayed onto public MIT `main` at `9bad60b`
+  before applying the reviewed authorization repair.
+- Multiple-maintainer invariant: one release coordinator, branch-and-PR
+  convergence, immutable `main` and tags, a required public ancestor in source
+  authority, and exact-commit/content-hashed release activation.
+- Staging repository and branch: `harryshawk/hawkspan-clean-staging`,
+  `hawkspan-v0.3.7-staging`.
+- Production repository and proposed tag: `harryshawk/hawkspan`, `v0.3.7`.
+- Production update: pending the complete gate from the exact staging commit
+  and explicit owner approval.
+
 ## 2026-08-07 - Owner-authorized license correction
 
 - Request: Apply the owner-specified MIT License to every public HawkSpan

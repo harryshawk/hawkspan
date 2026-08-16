@@ -131,7 +131,7 @@ const delegatedBase = {
   description: "Delegated context must already carry recorded authorization.",
   state: "authorized",
   authorization_evidence: "Peer-supplied evidence is not a substitute for recorded state.",
-  metadata: { target: "robot-test" },
+  metadata: { target: "robot-test", revision_fingerprint: fingerprint },
 };
 for (const [label, authorizationState] of [
   ["not_required", "not_required"],
@@ -164,7 +164,7 @@ await tool("update_job_status", {
   job_id: jobId,
   state: "authorized",
   authorization_evidence: "Active owner instruction for this bounded test.",
-  metadata: { target: "robot-test" },
+  metadata: { target: "robot-test", revision_fingerprint: fingerprint },
 });
 const started = await tool("trainer_start_authorized_job", {
   job_id: jobId,
@@ -195,6 +195,7 @@ await tool("update_job_status", {
   job_id: packageJobId,
   state: "authorized",
   authorization_evidence: "Active owner instruction for this bounded test.",
+  metadata: { target: "robot-test", revision_fingerprint: fingerprint },
 });
 const packageStarted = await tool("trainer_start_authorized_job", {
   job_id: packageJobId,

@@ -1,0 +1,8 @@
+# Release authority and production automation require owner review.
+/config/source-authority.json @harryshawk
+/scripts/activate-release.mjs @harryshawk
+/scripts/check-release.mjs @harryshawk
+/scripts/package-release.mjs @harryshawk
+/scripts/release-authority.mjs @harryshawk
+/scripts/source-authority.mjs @harryshawk
+/.github/workflows/ @harryshawk

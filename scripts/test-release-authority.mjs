@@ -13,6 +13,7 @@ import {
   writeHawkspanEnv,
 } from "./hawkspan-env.mjs";
 import { readReleaseAuthority, validateLiveReleaseConfiguration } from "./release-authority.mjs";
+import { createReleaseProvenance } from "./source-authority.mjs";
 
 const sourceRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hawkspan-release-authority-"));
@@ -24,14 +25,21 @@ const launchAgentsRoot = path.join(homeRoot, "Library", "LaunchAgents");
 // Keep the candidate outside HOME so activation must create the stable-link parent
 // exactly as it would for a genuinely fresh installation.
 const releaseRoot = path.join(temporaryRoot, "release-candidate");
+const testRevision = "a".repeat(40);
+const testTree = "b".repeat(40);
 fs.mkdirSync(path.join(releaseRoot, "scripts"), { recursive: true });
 fs.mkdirSync(path.join(releaseRoot, "launchd"), { recursive: true });
 fs.mkdirSync(path.join(releaseRoot, ".codex-plugin"), { recursive: true });
+fs.mkdirSync(path.join(releaseRoot, "config"), { recursive: true });
 fs.copyFileSync(
   path.join(sourceRoot, ".codex-plugin/plugin.json"),
   path.join(releaseRoot, ".codex-plugin/plugin.json"),
 );
 fs.copyFileSync(path.join(sourceRoot, ".mcp.json"), path.join(releaseRoot, ".mcp.json"));
+fs.copyFileSync(
+  path.join(sourceRoot, "config", "source-authority.json"),
+  path.join(releaseRoot, "config", "source-authority.json"),
+);
 const resolvedReleaseRoot = fs.realpathSync(releaseRoot);
 for (const name of [
   "call-tool.mjs", "mcp-server.mjs", "m4-trainer-start.sh", "m4-trainer-stop.sh",
@@ -65,6 +73,15 @@ for (const label of launchdLabels) {
     path.join(releaseRoot, "launchd", `${label}.plist.template`),
   );
 }
+createReleaseProvenance(releaseRoot, {
+  revision: testRevision,
+  tree: testTree,
+  sourceAuthority: JSON.parse(
+    fs.readFileSync(path.join(releaseRoot, "config", "source-authority.json"), "utf8"),
+  ),
+  publishedRepository: "https://github.com/harryshawk/hawkspan-clean-staging.git",
+  publishedRef: "refs/heads/test-release",
+});
 fs.mkdirSync(stateRoot, { recursive: true });
 writeHawkspanEnv(path.join(stateRoot, "hawkspan.env"), {
   HAWKSPAN_ACTIVE_RELEASE_ROOT: "/old/release",
@@ -83,7 +100,7 @@ fs.writeFileSync(path.join(stateRoot, "config.json"), `${JSON.stringify({
 const activation = spawnSync(process.execPath, [
   path.join(sourceRoot, "scripts", "activate-release.mjs"),
   "--release-root", releaseRoot,
-  "--revision", "test-revision",
+  "--revision", testRevision,
 ], {
   encoding: "utf8",
   env: {
@@ -110,7 +127,7 @@ fs.unlinkSync(missingTemplate);
 const incompleteActivation = spawnSync(process.execPath, [
   path.join(sourceRoot, "scripts", "activate-release.mjs"),
   "--release-root", releaseRoot,
-  "--revision", "incomplete-revision",
+  "--revision", testRevision,
 ], {
   encoding: "utf8",
   env: {
@@ -121,7 +138,7 @@ const incompleteActivation = spawnSync(process.execPath, [
   },
 });
 assert.notEqual(incompleteActivation.status, 0);
-assert.match(incompleteActivation.stderr, /launchd template is missing/);
+assert.match(incompleteActivation.stderr, /packaged release file set differs from provenance/);
 assert.equal(fs.existsSync(path.join(stateRoot, "installed-revision.json")), false);
 assert.equal(fs.readFileSync(path.join(stateRoot, "hawkspan.env"), "utf8"), envBeforeFailedPreflight);
 assert.equal(fs.readFileSync(path.join(stateRoot, "config.json"), "utf8"), configBeforeFailedPreflight);
@@ -133,7 +150,7 @@ fs.copyFileSync(
 const cleanActivation = spawnSync(process.execPath, [
   path.join(sourceRoot, "scripts", "activate-release.mjs"),
   "--release-root", releaseRoot,
-  "--revision", "test-revision",
+  "--revision", testRevision,
 ], {
   encoding: "utf8",
   env: {
@@ -151,7 +168,7 @@ assert.deepEqual(
   ["HAWKSPAN_LOCAL_CONTROL_URL", "HAWKSPAN_PLUGIN_ROOT"],
 );
 const authority = readReleaseAuthority(stateRoot);
-assert.equal(authority.revision, "test-revision");
+assert.equal(authority.revision, testRevision);
 assert.equal(authority.active_release_root, resolvedReleaseRoot);
 assert.equal(
   authority.stable_release_root,
@@ -168,7 +185,7 @@ fs.writeFileSync(blockedLaunchAgentsRoot, "not a directory\n");
 const failedPublish = spawnSync(process.execPath, [
   path.join(sourceRoot, "scripts", "activate-release.mjs"),
   "--release-root", releaseRoot,
-  "--revision", "failed-publish-revision",
+  "--revision", testRevision,
 ], {
   encoding: "utf8",
   env: {
