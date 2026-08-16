@@ -9,8 +9,9 @@
   its 33 post-0.3.5 commits were replayed onto public MIT `main` at `9bad60b`
   before applying the reviewed authorization repair.
 - Multiple-maintainer invariant: one release coordinator, branch-and-PR
-  convergence, immutable `main` and tags, a required public ancestor in source
-  authority, and exact-commit/content-hashed release activation.
+  convergence, exact-SHA fast-forward promotion after approval, immutable
+  `main` and tags, a required public ancestor in source authority, and
+  exact-commit/content-hashed release activation.
 - Staging repository and branch: `harryshawk/hawkspan-clean-staging`,
   `hawkspan-v0.3.7-staging`.
 - Production repository and proposed tag: `harryshawk/hawkspan`, `v0.3.7`.

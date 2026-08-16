@@ -45,5 +45,9 @@ version mismatch, or candidate that does not descend from that public commit.
 Each release has one coordinator. All maintainers work on branches, publish
 their commits before handoff, and converge through one pull request whose exact
 commit passes the GitHub release gate. `main` is never force-pushed and release
-tags are never moved. A history rewrite requires a separately recorded owner
-instruction and recovery procedure; it is not an ordinary release operation.
+tags are never moved. After review and explicit production approval, the
+coordinator promotes that already-staged SHA by fast-forwarding `main`; GitHub's
+squash, rebase, and merge-commit buttons are not release operations because
+they create a different SHA. A history rewrite requires a separately recorded
+owner instruction and recovery procedure; it is not an ordinary release
+operation.
