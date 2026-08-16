@@ -212,11 +212,22 @@ requires the opposite peer configuration to be updated before wakeups are
 accepted again.
 
 The configured remote `peer.codex_command` must see the same `CODEX_HOME` and
-SQLite store used by the target Codex desktop task. If that task uses an
-external or otherwise non-default store, use a reviewed remote executable or
-wrapper that selects that exact supported store before invoking `codex exec
-resume`. A task ID present only in another Codex store will fail with `no
-rollout found` even though message delivery succeeded.
+SQLite store used by the target task. If that task uses an external or
+otherwise non-default store, use a reviewed remote executable or wrapper that
+selects that exact supported store before invoking `codex exec resume`. A task
+ID present only in another Codex store will fail with `no rollout found` even
+though message delivery succeeded. Keep unattended receivers workspace-bound;
+when a wrapper is required, it should also insert `-s workspace-write` before
+the `resume` subcommand instead of inheriting a broader user default.
+
+Do not target a task that remains loaded in Codex Desktop. A task can emit
+`task_complete` and still retain the desktop app's writer lease; an external
+`codex exec resume` then fails with `thread-store conflict ... already has an
+active writer`. Provision one persistent, CLI-created wake-receiver task on
+each Mac, leave those receivers closed in Codex Desktop, and configure each
+node with the opposite receiver ID. The receiver can remain in the normal task
+store and appear in task history; "headless" means only that the desktop app
+does not keep it loaded.
 
 The `send_message` or `wake_peer_thread` launcher response proves only that the
 remote detached wake process started. It does not prove that `codex exec
@@ -225,7 +236,9 @@ resume` found the task or acquired its writer lock. Inspect the returned remote
 nonzero resume result are wake failures. Test while the target task is idle,
 then reverse direction and repeat. Bidirectional acceptance requires both
 remote logs to prove actual task resumption while the installed HawkSpan core,
-roles, allowlists, and configuration authority remain unchanged.
+roles, allowlists, and configuration authority remain unchanged. Record the
+receiver IDs and config backups in the deployment receipt so a later maintainer
+does not replace them with whichever interactive task happens to be open.
 
 If wakeup is the failed coordination prerequisite, repair and verify it before
 starting unrelated network, GitHub, application, or workload checks. Send one

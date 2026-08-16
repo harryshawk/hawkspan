@@ -12,6 +12,10 @@
   the same Codex home and SQLite store as the desktop task, idle-task testing,
   and authoritative remote-log verification instead of trusting asynchronous
   launcher success.
+- Documented the desktop writer-lease failure and the supported deployment
+  pattern: persistent CLI-created wake-receiver tasks that are not left open in
+  Codex Desktop, opposite receiver IDs recorded on both peers, and
+  workspace-bounded resume wrappers for external Codex stores.
 - Recorded that restoring the durable message/wakeup path is a blocking repair;
   unrelated readiness checks must remain deferred until bidirectional wakeup
   acceptance passes.
