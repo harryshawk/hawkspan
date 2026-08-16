@@ -7,6 +7,14 @@
   unchanged plugin packet, and do not substitute Computer Use, peer commands,
   permission changes, or HawkSpan service/IPC workarounds for the reviewed
   local installer.
+- Documented wakeup deployment requirements and acceptance: both real peer task
+  IDs, remote-wake enablement on both nodes, the peer Codex command's access to
+  the same Codex home and SQLite store as the desktop task, idle-task testing,
+  and authoritative remote-log verification instead of trusting asynchronous
+  launcher success.
+- Recorded that restoring the durable message/wakeup path is a blocking repair;
+  unrelated readiness checks must remain deferred until bidirectional wakeup
+  acceptance passes.
 
 ## 0.3.9 - 2026-08-15
 

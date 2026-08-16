@@ -201,6 +201,37 @@ The immutable message body is embedded in the peer wake prompt. The prompt also
 provides a direct `call-tool.mjs` fallback for Codex exec environments that do
 not load dynamic MCP tools.
 
+### Wakeup deployment and acceptance
+
+Durable delivery and task wakeup are separate outcomes. A delivered envelope
+can be waiting in the peer inbox even when its Codex task was not resumed.
+Before relying on unattended operation, configure both nodes with the other
+node's current, verified Codex task ID and explicitly enable
+`peer.allow_remote_wake`. A newly created replacement task has a new ID and
+requires the opposite peer configuration to be updated before wakeups are
+accepted again.
+
+The configured remote `peer.codex_command` must see the same `CODEX_HOME` and
+SQLite store used by the target Codex desktop task. If that task uses an
+external or otherwise non-default store, use a reviewed remote executable or
+wrapper that selects that exact supported store before invoking `codex exec
+resume`. A task ID present only in another Codex store will fail with `no
+rollout found` even though message delivery succeeded.
+
+The `send_message` or `wake_peer_thread` launcher response proves only that the
+remote detached wake process started. It does not prove that `codex exec
+resume` found the task or acquired its writer lock. Inspect the returned remote
+`log_path`; `no rollout found`, active-writer/thread-store conflicts, and any
+nonzero resume result are wake failures. Test while the target task is idle,
+then reverse direction and repeat. Bidirectional acceptance requires both
+remote logs to prove actual task resumption while the installed HawkSpan core,
+roles, allowlists, and configuration authority remain unchanged.
+
+If wakeup is the failed coordination prerequisite, repair and verify it before
+starting unrelated network, GitHub, application, or workload checks. Send one
+blocking instruction at a time and explicitly supersede any earlier sequence;
+do not bundle a lower-priority task into the wake-repair handoff.
+
 Background artifact intake reuses an already verified manifest/database match
 instead of hashing every large artifact again on every two-minute pass. This
 keeps the link agent responsive when multi-gigabyte training packets exist.

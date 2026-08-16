@@ -801,6 +801,7 @@ function wakePeerThread(args) {
   const auditDir = config.peer.remote_audit || `${config.peer.remote_inbox}/../audit`;
   const wakeId = id("wake");
   const logPath = path.posix.join(auditDir, `${wakeId}.log`);
+  const statusPath = path.posix.join(auditDir, `${wakeId}.status`);
   const leasePath = path.posix.join(
     auditDir,
     `wake-${String(config.peer.thread_id).replace(/[^A-Za-z0-9._-]/g, "_")}.lock`,
@@ -827,6 +828,12 @@ function wakePeerThread(args) {
     "--skip-git-repo-check",
     shellQuote(config.peer.thread_id),
     shellQuote(prompt),
+    ";",
+    "wake_status=$?",
+    ";",
+    `printf '%s\\n' "$wake_status" > ${shellQuote(statusPath)}`,
+    ";",
+    "exit \"$wake_status\"",
   ].join(" ");
   const command = [
     `mkdir -p ${shellQuote(auditDir)}`,
@@ -834,9 +841,12 @@ function wakePeerThread(args) {
     "(",
     `mkdir ${shellQuote(leasePath)} 2>/dev/null`,
     "||",
-    "exit 0",
+    "{ printf '%s\\n' WAKE_ALREADY_IN_PROGRESS >&2; exit 75; }",
     ")",
     "&&",
+    `rm -f ${shellQuote(statusPath)}`,
+    "&&",
+    "(",
     "nohup",
     "/bin/sh",
     "-c",
@@ -847,6 +857,41 @@ function wakePeerThread(args) {
     "<",
     "/dev/null",
     "&",
+    "wake_pid=$!",
+    ";",
+    "wake_check=0",
+    ";",
+    "while [ \"$wake_check\" -lt 5 ]; do",
+    `if [ -f ${shellQuote(statusPath)} ]; then`,
+    `wake_status=$(cat ${shellQuote(statusPath)})`,
+    ";",
+    "if [ \"$wake_status\" -eq 0 ]; then exit 0; fi",
+    ";",
+    "printf 'WAKE_RESUME_FAILED:%s\\n' \"$wake_status\" >&2",
+    ";",
+    "exit 70",
+    ";",
+    "fi",
+    ";",
+    "if ! kill -0 \"$wake_pid\" 2>/dev/null; then",
+    "wait \"$wake_pid\"",
+    ";",
+    "wake_status=$?",
+    ";",
+    "printf 'WAKE_RESUME_FAILED:%s\\n' \"$wake_status\" >&2",
+    ";",
+    "exit 70",
+    ";",
+    "fi",
+    ";",
+    "sleep 1",
+    ";",
+    "wake_check=$((wake_check + 1))",
+    ";",
+    "done",
+    ";",
+    "exit 0",
+    ")",
   ].join(" ");
   const attempts = [...discoveryAttempts.map((attempt) => ({ ...attempt, phase: "release_discovery" }))];
   for (const { host, cycle, delay_ms: delayMs, is_last_route: isLastRoute } of routeAttemptPlan(
@@ -869,6 +914,27 @@ function wakePeerThread(args) {
         status: result.status,
         error: result.stderr?.trim() || "",
       });
+      if (result.stderr?.includes("WAKE_ALREADY_IN_PROGRESS")) {
+        const error = "peer wake is already in progress";
+        audit("wake", "thread", config.peer.thread_id, "failed", {
+          attempts, wake_id: wakeId, log_path: logPath, error,
+        });
+        return { ok: false, error, wake_id: wakeId, log_path: logPath, attempts };
+      }
+      if (result.stderr?.includes("WAKE_RESUME_FAILED:")) {
+        const error = "peer Codex task resume failed during startup";
+        audit("wake", "thread", config.peer.thread_id, "failed", {
+          attempts, wake_id: wakeId, log_path: logPath, status_path: statusPath, error,
+        });
+        return {
+          ok: false,
+          error,
+          wake_id: wakeId,
+          log_path: logPath,
+          status_path: statusPath,
+          attempts,
+        };
+      }
       if (result.status === 0) {
         recordRouteSuccess(host);
         audit("wake", "thread", config.peer.thread_id, "started", {
@@ -876,9 +942,19 @@ function wakePeerThread(args) {
           peer_revision: peerRelease.revision,
           wake_id: wakeId,
           log_path: logPath,
+          status_path: statusPath,
+          startup_grace_seconds: 5,
           message_id: args.message_id || null,
         });
-        return { ok: true, host, wake_id: wakeId, log_path: logPath, attempts };
+        return {
+          ok: true,
+          host,
+          wake_id: wakeId,
+          log_path: logPath,
+          status_path: statusPath,
+          verification: "resume remained active through the startup grace period",
+          attempts,
+        };
       }
       recordRouteFailure(host);
   }
