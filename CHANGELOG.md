@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allowed the receive-only SSH gateway to accept rsync's safe `--dirs` option,
+  which the macOS client adds during real message and artifact delivery.
 - Added the same-codebase HawkGrokSpan profile for an isolated M2/Grok-VM
   message and verified-file link. The server exposes only thirteen link,
   message, acknowledgement, and artifact tools; direct calls to commands,

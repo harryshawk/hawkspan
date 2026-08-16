@@ -83,7 +83,7 @@ if (original.startsWith("rsync --server ")) {
   if (dot < 3 || dot !== tokens.length - 2) fail("rsync server command shape is invalid");
   for (const option of tokens.slice(2, dot)) {
     const allowed = /^-[A-Za-z0-9.,]+$/.test(option) ||
-      /^--(?:partial|append-verify|log-format=[A-Za-z0-9%._-]+)$/.test(option);
+      /^--(?:dirs|partial|append-verify|log-format=[A-Za-z0-9%._-]+)$/.test(option);
     if (!allowed) fail(`rsync option is not allowed: ${option}`);
   }
   const requested = path.normalize(tokens.at(-1));
