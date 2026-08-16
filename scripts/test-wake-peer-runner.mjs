@@ -94,6 +94,7 @@ function tool(name, args, marker = "started") {
 }
 
 const message = tool("send_message", {
+  recipient: "00000000-0000-0000-0000-000000000003",
   subject: "wake runner marker test",
   body: "test body",
   deliver: false,
@@ -104,6 +105,12 @@ const started = tool("wake_peer_thread", { message_id: message.message_id }, "st
 assert.equal(started.ok, true);
 assert.match(started.result_path, /\.result\.json$/);
 assert.equal(started.attempts.at(-1).marker.status, "started");
+const startedWakeLine = fs.readFileSync(log, "utf8").split("\n")
+  .findLast((line) => line.includes("wake-runner.mjs"));
+const encodedWakeRequest = startedWakeLine?.match(/\blaunch '([A-Za-z0-9+/=]+)'/)?.[1];
+assert.ok(encodedWakeRequest, "wake request must be present in the SSH command");
+const wakeRequest = JSON.parse(Buffer.from(encodedWakeRequest, "base64").toString("utf8"));
+assert.equal(wakeRequest.thread_id, "00000000-0000-0000-0000-000000000003");
 
 const beforeBusy = fs.readFileSync(log, "utf8").split("\n").filter(Boolean).length;
 const busy = tool("wake_peer_thread", { message_id: message.message_id }, "busy");

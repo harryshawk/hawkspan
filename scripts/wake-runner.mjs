@@ -357,7 +357,7 @@ function acknowledgeUnderLeaseGuard(request, leasePath, token) {
     const acknowledgement = callLocalTool(request, "acknowledge_message", {
       message_id: request.message_id,
       deliver: true,
-      note: "Accepted by the bounded HawkSpan receiver.",
+      note: "Accepted by the addressed Codex task.",
     });
     if (!acknowledgement.ok) {
       return {

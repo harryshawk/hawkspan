@@ -114,6 +114,7 @@ const defaultConfig = {
 };
 
 const EXACT_TOOL_NAME = /^[a-z][a-z0-9_]{0,127}$/;
+const CODEX_TASK_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 function assertExactToolNames(value, label) {
   if (value === "current") return;
@@ -836,15 +837,22 @@ function wakePeerThread(args) {
       attempts: [],
     };
   }
-  if (!config.peer?.thread_id) {
-    return { ok: false, error: "peer.thread_id is not configured", attempts: [] };
-  }
   const storedMessage = args.message_id
     ? db.prepare(`
-        SELECT subject,body FROM messages
+        SELECT recipient,subject,body FROM messages
         WHERE id=? AND direction='outbound'
       `).get(args.message_id)
     : null;
+  const targetThreadId = CODEX_TASK_ID.test(String(storedMessage?.recipient || ""))
+    ? storedMessage.recipient
+    : config.peer?.thread_id;
+  if (!targetThreadId) {
+    return {
+      ok: false,
+      error: "message recipient is not a Codex task ID and peer.thread_id is not configured",
+      attempts: [],
+    };
+  }
   const codexCommand = config.peer.codex_command || "codex";
   const remoteNode = config.peer.remote_node || "node";
   let peerRelease = null;
@@ -878,7 +886,7 @@ function wakePeerThread(args) {
   const resultPath = path.posix.join(auditDir, `${wakeId}.result.json`);
   const leasePath = path.posix.join(
     auditDir,
-    `wake-${String(config.peer.thread_id).replace(/[^A-Za-z0-9._-]/g, "_")}.lock`,
+    `wake-${String(targetThreadId).replace(/[^A-Za-z0-9._-]/g, "_")}.lock`,
   );
   const subject = args.subject || storedMessage?.subject || "";
   const body = args.body || storedMessage?.body || "";
@@ -886,8 +894,9 @@ function wakePeerThread(args) {
     `HawkSpan-D delivered message ${args.message_id || "unknown"}.`,
     subject ? `Subject: ${subject}.` : "",
     body ? `Message body: ${body}` : "",
-    "The bounded receiver runner has imported the durable envelope; the embedded body is authoritative.",
-    "Process this as a one-turn receiver. Do not create, adopt, complete, or modify a persistent goal.",
+    "The wake runner has imported the durable envelope; the embedded body is authoritative.",
+    "Process this message in the context of this addressed task's existing work.",
+    "Do not create, adopt, complete, or modify a persistent goal merely to accept this message.",
     `If and only if the message is accepted, return only JSON ` +
       `{"message_id":"${args.message_id || "unknown"}","status":"accepted"}.`,
     "If it cannot be accepted, exit without returning that acceptance object.",
@@ -896,7 +905,7 @@ function wakePeerThread(args) {
     schema_version: 1,
     wake_id: wakeId,
     message_id: args.message_id || "unknown",
-    thread_id: config.peer.thread_id,
+    thread_id: targetThreadId,
     prompt,
     codex_command: codexCommand,
     node_command: remoteNode,
@@ -948,7 +957,7 @@ function wakePeerThread(args) {
       });
       if (result.status === 0 && marker?.status === "started") {
         recordRouteSuccess(host);
-        audit("wake", "thread", config.peer.thread_id, "started", {
+        audit("wake", "thread", targetThreadId, "started", {
           host,
           peer_revision: peerRelease.revision,
           wake_id: wakeId,
@@ -968,7 +977,7 @@ function wakePeerThread(args) {
       }
       if (marker?.status === "busy") {
         recordRouteSuccess(host);
-        audit("wake", "thread", config.peer.thread_id, "busy", {
+        audit("wake", "thread", targetThreadId, "busy", {
           host,
           wake_id: wakeId,
           message_id: args.message_id || null,
@@ -978,7 +987,7 @@ function wakePeerThread(args) {
           ok: false,
           skipped: true,
           busy: true,
-          error: "peer receiver is already active",
+          error: "peer task is already active",
           host,
           wake_id: wakeId,
           attempts,
@@ -987,7 +996,7 @@ function wakePeerThread(args) {
       if (marker?.status === "failed" || result.status === 0) {
         recordRouteSuccess(host);
         const error = marker?.error || "invalid wake runner response";
-        audit("wake", "thread", config.peer.thread_id, "failed", {
+        audit("wake", "thread", targetThreadId, "failed", {
           host,
           wake_id: wakeId,
           message_id: args.message_id || null,
@@ -998,7 +1007,7 @@ function wakePeerThread(args) {
       }
       recordRouteFailure(host);
   }
-  audit("wake", "thread", config.peer.thread_id, "failed", { attempts });
+  audit("wake", "thread", targetThreadId, "failed", { attempts });
   return { ok: false, error: "all routes failed", wake_id: wakeId, attempts };
 }
 
