@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Canonicalized receive-only rsync directory targets so legitimate message and
+  artifact-manifest deliveries with a trailing slash remain inside the boundary.
 - Allowed the receive-only SSH gateway to accept rsync's safe `--append`
   receiver option, which appears during real resumable delivery.
 - Allowed the receive-only SSH gateway to accept rsync's safe `--dirs` option,

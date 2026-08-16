@@ -86,7 +86,7 @@ if (original.startsWith("rsync --server ")) {
       /^--(?:dirs|partial|append|append-verify|log-format=[A-Za-z0-9%._-]+)$/.test(option);
     if (!allowed) fail(`rsync option is not allowed: ${option}`);
   }
-  const requested = path.normalize(tokens.at(-1));
+  const requested = path.resolve(tokens.at(-1));
   const receivesDirectory = requested === inbox || requested === artifacts;
   const receivesArtifact = path.dirname(requested) === artifacts &&
     /^[A-Za-z0-9._-]+$/.test(path.basename(requested));
