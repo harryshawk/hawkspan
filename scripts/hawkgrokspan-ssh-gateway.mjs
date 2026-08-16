@@ -61,7 +61,12 @@ if (digestMatch) {
   if (path.dirname(requested) !== artifacts || !/^[A-Za-z0-9._-]+$/.test(path.basename(requested))) {
     fail("digest target is outside the artifact inbox");
   }
-  const stat = fs.lstatSync(requested);
+  let stat;
+  try {
+    stat = fs.lstatSync(requested);
+  } catch {
+    fail("digest target is unavailable");
+  }
   if (!stat.isFile() || stat.isSymbolicLink()) fail("digest target must be a regular file");
   const digest = crypto.createHash("sha256").update(fs.readFileSync(requested)).digest("hex");
   process.stdout.write(`${digest}  ${requested}\n`);

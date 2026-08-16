@@ -61,6 +61,9 @@ const symlink = path.join(state, "artifacts", "artifact-link.txt");
 fs.symlinkSync(path.join(root, "outside"), symlink);
 const deniedDigest = run(digestCommand.replace(received, symlink).replace(received, symlink));
 assert.equal(deniedDigest.status, 126);
+const missing = path.join(state, "artifacts", "artifact-missing.txt");
+const deniedMissing = run(digestCommand.replace(received, missing).replace(received, missing));
+assert.equal(deniedMissing.status, 126);
 
 fs.rmSync(root, { recursive: true, force: true });
 process.stdout.write("HawkGrokSpan forced-command SSH gateway tests passed\n");
