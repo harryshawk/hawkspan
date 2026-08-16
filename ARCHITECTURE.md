@@ -36,9 +36,10 @@ deadline, and only its current token can remove the lease.
 
 A delivered message is imported before `codex exec resume` wakes the configured
 reliable receiver task. An optional immutable `target_thread_id` identifies a
-working Codex task. The receiver forwards the durable message ID, subject, and
-body to that exact task through supported Codex inter-thread messaging; without
-a target it handles the message itself. The receiver returns exact structured
+working Codex task. The fenced receiver runner forwards the durable message ID,
+subject, and body to that exact task through the Codex desktop app's same-user
+inter-thread messaging path; without a target the receiver task handles the
+message itself. The receiver returns exact structured
 acceptance only after the target handoff is accepted or its own handling
 completes. The fenced runner then writes the application acknowledgement.
 Process exit, rejected handoff, malformed or mismatched output, signal, timeout,

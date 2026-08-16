@@ -923,12 +923,10 @@ function wakePeerThread(args) {
       ? `Its immutable target_thread_id is ${targetThreadId}.`
       : "It has no target_thread_id, so handle it in this receiver turn.",
     targetThreadId
-      ? `Call the available Codex inter-thread send_message_to_thread capability exactly once ` +
-        `with threadId ${JSON.stringify(targetThreadId)} and prompt ${JSON.stringify(forwardedPrompt)}. ` +
-        `Do not execute the forwarded message in the receiver.`
+      ? "The fenced HawkSpan runner owns the application-side handoff to that target task."
       : forwardedPrompt,
     targetThreadId
-      ? "The target handoff is accepted only if that inter-thread call reports success."
+      ? "Do not execute the forwarded message in this receiver task."
       : "Receiver handling is accepted only after the message has been processed.",
     "Do not call acknowledge_message; the fenced runner owns durable acknowledgement.",
     `If and only if the message is accepted, return only JSON ` +
@@ -941,6 +939,7 @@ function wakePeerThread(args) {
     message_id: args.message_id || "unknown",
     thread_id: receiverThreadId,
     target_thread_id: targetThreadId,
+    handoff_prompt: targetThreadId ? forwardedPrompt : null,
     prompt,
     codex_command: codexCommand,
     node_command: remoteNode,

@@ -201,7 +201,8 @@ that validated packet completes the original training job and queue item.
 The immutable message body is embedded in the peer wake prompt. A bounded
 receiver runner imports the envelope outside the Codex sandbox and wakes one
 reliable configured receiver. When the envelope carries `target_thread_id`, the
-receiver forwards the message through supported Codex inter-thread messaging;
+fenced runner forwards it through the Codex desktop app's same-user inter-thread
+messaging path instead of depending on a headless model tool call;
 otherwise it handles the message itself. Exact structured acceptance is valid
 only after the target handoff succeeds or receiver handling completes, and only
 then does the runner write the application acknowledgement. A token-fenced

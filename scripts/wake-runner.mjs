@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { handoffToCodexThread } from "./codex-thread-handoff.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_TIMEOUT_MS = 120000;
@@ -129,6 +130,14 @@ function validateRequest(raw) {
   if (raw.target_thread_id !== null && raw.target_thread_id !== undefined &&
       (typeof raw.target_thread_id !== "string" || !raw.target_thread_id.trim())) {
     throw new Error("wake request target_thread_id must be a non-empty string when provided");
+  }
+  if (raw.target_thread_id &&
+      (typeof raw.handoff_prompt !== "string" || !raw.handoff_prompt.trim())) {
+    throw new Error("wake request handoff_prompt is required for a target task");
+  }
+  if (raw.codex_ipc_socket !== null && raw.codex_ipc_socket !== undefined &&
+      (typeof raw.codex_ipc_socket !== "string" || !path.isAbsolute(raw.codex_ipc_socket))) {
+    throw new Error("wake request codex_ipc_socket must be absolute when provided");
   }
   const auditDir = path.resolve(raw.audit_dir);
   for (const key of ["log_path", "lease_path", "result_path"]) {
@@ -426,6 +435,45 @@ export async function runWake(leasePath, token) {
     }
     if (imported.state === "acknowledged") {
       result = { status: "already_acknowledged", acknowledged: true };
+      return;
+    }
+
+    if (request.target_thread_id) {
+      let handoff;
+      try {
+        handoff = await handoffToCodexThread({
+          schema_version: 1,
+          thread_id: request.target_thread_id,
+          message_id: request.message_id,
+          prompt: request.handoff_prompt,
+          host_id: request.codex_host_id || "local",
+          socket_path: request.codex_ipc_socket || undefined,
+          timeout_ms: request.timeout_ms,
+        });
+      } catch (error) {
+        result = {
+          status: "handoff_failed",
+          acknowledged: false,
+          error: String(error?.message || error),
+        };
+        return;
+      }
+      const guardedAcknowledgement = acknowledgeUnderLeaseGuard(request, leasePath, token);
+      if (!guardedAcknowledgement.ok) {
+        result = {
+          status: guardedAcknowledgement.status,
+          acknowledged: false,
+          handoff,
+          ...(guardedAcknowledgement.error ? { error: guardedAcknowledgement.error } : {}),
+        };
+        return;
+      }
+      result = {
+        status: "acknowledged",
+        acknowledged: true,
+        handoff,
+        acknowledgement_id: guardedAcknowledgement.acknowledgement.result?.message_id || null,
+      };
       return;
     }
 

@@ -117,8 +117,10 @@ assert.ok(encodedWakeRequest, "wake request must be present in the SSH command")
 const wakeRequest = JSON.parse(Buffer.from(encodedWakeRequest, "base64").toString("utf8"));
 assert.equal(wakeRequest.thread_id, "00000000-0000-0000-0000-000000000002");
 assert.equal(wakeRequest.target_thread_id, "00000000-0000-0000-0000-000000000003");
-assert.match(wakeRequest.prompt, /send_message_to_thread/);
+assert.match(wakeRequest.prompt, /fenced HawkSpan runner owns/);
 assert.match(wakeRequest.prompt, /00000000-0000-0000-0000-000000000003/);
+assert.match(wakeRequest.handoff_prompt, /wake runner marker test/);
+assert.match(wakeRequest.handoff_prompt, /test body/);
 
 const beforeBusy = fs.readFileSync(log, "utf8").split("\n").filter(Boolean).length;
 const busy = tool("wake_peer_thread", { message_id: message.message_id }, "busy");

@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -15,6 +16,7 @@ const audit = path.join(root, "audit");
 const calls = path.join(root, "calls.jsonl");
 const raceAckStarted = path.join(root, "race-ack-started.json");
 const raceAckFinished = path.join(root, "race-ack-finished.json");
+const ipcSocket = path.join(root, "codex-ipc.sock");
 const fakeCodex = path.join(root, "fake-codex.mjs");
 const fakeCallTool = path.join(root, "fake-call-tool.mjs");
 fs.mkdirSync(audit, { recursive: true });
@@ -277,6 +279,92 @@ assert.equal(raceResult.acknowledged, true);
 const successorResult = await waitResult(successorRequest);
 assert.equal(successorResult.status, "acknowledged");
 assert.equal(successorResult.lease_released, true);
+
+const ipcRequests = [];
+const ipcServer = net.createServer((socket) => {
+  let buffer = Buffer.alloc(0);
+  socket.on("data", (chunk) => {
+    buffer = Buffer.concat([buffer, chunk]);
+    while (buffer.length >= 4) {
+      const length = buffer.readUInt32LE(0);
+      if (buffer.length < 4 + length) return;
+      const request = JSON.parse(buffer.subarray(4, 4 + length).toString("utf8"));
+      buffer = buffer.subarray(4 + length);
+      ipcRequests.push(request);
+      let response;
+      if (request.method === "initialize") {
+        response = {
+          type: "response",
+          requestId: request.requestId,
+          resultType: "success",
+          method: request.method,
+          handledByClientId: "router-client",
+          result: { clientId: "hawkspan-client" },
+        };
+      } else if (request.method === "thread-owner-discovery") {
+        response = {
+          type: "response",
+          requestId: request.requestId,
+          resultType: "success",
+          method: request.method,
+          handledByClientId: "owner-client",
+          result: {},
+        };
+      } else if (request.method === "thread-follower-start-turn") {
+        response = {
+          type: "response",
+          requestId: request.requestId,
+          resultType: "success",
+          method: request.method,
+          handledByClientId: "owner-client",
+          result: { result: { turn: { id: "turn-test", status: "inProgress" } } },
+        };
+      } else {
+        response = {
+          type: "response",
+          requestId: request.requestId,
+          resultType: "error",
+          error: "unexpected method",
+        };
+      }
+      const json = JSON.stringify(response);
+      const frame = Buffer.alloc(4 + Buffer.byteLength(json));
+      frame.writeUInt32LE(Buffer.byteLength(json), 0);
+      frame.write(json, 4);
+      socket.write(frame);
+    }
+  });
+});
+await new Promise((resolve, reject) => {
+  ipcServer.once("error", reject);
+  ipcServer.listen(ipcSocket, resolve);
+});
+
+const targetRequest = request("target", "message-target", {
+  target_thread_id: "00000000-0000-0000-0000-000000000003",
+  handoff_prompt: "HawkSpan durable message message-target. Treat it idempotently.",
+  codex_ipc_socket: ipcSocket,
+});
+const targetLaunch = launch(targetRequest, "hang");
+assert.equal(targetLaunch.result.status, 0, targetLaunch.result.stderr);
+assert.equal(targetLaunch.marker.status, "started");
+const targetResult = await waitResult(targetRequest);
+assert.equal(targetResult.status, "acknowledged");
+assert.equal(targetResult.acknowledged, true);
+assert.equal(targetResult.handoff.status, "accepted");
+assert.equal(targetResult.handoff.thread_id, targetRequest.target_thread_id);
+assert.equal(targetResult.lease_released, true);
+const discovery = ipcRequests.find((entry) => entry.method === "thread-owner-discovery");
+assert.equal(discovery.version, 1);
+assert.equal(discovery.params.hostId, "local");
+assert.equal(discovery.params.conversationId, targetRequest.target_thread_id);
+const handoff = ipcRequests.find((entry) => entry.method === "thread-follower-start-turn");
+assert.equal(handoff.version, 1);
+assert.equal(handoff.targetClientId, "owner-client");
+assert.equal(handoff.params.conversationId, targetRequest.target_thread_id);
+assert.equal(handoff.params.turnStartParams.clientUserMessageId, targetRequest.message_id);
+assert.equal(handoff.params.turnStartParams.input[0].text, targetRequest.handoff_prompt);
+await new Promise((resolve) => ipcServer.close(resolve));
 
 fs.rmSync(root, { recursive: true, force: true });
 process.stdout.write("bounded and fenced wake-runner tests passed\n");
