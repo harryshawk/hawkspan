@@ -214,8 +214,8 @@ export function launchWake(rawRequest) {
       type: "object",
       required: ["message_id", "status"],
       properties: {
-        message_id: { const: request.message_id },
-        status: { const: "accepted" },
+        message_id: { type: "string", const: request.message_id },
+        status: { type: "string", const: "accepted" },
       },
       additionalProperties: false,
     });

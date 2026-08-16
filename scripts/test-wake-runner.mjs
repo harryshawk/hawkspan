@@ -23,6 +23,14 @@ fs.writeFileSync(fakeCodex, `#!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
 const args = process.argv.slice(2);
+const schemaIndex = args.indexOf("--output-schema");
+const schema = schemaIndex >= 0
+  ? JSON.parse(fs.readFileSync(args[schemaIndex + 1], "utf8"))
+  : null;
+if (schema?.properties?.message_id?.type !== "string" ||
+    schema?.properties?.status?.type !== "string") {
+  throw new Error("acceptance schema string properties must declare type=string");
+}
 const outputIndex = args.indexOf("--output-last-message");
 const output = outputIndex >= 0 ? args[outputIndex + 1] : null;
 const mode = process.env.HAWKSPAN_TEST_CODEX_MODE;
