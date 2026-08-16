@@ -31,6 +31,10 @@ Use on both nodes:
 - state: `~/.hawkgrokspan`, never `~/.hawkspan`;
 - exchange directory: `~/HawkGrokSpan/Exchange`;
 - one dedicated SSH key used only for this link;
+- a forced-command `authorized_keys` entry for that key, running
+  `scripts/hawkgrokspan-ssh-gateway.mjs` with forwarding, PTY, agent, X11, and
+  user startup files disabled; the gateway accepts only receive-side rsync,
+  exact receive-directory checks, artifact digesting, and a transport probe;
 - one dedicated `known_hosts` file populated from an independently verified
   host key;
 - remote inbox, artifact, and audit paths under the peer's
@@ -71,8 +75,10 @@ locally. HawkGrokSpan never transports or stores Grok or GitHub credentials.
    `shasum`; HawkSpan accepts either for remote verification.
 4. Create `~/.hawkgrokspan` and `~/HawkGrokSpan/Exchange` with owner-only
    permissions.
-5. Create a dedicated SSH key, exchange only public keys, and independently
-   verify each host key before writing the dedicated `known_hosts` file.
+5. Create a dedicated SSH key, exchange only public keys, independently verify
+   each host key, and install each public key only with the documented
+   forced-command gateway restrictions. A plain login-capable key is a failed
+   installation.
 6. Customize `config/hawkgrokspan-grok-vm.example.json`; do not enable any
    disabled feature or broaden the artifact root.
 7. Activate with `HAWKSPAN_STATE_DIR=~/.hawkgrokspan`,

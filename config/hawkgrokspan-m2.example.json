@@ -25,6 +25,7 @@
     "fallback_enabled": false,
     "ssh_identity": "/Users/OWNER/.ssh/hawkgrokspan_ed25519",
     "known_hosts": "/Users/OWNER/.hawkgrokspan/known_hosts",
+    "remote_state_dir": "/home/GROK_VM_USER/.hawkgrokspan",
     "remote_inbox": "/home/GROK_VM_USER/.hawkgrokspan/inbox",
     "remote_artifacts": "/home/GROK_VM_USER/.hawkgrokspan/artifacts",
     "remote_audit": "/home/GROK_VM_USER/.hawkgrokspan/audit"

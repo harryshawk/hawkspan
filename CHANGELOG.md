@@ -10,6 +10,9 @@
   HawkGrokSpan profile, bounded outgoing artifact roots against normal and
   symlink path escape, and accepted either `shasum` or Linux `sha256sum` for
   remote verification.
+- Restricted each HawkGrokSpan SSH key to a receive-only forced-command gateway
+  that denies interactive shells, arbitrary commands, forwarding, sender-mode
+  rsync, unrecognized options, and path escape.
 - Added real two-server envelope, acknowledgement, artifact, malformed-startup,
   tool-surface, strict-transport, and file-boundary tests plus a Grok VM handoff
   guide and configuration templates.

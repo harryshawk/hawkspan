@@ -72,10 +72,17 @@ function writeConfig(node, peer) {
       fallback_enabled: false,
       ssh_identity: node.identity,
       known_hosts: node.knownHosts,
+      remote_state_dir: peer.state,
       remote_inbox: path.join(peer.state, "inbox"),
       remote_artifacts: path.join(peer.state, "artifacts"),
       remote_audit: path.join(peer.state, "audit"),
     },
+    features: {
+      allowed_peer_tools: { inbound: [], outbound: [] },
+      allow_peer_commands: false,
+      enable_broad_run_command: false,
+    },
+    training: { allow_start: false, allow_stop: false, allow_package: false },
     link: {
       operation_retry_delays_ms: [100],
       operation_attempt_timeout_ms: 2000,

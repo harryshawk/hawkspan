@@ -215,6 +215,24 @@ function assertPeerConfiguration(configuration) {
     if (configuration.local_control?.enabled !== false) {
       throw new Error("message-files surface requires local_control.enabled=false");
     }
+    if (configuration.queue_supervisor?.enabled !== false) {
+      throw new Error("message-files surface requires queue_supervisor.enabled=false");
+    }
+    if (configuration.training?.allow_start !== false ||
+        configuration.training?.allow_stop !== false ||
+        configuration.training?.allow_package !== false) {
+      throw new Error("message-files surface requires every training operation disabled");
+    }
+    const configuredPeerTools = configuration.features?.allowed_peer_tools;
+    if (!configuredPeerTools || !Array.isArray(configuredPeerTools.inbound) ||
+        configuredPeerTools.inbound.length !== 0 || !Array.isArray(configuredPeerTools.outbound) ||
+        configuredPeerTools.outbound.length !== 0) {
+      throw new Error("message-files surface requires empty inbound and outbound peer-tool lists");
+    }
+    if (configuration.features?.allow_peer_commands !== false ||
+        configuration.features?.enable_broad_run_command !== false) {
+      throw new Error("message-files surface requires peer and broad commands disabled");
+    }
     if (!artifactRoots) {
       throw new Error("message-files surface requires transfer.allowed_artifact_roots");
     }
@@ -258,6 +276,20 @@ function assertPeerConfiguration(configuration) {
       if (typeof peer[key] !== "string" || !path.posix.isAbsolute(peer[key]) ||
           !/^\/[A-Za-z0-9_./-]+$/.test(peer[key]) || path.posix.normalize(peer[key]) !== peer[key]) {
         throw new Error(`peer.${key} must be an absolute POSIX path for message-files`);
+      }
+    }
+    if (typeof peer.remote_state_dir !== "string" || !path.posix.isAbsolute(peer.remote_state_dir) ||
+        !/^\/[A-Za-z0-9_./-]+$/.test(peer.remote_state_dir) ||
+        path.posix.normalize(peer.remote_state_dir) !== peer.remote_state_dir) {
+      throw new Error("peer.remote_state_dir must be an absolute POSIX path for message-files");
+    }
+    for (const [key, child] of [
+      ["remote_inbox", "inbox"],
+      ["remote_artifacts", "artifacts"],
+      ["remote_audit", "audit"],
+    ]) {
+      if (peer[key] !== path.posix.join(peer.remote_state_dir, child)) {
+        throw new Error(`peer.${key} must be the ${child} directory directly under peer.remote_state_dir`);
       }
     }
     for (const root of artifactRoots) {
@@ -2199,7 +2231,33 @@ function linkStatus() {
     ...jobCountSummary(),
     artifacts: db.prepare("SELECT count(*) AS count FROM artifacts").get().count,
   };
-  const readiness = runReadinessMonitor(config, { once: true });
+  const readiness = config.surface_profile === "message-files"
+    ? {
+        routes: peerCandidates().map((host, index) => {
+          const result = spawnSync("ssh", sshArgs(host, "true"), {
+            encoding: "utf8",
+            timeout: config.link.operation_attempt_timeout_ms,
+          });
+          const ok = result.status === 0;
+          return {
+            role: index === 0 ? "primary" : "fallback",
+            label: index === 0 ? (config.peer.primary_label || "Primary") : (config.peer.fallback_label || "Fallback"),
+            host,
+            local_host: null,
+            network_reachable: ok,
+            transport_ready: ok,
+            ready: ok,
+            failed_layer: ok ? null : "restricted_ssh_login",
+            layers: [{
+              name: "restricted_ssh_login",
+              ok,
+              state: ok ? "ok" : "failed",
+              evidence: ok ? "forced-command transport authenticated" : (result.stderr?.trim() || "restricted SSH transport failed"),
+            }],
+          };
+        }),
+      }
+    : runReadinessMonitor(config, { once: true });
   const routes = readiness.routes.map((route) => {
     const failed = route.layers.find((entry) => !entry.ok);
     return {

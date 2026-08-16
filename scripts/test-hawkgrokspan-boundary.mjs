@@ -42,10 +42,17 @@ const config = {
     fallback_enabled: false,
     ssh_identity: identity,
     known_hosts: knownHosts,
+    remote_state_dir: "/home/grok/.hawkgrokspan",
     remote_inbox: "/home/grok/.hawkgrokspan/inbox",
     remote_artifacts: "/home/grok/.hawkgrokspan/artifacts",
     remote_audit: "/home/grok/.hawkgrokspan/audit",
   },
+  features: {
+    allowed_peer_tools: { inbound: [], outbound: [] },
+    allow_peer_commands: false,
+    enable_broad_run_command: false,
+  },
+  training: { allow_start: false, allow_stop: false, allow_package: false },
   link: {
     operation_retry_delays_ms: [100],
     operation_attempt_timeout_ms: 1000,
@@ -128,6 +135,11 @@ assert.deepEqual(
   ],
 );
 
+const status = await request("tools/call", { name: "link_status", arguments: {} });
+assert.equal(status.result.isError, false, status.result.content?.[0]?.text);
+assert.equal(status.result.structuredContent.routes[0].ready, true);
+assert.equal(status.result.structuredContent.routes[0].failed_layer, null);
+
 const deniedCommand = await request("tools/call", {
   name: "run_command",
   arguments: { command: "touch should-never-run" },
@@ -204,8 +216,12 @@ await new Promise((resolve) => server.once("exit", resolve));
 
 for (const mutation of [
   (value) => { value.application_plugins.enabled = true; },
+  (value) => { value.queue_supervisor.enabled = true; },
+  (value) => { value.features.allowed_peer_tools.outbound = ["run_command"]; },
+  (value) => { value.training.allow_start = true; },
   (value) => { delete value.peer.known_hosts; },
   (value) => { value.peer.allow_remote_wake = true; },
+  (value) => { value.peer.remote_artifacts = "/home/grok/elsewhere"; },
   (value) => { value.transfer.allowed_artifact_roots = [outside, "relative"]; },
 ]) {
   const invalidRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hawkgrokspan-invalid-"));

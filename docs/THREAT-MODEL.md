@@ -33,6 +33,11 @@ removes command, peer-tool, job, queue, application-plugin, trainer, and wake
 operations from discovery and dispatch; requires bounded artifact roots; and
 requires an exclusive pinned-host SSH configuration. Prompt instructions and
 an MCP client's displayed tool list are not treated as the enforcement layer.
+Each HawkGrokSpan SSH public key must also be installed as a forced-command key
+using `hawkgrokspan-ssh-gateway.mjs`; a normal login-capable `authorized_keys`
+entry would bypass the MCP boundary and is prohibited. The gateway independently
+rejects interactive shells, command execution, sending files from the receiver,
+path escape, forwarding, PTY allocation, and unrecognized rsync options.
 
 ## Residual risks
 
