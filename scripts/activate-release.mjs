@@ -41,6 +41,12 @@ for (const [name, value] of Object.entries(HAWKSPAN_OPERATIONAL_ENV_DEFAULTS)) {
   if (!Object.hasOwn(envValues, name)) envValues[name] = value;
 }
 const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
+// An explicit JSON switch is owner configuration, not a weaker suggestion than
+// the generated operational default. Preserve it when materializing the env
+// authority so restricted profiles cannot be silently broadened on activation.
+if (typeof config.queue_supervisor?.enabled === "boolean") {
+  envValues.HAWKSPAN_QUEUE_SUPERVISOR_ENABLED = String(config.queue_supervisor.enabled);
+}
 for (const name of ["remote_plugin_root", "remote_call_tool"]) {
   if (Object.hasOwn(config.peer || {}, name)) {
     throw new Error(`static peer release path is unsupported: config.json peer.${name}`);

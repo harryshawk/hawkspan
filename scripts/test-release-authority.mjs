@@ -262,8 +262,10 @@ const isolatedLaunchAgentsRoot = path.join(isolatedStateRoot, "rendered-launchd"
 const isolatedStableRoot = path.join(homeRoot, ".local", "share", "hawkgrokspan", "current");
 fs.mkdirSync(isolatedStateRoot, { recursive: true });
 fs.writeFileSync(path.join(isolatedStateRoot, "config.json"), `${JSON.stringify({
+  surface_profile: "message-files",
   node_role: "controller",
   peer: { user: "peer" },
+  queue_supervisor: { enabled: false },
   training: {},
 }, null, 2)}\n`, { mode: 0o600 });
 const isolatedActivation = spawnSync(process.execPath, [
@@ -284,6 +286,10 @@ assert.equal(isolatedActivation.status, 0, isolatedActivation.stderr);
 const isolatedAuthority = readReleaseAuthority(isolatedStateRoot);
 assert.equal(isolatedAuthority.stable_release_root, isolatedStableRoot);
 assert.equal(fs.realpathSync(isolatedStableRoot), resolvedReleaseRoot);
+assert.equal(
+  readHawkspanEnv(path.join(isolatedStateRoot, "hawkspan.env")).HAWKSPAN_QUEUE_SUPERVISOR_ENABLED,
+  "false",
+);
 assert.equal(fs.readlinkSync(authority.stable_release_root), stableTargetBeforePublishFailure);
 for (const label of launchdLabels) {
   assert.equal(fs.existsSync(path.join(isolatedLaunchAgentsRoot, `${label}.plist`)), true);

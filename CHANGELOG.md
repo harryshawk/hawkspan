@@ -13,6 +13,9 @@
 - Restricted each HawkGrokSpan SSH key to a receive-only forced-command gateway
   that denies interactive shells, arbitrary commands, forwarding, sender-mode
   rsync, unrecognized options, and path escape.
+- Made release activation preserve an explicit queue-supervisor switch when it
+  materializes `hawkspan.env`, preventing a generated default from overriding
+  the restricted profile's reviewed `false` value.
 - Added real two-server envelope, acknowledgement, artifact, malformed-startup,
   tool-surface, strict-transport, and file-boundary tests plus a Grok VM handoff
   guide and configuration templates.
