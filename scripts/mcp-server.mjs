@@ -12,6 +12,7 @@ import { createApplicationPluginFramework } from "./application-plugins.mjs";
 import { applyHawkspanEnv, readHawkspanEnv } from "./hawkspan-env.mjs";
 import { runReadinessMonitor } from "./hawkspan-readiness-monitor.mjs";
 import { startLocalControlSurface } from "./local-control-surface.mjs";
+import { ingestMessageInbox, MESSAGE_TARGET_ID } from "./message-inbox.mjs";
 import { createQueueRegistry } from "./queue-registry.mjs";
 import { operationAttemptFits, routeAttemptPlan } from "./route-attempt-plan.mjs";
 import {
@@ -155,6 +156,111 @@ function assertDirectionalBooleans(value, label) {
   }
 }
 
+function assertLocalMessageReceiver(configuration) {
+  const receiver = configuration.message_receiver;
+  if (receiver === undefined || receiver === null) return;
+  if (typeof receiver !== "object" || Array.isArray(receiver) ||
+      Object.keys(receiver).some((key) => ![
+        "enabled", "default_target", "targets", "reconcile_interval_seconds",
+        "start_on_mcp_server", "retry_backoff_seconds",
+      ].includes(key))) {
+    throw new Error("message_receiver contains an unsupported field");
+  }
+  if (typeof receiver.enabled !== "boolean") {
+    throw new Error("message_receiver.enabled must be a boolean");
+  }
+  if (!receiver.enabled) return;
+  if (typeof receiver.start_on_mcp_server !== "boolean") {
+    throw new Error("message_receiver.start_on_mcp_server must be a boolean");
+  }
+  if (!Number.isSafeInteger(Number(receiver.reconcile_interval_seconds)) ||
+      Number(receiver.reconcile_interval_seconds) < 5 ||
+      Number(receiver.reconcile_interval_seconds) > 600) {
+    throw new Error("message_receiver.reconcile_interval_seconds must be 5 to 600 seconds");
+  }
+  if (receiver.retry_backoff_seconds !== undefined &&
+      (!Array.isArray(receiver.retry_backoff_seconds) ||
+       receiver.retry_backoff_seconds.length < 1 || receiver.retry_backoff_seconds.length > 8 ||
+       receiver.retry_backoff_seconds.some((value, index, values) =>
+         !Number.isSafeInteger(Number(value)) || Number(value) < 5 || Number(value) > 3600 ||
+         (index > 0 && Number(value) < Number(values[index - 1]))))) {
+    throw new Error("message_receiver.retry_backoff_seconds must be 1 to 8 nondecreasing integers from 5 to 3600");
+  }
+  if (!MESSAGE_TARGET_ID.test(receiver.default_target || "") ||
+      !receiver.targets || typeof receiver.targets !== "object" || Array.isArray(receiver.targets) ||
+      !Object.hasOwn(receiver.targets, receiver.default_target)) {
+    throw new Error("message_receiver.default_target must name a configured target");
+  }
+  const sessionKeys = new Set();
+  const workdirs = new Set();
+  for (const [targetId, target] of Object.entries(receiver.targets)) {
+    if (!MESSAGE_TARGET_ID.test(targetId) || !target || typeof target !== "object" ||
+        Array.isArray(target)) {
+      throw new Error("message_receiver target IDs and definitions are invalid");
+    }
+    const allowedKeys = new Set([
+      "adapter", "command", "workdir", "session_id", "sandbox",
+      "maximum_runtime_seconds", "maximum_turns",
+    ]);
+    if (Object.keys(target).some((key) => !allowedKeys.has(key)) ||
+        !["codex", "grok"].includes(target.adapter)) {
+      throw new Error(`message_receiver target ${targetId} has an invalid adapter or field`);
+    }
+    if (typeof target.command !== "string" || !path.isAbsolute(target.command) ||
+        !/^\/[A-Za-z0-9_./ -]+$/.test(target.command) ||
+        path.normalize(target.command) !== target.command) {
+      throw new Error(`message_receiver target ${targetId} command must be a normalized absolute path`);
+    }
+    const commandStat = fs.lstatSync(target.command);
+    if (!commandStat.isFile() || commandStat.isSymbolicLink() ||
+        (commandStat.mode & 0o111) === 0 || (commandStat.mode & 0o022) !== 0 ||
+        (typeof process.getuid === "function" && commandStat.uid !== 0 &&
+         commandStat.uid !== process.getuid())) {
+      throw new Error(`message_receiver target ${targetId} command is not a trusted executable`);
+    }
+    if (typeof target.workdir !== "string" || !path.isAbsolute(target.workdir) ||
+        path.normalize(target.workdir) !== target.workdir ||
+        path.normalize(target.workdir).split(path.sep).filter(Boolean).length < 3) {
+      throw new Error(`message_receiver target ${targetId} workdir must be a dedicated absolute directory`);
+    }
+    const workdirStat = fs.lstatSync(target.workdir);
+    if (!workdirStat.isDirectory() || workdirStat.isSymbolicLink() ||
+        (workdirStat.mode & 0o022) !== 0 ||
+        (typeof process.getuid === "function" && workdirStat.uid !== process.getuid())) {
+      throw new Error(`message_receiver target ${targetId} workdir must be an owner-only real directory`);
+    }
+    if (!CODEX_THREAD_ID.test(target.session_id || "") ||
+        /^0{8}-0{4}-0{4}-0{4}-0{12}$/i.test(target.session_id)) {
+      throw new Error(`message_receiver target ${targetId} session_id must be an exact persisted UUID`);
+    }
+    const sessionKey = `${target.adapter}:${target.session_id.toLowerCase()}`;
+    if (sessionKeys.has(sessionKey)) {
+      throw new Error(`message_receiver target ${targetId} duplicates an existing adapter session`);
+    }
+    if (workdirs.has(target.workdir)) {
+      throw new Error(`message_receiver target ${targetId} duplicates an existing workdir`);
+    }
+    sessionKeys.add(sessionKey);
+    workdirs.add(target.workdir);
+    if ((target.adapter === "codex" && target.sandbox !== "workspace-write") ||
+        (target.adapter === "grok" && target.sandbox !== "workspace")) {
+      throw new Error(`message_receiver target ${targetId} sandbox does not match its adapter`);
+    }
+    const runtime = Number(target.maximum_runtime_seconds);
+    if (!Number.isSafeInteger(runtime) || runtime < 30 || runtime > 1800) {
+      throw new Error(`message_receiver target ${targetId} maximum runtime must be 30 to 1800 seconds`);
+    }
+    if (target.adapter === "grok") {
+      const turns = Number(target.maximum_turns);
+      if (!Number.isSafeInteger(turns) || turns < 2 || turns > 30) {
+        throw new Error(`message_receiver target ${targetId} maximum turns must be 2 to 30`);
+      }
+    } else if (target.maximum_turns !== undefined) {
+      throw new Error(`message_receiver target ${targetId} maximum_turns is only valid for Grok`);
+    }
+  }
+}
+
 function assertPeerConfiguration(configuration) {
   const surfaceProfile = configuration.surface_profile || "full";
   if (!SURFACE_PROFILES.has(surfaceProfile)) {
@@ -239,6 +345,10 @@ function assertPeerConfiguration(configuration) {
     }
   }
   if (surfaceProfile === "message-files") {
+    assertLocalMessageReceiver(configuration);
+    if (configuration.message_receiver?.enabled !== true) {
+      throw new Error("message-files surface requires the local message receiver");
+    }
     if (configuration.application_plugins?.enabled !== false) {
       throw new Error("message-files surface requires application_plugins.enabled=false");
     }
@@ -377,6 +487,15 @@ function readConfig() {
 
 const config = readConfig();
 assertPeerConfiguration(config);
+const isMessageFilesSurface = config.surface_profile === "message-files";
+const boundReceiverTarget = process.env.HAWKGROKSPAN_TARGET_BOT_ID || null;
+if (boundReceiverTarget &&
+    (config.surface_profile !== "message-files" ||
+     config.message_receiver?.enabled !== true ||
+     !MESSAGE_TARGET_ID.test(boundReceiverTarget) ||
+     !Object.hasOwn(config.message_receiver.targets || {}, boundReceiverTarget))) {
+  throw new Error("HAWKGROKSPAN_TARGET_BOT_ID must name a configured local receiver target");
+}
 if (fs.existsSync(installedRevisionPath(STATE_ROOT))) {
   const authority = readReleaseAuthority(STATE_ROOT);
   assertExecutingRelease(authority, path.dirname(SCRIPT_ROOT));
@@ -467,6 +586,26 @@ execWithRetry(`
     details_json TEXT NOT NULL
   );
 `);
+
+if (config.surface_profile === "message-files" &&
+    config.message_receiver?.enabled === true &&
+    config.message_receiver.start_on_mcp_server === true) {
+  const receiverBootstrap = spawnSync(process.execPath, [
+    path.join(SCRIPT_ROOT, "hawkgrokspan-message-receiver.mjs"),
+    "--state-root", STATE_ROOT,
+    "--ensure-supervisor",
+  ], {
+    encoding: "utf8",
+    timeout: 5000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (receiverBootstrap.error || receiverBootstrap.status !== 0) {
+    throw new Error(
+      `local message receiver supervisor failed: ${receiverBootstrap.error?.message ||
+        receiverBootstrap.stderr?.trim() || "unknown error"}`,
+    );
+  }
+}
 
 const queueRegistry = createQueueRegistry(db, {
   retryDelaysMs: config.queue_supervisor.worker_restart_delays_ms,
@@ -587,61 +726,7 @@ function writeEnvelope(envelope) {
 }
 
 function ingestInbox() {
-  let imported = 0;
-  for (const name of fs.readdirSync(INBOX)) {
-    if (!name.endsWith(".json")) continue;
-    const filePath = path.join(INBOX, name);
-    let envelope;
-    try {
-      const stat = fs.lstatSync(filePath);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) {
-        throw new Error("message envelope must be a regular file no larger than 1 MiB");
-      }
-      envelope = JSON.parse(fs.readFileSync(filePath, "utf8"));
-      if (typeof envelope.id !== "string" ||
-          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(envelope.id) ||
-          typeof envelope.sender !== "string" || envelope.sender.length > 256 ||
-          typeof envelope.recipient !== "string" || envelope.recipient.length > 256 ||
-          typeof envelope.subject !== "string" || envelope.subject.length > 4096 ||
-          typeof envelope.body !== "string" || Buffer.byteLength(envelope.body) > 512 * 1024) {
-        throw new Error("missing required envelope fields");
-      }
-      const exists = db.prepare("SELECT 1 FROM messages WHERE id=?").get(envelope.id);
-      if (exists) continue;
-      db.prepare(`
-        INSERT INTO messages
-          (id,created_at,sender,recipient,kind,subject,body,correlation_id,
-           direction,state,envelope_path,delivered_via,metadata_json)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-      `).run(
-        envelope.id,
-        envelope.created_at || now(),
-        envelope.sender,
-        envelope.recipient,
-        envelope.kind || "message",
-        envelope.subject || "",
-        envelope.body || "",
-        envelope.correlation_id || null,
-        "inbound",
-        envelope.kind === "acknowledgement" ? "acknowledged" : "received",
-        filePath,
-        envelope.delivered_via || null,
-        json(envelope.metadata),
-      );
-      if (envelope.kind === "acknowledgement" && envelope.correlation_id) {
-        db.prepare(`
-          UPDATE messages
-          SET state='acknowledged', acknowledged_at=?
-          WHERE id=? AND direction='outbound'
-        `).run(envelope.created_at || now(), envelope.correlation_id);
-      }
-      audit("ingest", "message", envelope.id, "received", { file_path: filePath });
-      imported += 1;
-    } catch (error) {
-      audit("ingest", "message", name, "rejected", { error: String(error) });
-    }
-  }
-  return imported;
+  return ingestMessageInbox({ inbox: INBOX, db, audit, now, json });
 }
 
 const routeRetryAfter = new Map();
@@ -851,7 +936,8 @@ function retryMessage(args) {
     SELECT * FROM messages WHERE id=? AND direction='outbound'
   `).get(args.message_id);
   if (!row) throw new Error(`outbound message not found: ${args.message_id}`);
-  if (row.state === "delivered" || row.state === "acknowledged") {
+  if (row.state === "acknowledged" ||
+      (row.state === "delivered" && config.surface_profile !== "message-files")) {
     return {
       message_id: row.id,
       envelope_path: row.envelope_path,
@@ -862,6 +948,12 @@ function retryMessage(args) {
   if (!fs.existsSync(row.envelope_path)) {
     throw new Error(`immutable envelope is missing: ${row.envelope_path}`);
   }
+  let persistedEnvelope;
+  try {
+    persistedEnvelope = JSON.parse(fs.readFileSync(row.envelope_path, "utf8"));
+  } catch (error) {
+    throw new Error(`immutable envelope is unreadable: ${error.message}`);
+  }
   if (!config.peer?.remote_inbox) throw new Error("peer.remote_inbox is not configured");
   const delivery = rsyncFile(row.envelope_path, config.peer.remote_inbox);
   if (delivery.ok) {
@@ -869,12 +961,22 @@ function retryMessage(args) {
       .run(delivery.host, row.id);
   }
   let wake = null;
-  if (delivery.ok && row.kind !== "acknowledgement" && args.wake !== false) {
-    wake = wakePeerThread({
-      message_id: row.id,
-      subject: row.subject,
-      body: row.body,
-    });
+  const shouldNotify = config.surface_profile === "message-files"
+    ? persistedEnvelope.notify_receiver !== false
+    : args.wake !== false;
+  if (delivery.ok && row.kind !== "acknowledgement" && shouldNotify) {
+    wake = config.surface_profile === "message-files"
+      ? {
+          ok: true,
+          mode: "delivery-triggered-local-receiver",
+          target_bot_id: persistedEnvelope.target_bot_id || null,
+          completion_boundary: "durable acknowledgement",
+        }
+      : wakePeerThread({
+          message_id: row.id,
+          subject: row.subject,
+          body: row.body,
+        });
   }
   audit("retry", "message", row.id, delivery.ok ? "delivered" : "queued", {
     delivery,
@@ -895,6 +997,23 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
   if (typeof args.body !== "string" || Buffer.byteLength(args.body) > 512 * 1024) {
     throw new Error("message body must be a string no larger than 512 KiB");
   }
+  if (args.target_bot_id !== undefined && !isMessageFilesSurface) {
+    throw new Error("target_bot_id is available only on the HawkGrokSpan message-files surface");
+  }
+  if (args.target_bot_id !== undefined && !MESSAGE_TARGET_ID.test(args.target_bot_id)) {
+    throw new Error("target_bot_id is invalid");
+  }
+  if (isMessageFilesSurface && args.metadata &&
+      (Object.hasOwn(args.metadata, "target_bot_id") ||
+       Object.hasOwn(args.metadata, "notify_receiver"))) {
+    throw new Error("target_bot_id and notify_receiver are reserved envelope fields");
+  }
+  const envelopeMetadata = { ...(args.metadata || {}) };
+  const notifyReceiver = args.wake !== false;
+  if (isMessageFilesSurface) {
+    if (args.target_bot_id) envelopeMetadata.target_bot_id = args.target_bot_id;
+    envelopeMetadata.notify_receiver = notifyReceiver;
+  }
   const messageId = id("msg");
   const envelope = {
     schema_version: 1,
@@ -906,8 +1025,12 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
     subject: args.subject,
     body: args.body,
     correlation_id: args.correlation_id || null,
-    metadata: args.metadata || {},
+    metadata: envelopeMetadata,
   };
+  if (isMessageFilesSurface) {
+    envelope.target_bot_id = args.target_bot_id || null;
+    envelope.notify_receiver = notifyReceiver;
+  }
   const envelopePath = writeEnvelope(envelope);
   onEnvelopeWritten?.(envelopePath);
   try {
@@ -943,12 +1066,19 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
     }
   }
   let wake = null;
-  if (delivery?.ok && envelope.kind !== "acknowledgement" && args.wake !== false) {
-    wake = wakePeerThread({
-      message_id: messageId,
-      subject: envelope.subject,
-      body: envelope.body,
-    });
+  if (delivery?.ok && envelope.kind !== "acknowledgement" && notifyReceiver) {
+    wake = isMessageFilesSurface
+      ? {
+          ok: true,
+          mode: "delivery-triggered-local-receiver",
+          target_bot_id: envelope.target_bot_id,
+          completion_boundary: "durable acknowledgement",
+        }
+      : wakePeerThread({
+          message_id: messageId,
+          subject: envelope.subject,
+          body: envelope.body,
+        });
   }
   audit("send", "message", messageId, delivery?.ok ? "delivered" : "queued", {
     delivery,
@@ -1175,18 +1305,30 @@ function wakePeerThread(args) {
 function receiveMessages(args) {
   const imported = ingestInbox();
   const limit = Math.min(Math.max(Number(args.limit || 50), 1), 500);
+  if (boundReceiverTarget && args.target_bot_id && args.target_bot_id !== boundReceiverTarget) {
+    throw new Error("receiver-bound MCP process cannot read another target_bot_id");
+  }
+  const targetBotId = boundReceiverTarget || args.target_bot_id || null;
   const states = args.include_acknowledged
     ? ["received", "acknowledged"]
     : ["received"];
   const placeholders = states.map(() => "?").join(",");
+  const targetClause = targetBotId
+    ? "AND COALESCE(json_extract(metadata_json, '$.target_bot_id'), ?) = ?"
+    : "";
+  const values = [...states];
+  if (targetBotId) {
+    values.push(config.message_receiver?.default_target || null, targetBotId);
+  }
   const rows = db.prepare(`
     SELECT id,created_at,sender,recipient,kind,subject,body,correlation_id,state,
            metadata_json
     FROM messages
     WHERE direction='inbound' AND state IN (${placeholders})
+      ${targetClause}
     ORDER BY created_at ASC
     LIMIT ?
-  `).all(...states, limit);
+  `).all(...values, limit);
   return {
     imported,
     messages: rows.map((row) => ({
@@ -1200,6 +1342,10 @@ function receiveMessages(args) {
 function listMessages(args) {
   ingestInbox();
   const limit = Math.min(Math.max(Number(args.limit || 100), 1), 1000);
+  if (boundReceiverTarget && args.target_bot_id && args.target_bot_id !== boundReceiverTarget) {
+    throw new Error("receiver-bound MCP process cannot list another target_bot_id");
+  }
+  const targetBotId = boundReceiverTarget || args.target_bot_id || null;
   const clauses = [];
   const values = [];
   if (args.direction) {
@@ -1209,6 +1355,10 @@ function listMessages(args) {
   if (args.state) {
     clauses.push("state=?");
     values.push(args.state);
+  }
+  if (targetBotId) {
+    clauses.push("COALESCE(json_extract(metadata_json, '$.target_bot_id'), ?)=?");
+    values.push(config.message_receiver?.default_target || null, targetBotId);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = db.prepare(`
@@ -1229,6 +1379,13 @@ function acknowledgeMessage(args) {
     SELECT * FROM messages WHERE id=? AND direction='inbound'
   `).get(args.message_id);
   if (!row) throw new Error(`inbound message not found: ${args.message_id}`);
+  if (boundReceiverTarget) {
+    const metadata = JSON.parse(row.metadata_json || "{}");
+    const rowTarget = metadata.target_bot_id || config.message_receiver.default_target;
+    if (rowTarget !== boundReceiverTarget) {
+      throw new Error("receiver-bound MCP process cannot acknowledge another target_bot_id");
+    }
+  }
   const acknowledgedAt = now();
   db.prepare(`
     UPDATE messages SET state='acknowledged', acknowledged_at=? WHERE id=?
@@ -1255,6 +1412,7 @@ function acknowledgeMessage(args) {
     correlation_id: row.id,
     metadata: { acknowledged_message_id: row.id, acknowledged_at: acknowledgedAt },
     deliver: args.deliver,
+    wake: false,
   });
   audit("acknowledge", "message", row.id, "acknowledged", {
     acknowledgement_id: acknowledgement.message_id,
@@ -3881,6 +4039,13 @@ const coreTools = [
         subject: { type: "string" },
         body: { type: "string" },
         correlation_id: { type: "string" },
+        ...(isMessageFilesSurface ? {
+          target_bot_id: {
+            type: "string",
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            description: "HawkGrokSpan local bot/session route; omitted messages use the peer's configured default target.",
+          },
+        } : {}),
         metadata: { type: "object" },
         deliver: { type: "boolean", default: true },
         wake: { type: "boolean", default: true },
@@ -3943,6 +4108,12 @@ const coreTools = [
       properties: {
         limit: { type: "integer", minimum: 1, maximum: 500 },
         include_acknowledged: { type: "boolean", default: false },
+        ...(isMessageFilesSurface ? {
+          target_bot_id: {
+            type: "string",
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          },
+        } : {}),
       },
       additionalProperties: false,
     },
@@ -3958,6 +4129,12 @@ const coreTools = [
         direction: { type: "string", enum: ["inbound", "outbound"] },
         state: { type: "string" },
         limit: { type: "integer", minimum: 1, maximum: 1000 },
+        ...(isMessageFilesSurface ? {
+          target_bot_id: {
+            type: "string",
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          },
+        } : {}),
       },
       additionalProperties: false,
     },

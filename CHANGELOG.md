@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Added delivery-triggered, local-only HawkGrokSpan message notification with
+  explicit `target_bot_id` routing to multiple exact Codex or Grok session
+  UUIDs. Each target has an independent fenced, time-bounded receiver lease;
+  durable acknowledgement, not process launch, remains completion.
+- Added a release-fenced local reconciliation supervisor that starts on inbox
+  delivery and HGS MCP startup, imports acknowledgement envelopes without bot
+  launch, and retries unacknowledged work after adapter failure, goal conflict,
+  or timeout without requiring another owner-relayed message.
+- Added a separate managed macOS HGS receiver service, exact revision/script
+  leases, PID-reuse-safe recovery, bounded retry backoff, terminal sender-visible
+  routing failures, and a five-second containment deadline after TERM/KILL.
+- Made the durable imported message row authoritative, rejecting replacement
+  files that try to change a message's bot route, notification intent, or body.
+- Documented the official Grok CLI path, headless device authentication, and the
+  requirement for a new persisted CLI session rather than a Grok Bot agent UUID.
+- Persisted the message notification choice in each immutable envelope so
+  retries cannot silently re-enable notification. Acknowledgements never
+  launch a bot, old untargeted messages use the configured default target, and
+  remote wake/program control remains disabled.
 - Canonicalized receive-only rsync directory targets so legitimate message and
   artifact-manifest deliveries with a trailing slash remain inside the boundary.
 - Allowed the receive-only SSH gateway to accept rsync's safe `--append`

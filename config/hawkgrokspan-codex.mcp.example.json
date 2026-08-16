@@ -4,7 +4,7 @@
       "command": "/usr/bin/env",
       "args": [
         "node",
-        "/ABSOLUTE/HAWKSPAN/RELEASE/scripts/mcp-server.mjs"
+        "/Users/OWNER/.local/share/hawkgrokspan/current/scripts/mcp-server.mjs"
       ],
       "env": {
         "HAWKSPAN_STATE_DIR": "/Users/OWNER/.hawkgrokspan",

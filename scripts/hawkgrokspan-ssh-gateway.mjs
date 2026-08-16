@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 function fail(message) {
   process.stderr.write(`HawkGrokSpan SSH gateway denied request: ${message}\n`);
@@ -36,12 +37,39 @@ if (!path.isAbsolute(stateRoot) || !/^\/[A-Za-z0-9_./-]+$/.test(stateRoot)) {
 const inbox = path.join(stateRoot, "inbox");
 const artifacts = path.join(stateRoot, "artifacts");
 const audit = path.join(stateRoot, "audit");
+const receiverScript = path.join(path.dirname(fileURLToPath(import.meta.url)), "hawkgrokspan-message-receiver.mjs");
 for (const [directory, label] of [
   [stateRoot, "state root"],
   [inbox, "inbox"],
   [artifacts, "artifact inbox"],
   [audit, "audit directory"],
 ]) assertOwnedDirectory(directory, label);
+
+function requestLocalMessageReceiver() {
+  const configPath = path.join(stateRoot, "config.json");
+  if (!fs.existsSync(configPath)) fail("local receiver configuration is unavailable");
+  let config;
+  try {
+    config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  } catch (error) {
+    fail(`local receiver configuration is unreadable: ${error.message}`);
+  }
+  if (config.surface_profile !== "message-files" || config.message_receiver?.enabled !== true) {
+    fail("local message receiver is not enabled");
+  }
+  const result = spawnSync(process.execPath, [
+    receiverScript,
+    "--state-root", stateRoot,
+    "--ensure-supervisor",
+  ], {
+    encoding: "utf8",
+    timeout: 15000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) {
+    fail(result.error?.message || result.stderr?.trim() || "local message receiver rejected delivery");
+  }
+}
 
 const original = process.env.SSH_ORIGINAL_COMMAND || "";
 if (original === "true") process.exit(0);
@@ -82,7 +110,7 @@ if (original.startsWith("rsync --server ")) {
   const dot = tokens.indexOf(".");
   if (dot < 3 || dot !== tokens.length - 2) fail("rsync server command shape is invalid");
   for (const option of tokens.slice(2, dot)) {
-    const allowed = /^-[A-Za-z0-9.,]+$/.test(option) ||
+    const allowed = option === "-logDtpre.iLsfxCIvu" ||
       /^--(?:dirs|partial|append|append-verify|log-format=[A-Za-z0-9%._-]+)$/.test(option);
     if (!allowed) fail(`rsync option is not allowed: ${option}`);
   }
@@ -93,7 +121,9 @@ if (original.startsWith("rsync --server ")) {
   if (!receivesDirectory && !receivesArtifact) fail("rsync target is outside the receive boundary");
   const result = spawnSync("rsync", tokens.slice(1), { stdio: "inherit" });
   if (result.error) fail(result.error.message);
-  process.exit(result.status ?? 1);
+  if (result.status !== 0) process.exit(result.status ?? 1);
+  if (requested === inbox) requestLocalMessageReceiver();
+  process.exit(0);
 }
 
 fail("command is not part of the message/file transport protocol");

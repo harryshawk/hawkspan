@@ -8,6 +8,31 @@
   "local_control": {
     "enabled": false
   },
+  "message_receiver": {
+    "enabled": true,
+    "start_on_mcp_server": true,
+    "reconcile_interval_seconds": 30,
+    "retry_backoff_seconds": [30, 60, 120, 300, 600],
+    "default_target": "m2-primary",
+    "targets": {
+      "m2-primary": {
+        "adapter": "codex",
+        "command": "/Applications/ChatGPT.app/Contents/Resources/codex",
+        "workdir": "/Users/OWNER/HawkGrokSpan/Receiver/m2-primary",
+        "session_id": "10000000-0000-0000-0000-000000000001",
+        "sandbox": "workspace-write",
+        "maximum_runtime_seconds": 600
+      },
+      "m2-review": {
+        "adapter": "codex",
+        "command": "/Applications/ChatGPT.app/Contents/Resources/codex",
+        "workdir": "/Users/OWNER/HawkGrokSpan/Receiver/m2-review",
+        "session_id": "10000000-0000-0000-0000-000000000002",
+        "sandbox": "workspace-write",
+        "maximum_runtime_seconds": 600
+      }
+    }
+  },
   "queue_supervisor": {
     "enabled": false
   },

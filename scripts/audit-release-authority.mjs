@@ -16,7 +16,7 @@ function shellQuote(value) {
 }
 
 function releasePathsIn(text) {
-  return text.match(/\/[^\s<]+\/\.local\/share\/hawkspan\/releases\/[^/\s<]+/g) || [];
+  return text.match(/\/[^\s<]+\/\.local\/share\/(?:hawkspan|hawkgrokspan)\/releases\/[^/\s<]+/gi) || [];
 }
 
 export function auditLocalRelease({ stateRoot, launchAgentsRoot, checkProcesses = true } = {}) {
@@ -27,7 +27,10 @@ export function auditLocalRelease({ stateRoot, launchAgentsRoot, checkProcesses 
   const configPath = path.resolve(process.env.HAWKSPAN_CONFIG || process.env.HAWKSPAN_CONFIG_PATH || path.join(resolvedStateRoot, "config.json"));
   const envValues = readHawkspanEnv(envPath);
   const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
-  const labels = [
+  const isHawkGrokSpan = config.surface_profile === "message-files";
+  const labels = isHawkGrokSpan ? [
+    "org.hawkgrokspan.message-receiver",
+  ] : [
     "org.hawkspan.local-control",
     "org.hawkspan.link-agent",
     "org.hawkspan.queue-supervisor",
@@ -38,7 +41,42 @@ export function auditLocalRelease({ stateRoot, launchAgentsRoot, checkProcesses 
     const filePath = path.join(resolvedLaunchAgents, `${label}.plist`);
     return { location: filePath, body: fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "" };
   });
-  const mismatches = [...validateLiveReleaseConfiguration(authority, { envValues, config, launchdBodies })];
+  const mismatches = isHawkGrokSpan ? [] : [
+    ...validateLiveReleaseConfiguration(authority, { envValues, config, launchdBodies }),
+  ];
+  let hgsLease = null;
+  if (isHawkGrokSpan) {
+    const compare = (location, observed, expected) => {
+      if (observed !== expected) mismatches.push({ location, observed: observed ?? null, expected });
+    };
+    compare("hawkspan.env:HAWKSPAN_ACTIVE_RELEASE_ROOT", envValues.HAWKSPAN_ACTIVE_RELEASE_ROOT, authority.active_release_root);
+    compare("hawkspan.env:HAWKSPAN_REPOSITORY_DIR", envValues.HAWKSPAN_REPOSITORY_DIR, authority.active_release_root);
+    if (config.message_receiver?.enabled !== true) {
+      mismatches.push({ location: "config.json:message_receiver.enabled", observed: config.message_receiver?.enabled ?? null, expected: true });
+    }
+    for (const { location, body } of launchdBodies) {
+      if (process.platform === "darwin" && !body) {
+        mismatches.push({ location, observed: "missing", expected: "installed managed HGS receiver service" });
+      } else if (body && !body.includes(authority.stable_release_root)) {
+        mismatches.push({ location, observed: "stable release root missing", expected: authority.stable_release_root });
+      }
+    }
+    const leasePath = path.join(resolvedStateRoot, "audit", "message-receiver-supervisor.lock", "lease.json");
+    try { hgsLease = JSON.parse(fs.readFileSync(leasePath, "utf8")); } catch {}
+    if (!hgsLease) {
+      mismatches.push({ location: leasePath, observed: "missing", expected: `live receiver revision ${authority.revision}` });
+    } else {
+      compare(`${leasePath}:revision`, hgsLease.revision, authority.revision);
+      compare(
+        `${leasePath}:script_path`,
+        path.resolve(String(hgsLease.script_path || "")),
+        path.join(authority.active_release_root, "scripts", "hawkgrokspan-message-receiver.mjs"),
+      );
+      if (!Number.isSafeInteger(Number(hgsLease.pid)) || Number(hgsLease.pid) <= 1) {
+        mismatches.push({ location: `${leasePath}:pid`, observed: hgsLease.pid ?? null, expected: "live positive PID" });
+      }
+    }
+  }
   let stableResolvesTo = null;
   try {
     stableResolvesTo = fs.realpathSync(authority.stable_release_root);
@@ -51,7 +89,30 @@ export function auditLocalRelease({ stateRoot, launchAgentsRoot, checkProcesses 
   const processResult = checkProcesses
     ? spawnSync("ps", ["axww", "-o", "pid=,command="], { encoding: "utf8", timeout: 10000 })
     : { stdout: "" };
-  const processLines = (processResult.stdout || "").split("\n").filter((line) => /hawkspan|\.hawkspan/.test(line));
+  const processLines = (processResult.stdout || "").split("\n").filter((line) =>
+    isHawkGrokSpan
+      ? /hawkgrokspan|\.hawkgrokspan/i.test(line)
+      : !/hawkgrokspan|\.hawkgrokspan/i.test(line) && /hawkspan|\.hawkspan/i.test(line));
+  if (isHawkGrokSpan && checkProcesses) {
+    if (processResult.status !== 0) {
+      mismatches.push({ location: "process-table", observed: processResult.stderr?.trim() || "unavailable", expected: "readable" });
+    } else if (hgsLease && !processLines.some((line) => {
+      const expectedMode = hgsLease.managed_service === true ? "--service" : "--supervisor";
+      const modeMatches = line.includes(expectedMode);
+      const nonceMatches = hgsLease.managed_service === true ||
+        line.includes(`--nonce ${String(hgsLease.nonce || "")}`);
+      return Number(line.trim().split(/\s+/, 1)[0]) === Number(hgsLease.pid) &&
+        modeMatches && nonceMatches &&
+        (line.includes(String(hgsLease.script_path || "")) ||
+         line.includes(path.join(authority.stable_release_root, "scripts", "hawkgrokspan-message-receiver.mjs")));
+    })) {
+      mismatches.push({
+        location: `process:${hgsLease.pid}`,
+        observed: "missing or wrong executable, receiver mode, or nonce",
+        expected: `${hgsLease.script_path} ${hgsLease.managed_service === true ? "--service" : `--supervisor --nonce ${hgsLease.nonce}`}`,
+      });
+    }
+  }
   for (const line of processLines) {
     for (const observed of releasePathsIn(line)) {
       if (observed !== authority.active_release_root) {
@@ -104,7 +165,14 @@ function auditPeer(config) {
       continue;
     }
     const remoteNode = config.peer.remote_node || "node";
-    const command = `${shellQuote(remoteNode)} ${shellQuote(path.posix.join(remoteRoot, "scripts", "audit-release-authority.mjs"))} --local-only`;
+    const command = [
+      "env",
+      `HAWKSPAN_STATE_DIR=${shellQuote(remoteStateRoot)}`,
+      `HAWKSPAN_CONFIG=${shellQuote(path.posix.join(remoteStateRoot, "config.json"))}`,
+      shellQuote(remoteNode),
+      shellQuote(path.posix.join(remoteRoot, "scripts", "audit-release-authority.mjs")),
+      "--local-only",
+    ].join(" ");
     const auditResult = spawnSync("ssh", sshArgs(config, host, command), { encoding: "utf8", timeout: 30000 });
     if (auditResult.status !== 0) {
       attempts.push({ host, phase: "audit", revision: authority.revision, error: auditResult.stderr?.trim() || auditResult.stdout?.trim() || "failed" });
@@ -130,7 +198,9 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(file
       const envValues = readHawkspanEnv(path.join(stateRoot, "hawkspan.env"));
       const configPath = path.resolve(process.env.HAWKSPAN_CONFIG || process.env.HAWKSPAN_CONFIG_PATH || path.join(stateRoot, "config.json"));
       const rawConfig = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
-      const peer = auditPeer(applyHawkspanEnv(rawConfig, envValues));
+      const peer = rawConfig.surface_profile === "message-files"
+        ? { valid: true, skipped: true, reason: "HawkGrokSpan peer SSH is receive-only; audit each endpoint locally" }
+        : auditPeer(applyHawkspanEnv(rawConfig, envValues));
       const result = { valid: local.valid && peer.valid, local, peer };
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       process.exitCode = result.valid ? 0 : 1;

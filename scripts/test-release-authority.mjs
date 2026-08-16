@@ -73,6 +73,10 @@ for (const label of launchdLabels) {
     path.join(releaseRoot, "launchd", `${label}.plist.template`),
   );
 }
+fs.copyFileSync(
+  path.join(sourceRoot, "launchd", "org.hawkgrokspan.message-receiver.plist.template"),
+  path.join(releaseRoot, "launchd", "org.hawkgrokspan.message-receiver.plist.template"),
+);
 createReleaseProvenance(releaseRoot, {
   revision: testRevision,
   tree: testTree,
@@ -291,9 +295,32 @@ assert.equal(
   "false",
 );
 assert.equal(fs.readlinkSync(authority.stable_release_root), stableTargetBeforePublishFailure);
+assert.equal(
+  fs.existsSync(path.join(isolatedLaunchAgentsRoot, "org.hawkgrokspan.message-receiver.plist")),
+  true,
+);
 for (const label of launchdLabels) {
-  assert.equal(fs.existsSync(path.join(isolatedLaunchAgentsRoot, `${label}.plist`)), true);
+  assert.equal(fs.existsSync(path.join(isolatedLaunchAgentsRoot, `${label}.plist`)), false);
 }
+assert.deepEqual(JSON.parse(fs.readFileSync(path.join(isolatedStateRoot, "config.json"), "utf8")).training, {});
+
+const isolatedConfig = JSON.parse(fs.readFileSync(path.join(isolatedStateRoot, "config.json"), "utf8"));
+isolatedConfig.message_receiver = { enabled: true };
+fs.writeFileSync(path.join(isolatedStateRoot, "config.json"), `${JSON.stringify(isolatedConfig, null, 2)}\n`);
+const isolatedLeaseRoot = path.join(isolatedStateRoot, "audit", "message-receiver-supervisor.lock");
+fs.mkdirSync(isolatedLeaseRoot, { recursive: true, mode: 0o700 });
+fs.writeFileSync(path.join(isolatedLeaseRoot, "lease.json"), `${JSON.stringify({
+  pid: process.pid,
+  revision: "c".repeat(40),
+  script_path: path.join(resolvedReleaseRoot, "scripts", "hawkgrokspan-message-receiver.mjs"),
+})}\n`);
+const mixedHgsAudit = auditLocalRelease({
+  stateRoot: isolatedStateRoot,
+  launchAgentsRoot: isolatedLaunchAgentsRoot,
+  checkProcesses: false,
+});
+assert.equal(mixedHgsAudit.valid, false);
+assert.ok(mixedHgsAudit.mismatches.some(({ location }) => location.endsWith(":revision")));
 
 fs.rmSync(temporaryRoot, { recursive: true, force: true });
 process.stdout.write("release authority tests passed\n");

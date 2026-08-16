@@ -55,12 +55,31 @@ const grok = makeNode("grok-vm", "m2-hawkgrokspan");
 
 function writeConfig(node, peer) {
   const configPath = path.join(node.state, "config.json");
+  const sessionId = node.name === "m2-hawkgrokspan"
+    ? "30000000-0000-0000-0000-000000000001"
+    : "30000000-0000-0000-0000-000000000002";
   fs.writeFileSync(configPath, `${JSON.stringify({
     schema_version: 1,
     node_id: node.name,
     surface_profile: "message-files",
     application_plugins: { enabled: false },
     local_control: { enabled: false },
+    message_receiver: {
+      enabled: true,
+      start_on_mcp_server: false,
+      reconcile_interval_seconds: 30,
+      default_target: "primary",
+      targets: {
+        primary: {
+          adapter: "codex",
+          command: process.execPath,
+          workdir: node.exchange,
+          session_id: sessionId,
+          sandbox: "workspace-write",
+          maximum_runtime_seconds: 60,
+        },
+      },
+    },
     transfer: { allowed_artifact_roots: [node.exchange] },
     queue_supervisor: { enabled: false },
     peer: {

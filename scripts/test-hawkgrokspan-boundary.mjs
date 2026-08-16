@@ -20,9 +20,14 @@ const symlinkProxyCommand = path.join(bin, "symlink-proxy");
 const transportLog = path.join(root, "transport.log");
 const configPath = path.join(root, "config.json");
 const tailscaleSocket = path.join(root, "tailscaled.sock");
+const receiverWorkdir = path.join(root, "receiver", "primary");
+const writableReceiverWorkdir = path.join(root, "receiver", "writable");
 fs.mkdirSync(allowed);
 fs.mkdirSync(outside);
 fs.mkdirSync(bin);
+fs.mkdirSync(receiverWorkdir, { recursive: true });
+fs.mkdirSync(writableReceiverWorkdir, { recursive: true });
+fs.chmodSync(writableReceiverWorkdir, 0o777);
 fs.writeFileSync(identity, "test-only-private-key\n", { mode: 0o600 });
 fs.writeFileSync(knownHosts, "grok-vm ssh-ed25519 TEST\n", { mode: 0o600 });
 fs.writeFileSync(tailscaleCommand, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
@@ -39,6 +44,22 @@ const config = {
   surface_profile: "message-files",
   application_plugins: { enabled: false },
   local_control: { enabled: false },
+  message_receiver: {
+    enabled: true,
+    start_on_mcp_server: true,
+    reconcile_interval_seconds: 30,
+    default_target: "m2-primary",
+    targets: {
+      "m2-primary": {
+        adapter: "codex",
+        command: tailscaleCommand,
+        workdir: receiverWorkdir,
+        session_id: "00000000-0000-0000-0000-000000000001",
+        sandbox: "workspace-write",
+        maximum_runtime_seconds: 60,
+      },
+    },
+  },
   transfer: { allowed_artifact_roots: [allowed] },
   queue_supervisor: { enabled: false },
   peer: {
@@ -77,6 +98,18 @@ const config = {
   },
 };
 fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+const releaseRoot = path.resolve(scripts, "..");
+fs.writeFileSync(path.join(root, "installed-revision.json"), `${JSON.stringify({
+  schema_version: 2,
+  revision: "a".repeat(40),
+  active_release_root: releaseRoot,
+  stable_release_root: releaseRoot,
+}, null, 2)}\n`, { mode: 0o600 });
+fs.writeFileSync(path.join(root, "hawkspan.env"), [
+  `HAWKSPAN_ACTIVE_RELEASE_ROOT=${releaseRoot}`,
+  `HAWKSPAN_REPOSITORY_DIR=${releaseRoot}`,
+  "",
+].join("\n"), { mode: 0o600 });
 
 fs.writeFileSync(path.join(bin, "ssh"), `#!/bin/sh
 printf 'ssh %s\n' "$*" >> "$HAWKSPAN_TEST_TRANSPORT_LOG"
@@ -183,10 +216,37 @@ for (const candidate of [path.join(outside, "private.txt"), path.join(allowed, "
 
 const sent = await request("tools/call", {
   name: "send_message",
-  arguments: { subject: "boundary", body: "strict transport", wake: false },
+  arguments: {
+    subject: "boundary",
+    body: "strict transport",
+    target_bot_id: "grok-primary",
+    wake: false,
+  },
 });
 assert.equal(sent.result.isError, false, sent.result.content?.[0]?.text);
 assert.equal(sent.result.structuredContent.delivery.ok, true);
+const sentEnvelope = JSON.parse(fs.readFileSync(sent.result.structuredContent.envelope_path, "utf8"));
+assert.equal(sentEnvelope.target_bot_id, "grok-primary");
+assert.equal(sentEnvelope.metadata.target_bot_id, "grok-primary");
+assert.equal(sentEnvelope.notify_receiver, false);
+assert.equal(sentEnvelope.metadata.notify_receiver, false);
+const retriedQuietMessage = await request("tools/call", {
+  name: "retry_message",
+  arguments: { message_id: sent.result.structuredContent.message_id, wake: true },
+});
+assert.equal(retriedQuietMessage.result.isError, false);
+assert.equal(retriedQuietMessage.result.structuredContent.delivery.ok, true);
+assert.equal(retriedQuietMessage.result.structuredContent.wake, null, "immutable no-notify intent must survive retry");
+const deniedReservedMetadata = await request("tools/call", {
+  name: "send_message",
+  arguments: {
+    subject: "reserved metadata",
+    body: "must fail",
+    metadata: { target_bot_id: "grok-primary" },
+  },
+});
+assert.equal(deniedReservedMetadata.result.isError, true);
+assert.match(deniedReservedMetadata.result.content[0].text, /reserved envelope fields/);
 
 const unusualName = path.join(allowed, "name;with shell.txt");
 fs.writeFileSync(unusualName, "safe filename handling\n");
@@ -228,6 +288,69 @@ assert.doesNotMatch(transport, /\.hawkgrokspan\/artifacts\/[^\n]*name;with shell
 server.stdin.end();
 await new Promise((resolve) => server.once("exit", resolve));
 
+const supervisorLeaseRoot = path.join(root, "audit", "message-receiver-supervisor.lock");
+const supervisorLeasePath = path.join(supervisorLeaseRoot, "lease.json");
+assert.equal(fs.existsSync(supervisorLeasePath), true, "MCP startup must start the HGS reconciler");
+const supervisorLease = JSON.parse(fs.readFileSync(supervisorLeasePath, "utf8"));
+process.kill(Number(supervisorLease.pid), "SIGTERM");
+const supervisorDeadline = Date.now() + 5000;
+while (fs.existsSync(supervisorLeaseRoot) && Date.now() < supervisorDeadline) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+}
+assert.equal(fs.existsSync(supervisorLeaseRoot), false, "HGS reconciler must clean its lease on stop");
+
+// A receiver-bound MCP process cannot read or acknowledge another bot's message.
+const inboxDefault = {
+  schema_version: 1,
+  id: "msg-bound-default",
+  created_at: new Date().toISOString(),
+  sender: "grok-vm",
+  recipient: "m2-hawkgrokspan",
+  kind: "message",
+  subject: "default route",
+  body: "for m2-primary",
+  notify_receiver: false,
+  metadata: { notify_receiver: false },
+};
+const inboxOther = {
+  ...inboxDefault,
+  id: "msg-bound-other",
+  subject: "other route",
+  body: "not for m2-primary",
+  target_bot_id: "other-bot",
+  metadata: { notify_receiver: false, target_bot_id: "other-bot" },
+};
+for (const envelope of [inboxDefault, inboxOther]) {
+  fs.writeFileSync(path.join(root, "inbox", `${envelope.id}.json`), JSON.stringify(envelope));
+}
+const noStartupReceiverConfig = structuredClone(config);
+noStartupReceiverConfig.message_receiver.start_on_mcp_server = false;
+fs.writeFileSync(configPath, `${JSON.stringify(noStartupReceiverConfig, null, 2)}\n`);
+const boundEnvironment = {
+  ...process.env,
+  HAWKSPAN_STATE_DIR: root,
+  HAWKSPAN_CONFIG: configPath,
+  HAWKGROKSPAN_TARGET_BOT_ID: "m2-primary",
+};
+const boundReceive = spawnSync(process.execPath, [
+  path.join(scripts, "call-tool.mjs"),
+  "receive_messages",
+  JSON.stringify({ limit: 20 }),
+], { encoding: "utf8", env: boundEnvironment, timeout: 10000 });
+assert.equal(boundReceive.status, 0, boundReceive.stderr);
+const boundReceiveResult = JSON.parse(boundReceive.stdout);
+assert.deepEqual(
+  boundReceiveResult.structuredContent.messages.map(({ id }) => id),
+  ["msg-bound-default"],
+);
+const deniedCrossTargetAck = spawnSync(process.execPath, [
+  path.join(scripts, "call-tool.mjs"),
+  "acknowledge_message",
+  JSON.stringify({ message_id: "msg-bound-other", reply: false }),
+], { encoding: "utf8", env: boundEnvironment, timeout: 10000 });
+assert.notEqual(deniedCrossTargetAck.status, 0);
+assert.match(deniedCrossTargetAck.stderr, /cannot acknowledge another target_bot_id/);
+
 for (const mutation of [
   (value) => { value.application_plugins.enabled = true; },
   (value) => { value.queue_supervisor.enabled = true; },
@@ -240,6 +363,19 @@ for (const mutation of [
   (value) => { value.peer.transport.command = symlinkProxyCommand; },
   (value) => { value.peer.transport.socket = "relative.sock"; },
   (value) => { value.peer.allow_remote_wake = true; },
+  (value) => { value.message_receiver.targets["m2-primary"].session_id = "friendly-name"; },
+  (value) => { value.message_receiver.targets["m2-primary"].session_id = "00000000-0000-0000-0000-000000000000"; },
+  (value) => {
+    value.message_receiver.targets.duplicate = {
+      ...value.message_receiver.targets["m2-primary"],
+      workdir: path.join(root, "receiver", "duplicate"),
+    };
+    fs.mkdirSync(value.message_receiver.targets.duplicate.workdir, { recursive: true });
+  },
+  (value) => { value.message_receiver.targets["m2-primary"].sandbox = "danger-full-access"; },
+  (value) => { value.message_receiver.targets["m2-primary"].command = writableProxyCommand; },
+  (value) => { value.message_receiver.targets["m2-primary"].workdir = writableReceiverWorkdir; },
+  (value) => { value.message_receiver.default_target = "missing"; },
   (value) => { value.peer.remote_artifacts = "/home/grok/elsewhere"; },
   (value) => { value.transfer.allowed_artifact_roots = [outside, "relative"]; },
 ]) {

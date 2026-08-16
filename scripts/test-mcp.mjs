@@ -299,6 +299,11 @@ const names = new Set(listed.result.tools.map((entry) => entry.name));
 const listedByName = new Map(
   listed.result.tools.map((entry) => [entry.name, entry]),
 );
+assert.equal(
+  Object.hasOwn(listedByName.get("send_message").inputSchema.properties, "target_bot_id"),
+  false,
+  "normal HawkSpan must not expose HawkGrokSpan bot routing",
+);
 for (const routineIpcTool of [
   "send_message",
   "retry_message",

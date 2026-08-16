@@ -37,7 +37,7 @@ assert.equal(run(`mkdir -p '${path.join(root, "outside")}'`).status, 126);
 const received = path.join(state, "artifacts", "artifact-safe.txt");
 assert.equal(run(`rsync --server -logDtpre.iLsfxCIvu --log-format=X --partial --append --dirs . ${received}`).status, 0);
 assert.match(fs.readFileSync(rsyncLog, "utf8"), /--server .*artifact-safe\.txt/);
-assert.equal(run(`rsync --server -logDtpre.iLsfxCIvu --dirs . ${path.join(state, "inbox")}/`).status, 0);
+assert.equal(run(`rsync --server -logDtpre.iLsfxCIvu --dirs . ${path.join(state, "artifacts")}/`).status, 0);
 for (const command of [
   `rsync --server --sender -logDtpre.iLsfxCIvu . ${path.join(state, "inbox")}`,
   `rsync --server --delete -logDtpre.iLsfxCIvu . ${path.join(state, "inbox")}`,
