@@ -3,7 +3,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 function fail(message) {
@@ -57,18 +57,15 @@ function requestLocalMessageReceiver() {
   if (config.surface_profile !== "message-files" || config.message_receiver?.enabled !== true) {
     fail("local message receiver is not enabled");
   }
-  const result = spawnSync(process.execPath, [
+  const child = spawn(process.execPath, [
     receiverScript,
     "--state-root", stateRoot,
     "--ensure-supervisor",
   ], {
-    encoding: "utf8",
-    timeout: 15000,
-    maxBuffer: 1024 * 1024,
+    detached: true,
+    stdio: "ignore",
   });
-  if (result.error || result.status !== 0) {
-    fail(result.error?.message || result.stderr?.trim() || "local message receiver rejected delivery");
-  }
+  child.unref();
 }
 
 const original = process.env.SSH_ORIGINAL_COMMAND || "";
