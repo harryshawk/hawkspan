@@ -270,8 +270,10 @@ or GitHub credentials.
 7. Customize `config/hawkgrokspan-grok-vm.example.json`; create every dedicated
    receiver working directory and do not enable any disabled feature or broaden
    the artifact root. Point `config/hawkgrokspan-grok.config.toml.example` at the
-   stable release path, never an extracted handoff or old package path, and merge
-   it into trusted user-level `~/.grok/config.toml`. Create
+   stable release path and an exact persistent Node executable, never an
+   extracted handoff, old package path, or PATH-dependent `/usr/bin/env node`.
+   Merge it into the Grok configuration actually loaded by the dedicated
+   receiver workspace. Create
    `.grok/sandbox.toml` in the dedicated workspace with
    the following profile so the sandboxed Grok session can write only HGS state:
 
