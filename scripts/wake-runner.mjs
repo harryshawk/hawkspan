@@ -135,6 +135,10 @@ function validateRequest(raw) {
       (typeof raw.handoff_prompt !== "string" || !raw.handoff_prompt.trim())) {
     throw new Error("wake request handoff_prompt is required for a target task");
   }
+  if (raw.target_thread_id &&
+      (typeof raw.codex_ipc_socket !== "string" || !path.isAbsolute(raw.codex_ipc_socket))) {
+    throw new Error("wake request codex_ipc_socket is required and must be absolute for a target task");
+  }
   if (raw.codex_ipc_socket !== null && raw.codex_ipc_socket !== undefined &&
       (typeof raw.codex_ipc_socket !== "string" || !path.isAbsolute(raw.codex_ipc_socket))) {
     throw new Error("wake request codex_ipc_socket must be absolute when provided");
@@ -447,7 +451,7 @@ export async function runWake(leasePath, token) {
           message_id: request.message_id,
           prompt: request.handoff_prompt,
           host_id: request.codex_host_id || "local",
-          socket_path: request.codex_ipc_socket || undefined,
+          socket_path: request.codex_ipc_socket,
           timeout_ms: request.timeout_ms,
         });
       } catch (error) {

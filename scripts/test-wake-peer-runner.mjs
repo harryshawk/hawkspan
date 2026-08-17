@@ -56,6 +56,7 @@ fs.writeFileSync(configPath, `${JSON.stringify({
     remote_state_dir: "/Users/peeruser/.hawkspan",
     remote_node: "/peer/node",
     codex_command: "/peer/codex",
+    codex_ipc_socket: "/peer/codex-home/ipc/ipc.sock",
     thread_id: "00000000-0000-0000-0000-000000000002",
     allow_remote_wake: true,
   },
@@ -117,6 +118,7 @@ assert.ok(encodedWakeRequest, "wake request must be present in the SSH command")
 const wakeRequest = JSON.parse(Buffer.from(encodedWakeRequest, "base64").toString("utf8"));
 assert.equal(wakeRequest.thread_id, "00000000-0000-0000-0000-000000000002");
 assert.equal(wakeRequest.target_thread_id, "00000000-0000-0000-0000-000000000003");
+assert.equal(wakeRequest.codex_ipc_socket, "/peer/codex-home/ipc/ipc.sock");
 assert.match(wakeRequest.prompt, /fenced HawkSpan runner owns/);
 assert.match(wakeRequest.prompt, /00000000-0000-0000-0000-000000000003/);
 assert.match(wakeRequest.handoff_prompt, /wake runner marker test/);
@@ -137,6 +139,17 @@ assert.equal(failed.ok, false);
 assert.equal(failed.error, "runner rejected request");
 const failureLines = fs.readFileSync(log, "utf8").split("\n").filter(Boolean).slice(beforeFailure);
 assert.equal(failureLines.filter((line) => line.includes("wake-runner.mjs")).length, 1);
+
+const configWithoutEndpoint = JSON.parse(fs.readFileSync(configPath, "utf8"));
+delete configWithoutEndpoint.peer.codex_ipc_socket;
+fs.writeFileSync(configPath, `${JSON.stringify(configWithoutEndpoint, null, 2)}\n`);
+const missingEndpoint = tool("wake_peer_thread", { message_id: message.message_id });
+assert.equal(missingEndpoint.ok, false);
+assert.equal(
+  missingEndpoint.error,
+  "peer.codex_ipc_socket is required for a targeted wake; message remains unacknowledged",
+);
+assert.deepEqual(missingEndpoint.attempts, []);
 
 fs.rmSync(root, { recursive: true, force: true });
 process.stdout.write("wake-peer runner marker tests passed\n");

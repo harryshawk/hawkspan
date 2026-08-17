@@ -178,6 +178,11 @@ function assertPeerCommandConfiguration(configuration) {
       throw new Error("peer.allowed_tools must be an array of exact tool names");
     }
   }
+  if (configuration.peer?.codex_ipc_socket !== undefined &&
+      (typeof configuration.peer.codex_ipc_socket !== "string" ||
+       !path.isAbsolute(configuration.peer.codex_ipc_socket))) {
+    throw new Error("peer.codex_ipc_socket must be an absolute path when configured");
+  }
 }
 
 function readConfig() {
@@ -866,6 +871,13 @@ function wakePeerThread(args) {
     : (CODEX_TASK_ID.test(String(storedEnvelope?.recipient || storedMessage?.recipient || ""))
         ? (storedEnvelope?.recipient || storedMessage.recipient)
         : null);
+  if (targetThreadId && !config.peer?.codex_ipc_socket) {
+    return {
+      ok: false,
+      error: "peer.codex_ipc_socket is required for a targeted wake; message remains unacknowledged",
+      attempts: [],
+    };
+  }
   const receiverThreadId = config.peer?.thread_id;
   if (!receiverThreadId) {
     return {
@@ -940,6 +952,7 @@ function wakePeerThread(args) {
     thread_id: receiverThreadId,
     target_thread_id: targetThreadId,
     handoff_prompt: targetThreadId ? forwardedPrompt : null,
+    codex_ipc_socket: targetThreadId ? config.peer.codex_ipc_socket : null,
     prompt,
     codex_command: codexCommand,
     node_command: remoteNode,

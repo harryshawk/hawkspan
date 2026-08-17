@@ -38,8 +38,11 @@ A delivered message is imported before `codex exec resume` wakes the configured
 reliable receiver task. An optional immutable `target_thread_id` identifies a
 working Codex task. The fenced receiver runner forwards the durable message ID,
 subject, and body to that exact task through the Codex desktop app's same-user
-inter-thread messaging path; without a target the receiver task handles the
-message itself. The receiver returns exact structured
+inter-thread messaging path. The sender supplies the peer's explicit absolute
+endpoint in `peer.codex_ipc_socket`; no home-directory default or socket scan is
+used. The remote runner verifies a same-user Unix socket and a successful Codex
+initialize handshake before handoff. Without a target the receiver task handles
+the message itself. The receiver returns exact structured
 acceptance only after the target handoff is accepted or its own handling
 completes. The fenced runner then writes the application acknowledgement.
 Process exit, rejected handoff, malformed or mismatched output, signal, timeout,

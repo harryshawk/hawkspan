@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import crypto from "node:crypto";
+import fs from "node:fs";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,11 +14,6 @@ function boundedTimeout(value) {
   const numeric = Number(value);
   if (!Number.isSafeInteger(numeric)) return DEFAULT_TIMEOUT_MS;
   return Math.min(Math.max(numeric, 1000), 120000);
-}
-
-function defaultSocketPath() {
-  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-  return path.join(codexHome, "ipc", "ipc.sock");
 }
 
 function frame(value) {
@@ -42,9 +37,21 @@ function validateRequest(raw) {
       throw new Error(`Codex handoff request requires ${key}`);
     }
   }
-  const socketPath = raw.socket_path || defaultSocketPath();
+  const socketPath = raw.socket_path;
   if (typeof socketPath !== "string" || !path.isAbsolute(socketPath)) {
-    throw new Error("Codex handoff socket_path must be absolute");
+    throw new Error("Codex handoff requires an explicit absolute socket_path");
+  }
+  let socketStat;
+  try {
+    socketStat = fs.lstatSync(socketPath);
+  } catch (error) {
+    throw new Error(`Codex handoff socket_path is unavailable: ${String(error?.message || error)}`);
+  }
+  if (!socketStat.isSocket()) {
+    throw new Error("Codex handoff socket_path is not a Unix socket");
+  }
+  if (typeof process.getuid === "function" && socketStat.uid !== process.getuid()) {
+    throw new Error("Codex handoff socket_path is not owned by the current user");
   }
   return {
     ...raw,

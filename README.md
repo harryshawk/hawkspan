@@ -202,7 +202,11 @@ The immutable message body is embedded in the peer wake prompt. A bounded
 receiver runner imports the envelope outside the Codex sandbox and wakes one
 reliable configured receiver. When the envelope carries `target_thread_id`, the
 fenced runner forwards it through the Codex desktop app's same-user inter-thread
-messaging path instead of depending on a headless model tool call;
+messaging path instead of depending on a headless model tool call. The sending
+node must provide the peer's exact absolute app endpoint as
+`peer.codex_ipc_socket`; HawkSpan does not infer it from a home directory or scan
+for sockets. The remote runner verifies that the endpoint is a same-user Unix
+socket and completes the Codex initialize handshake before acknowledging;
 otherwise it handles the message itself. Exact structured acceptance is valid
 only after the target handoff succeeds or receiver handling completes, and only
 then does the runner write the application acknowledgement. A token-fenced
