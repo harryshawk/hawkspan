@@ -67,9 +67,11 @@ CLI executable, matching sandbox, maximum runtime, and fenced process lease.
 One slow bot therefore cannot block another bot. The receiver coalesces messages
 that arrive while a target is active, checks again before ending, and treats the
 durable message acknowledgement as completion. Starting a CLI process is not
-acceptance. Acknowledgement envelopes and messages sent with `wake:false` never
-launch a receiver. After import, the durable database row is authoritative for
-route and notification intent; replacing the JSON file cannot change either.
+acceptance. Acknowledgement envelopes never launch a receiver. Ordinary HGS
+messages always notify their configured target; callers cannot accidentally
+leave an unread ordinary message by selecting a quiet-send option. After import,
+the durable database row is authoritative for route and notification intent;
+replacing the JSON file cannot change either.
 
 A single local reconciliation supervisor starts when an inbox delivery arrives,
 when the HGS MCP server starts, or through the managed macOS launchd service. It
@@ -88,10 +90,11 @@ and verify the release audit before acceptance. The Grok Docker VM has no system
 PID 1. Its Extra Awake feature is a prompt-only agent poll, not a fixed command
 hook; it must not be documented as a service manager. Inbox delivery invokes the
 installed receiver `--ensure-supervisor` entrypoint once the private transport is
-running. Any Extra Awake recovery prompt must call one reviewed owner-only
-bootstrap script by absolute path and must be proven by a real Grok Computer
-Update test, including SSH, userspace Tailscale, the TCP forwarder, the receiver,
-and the exact Grok CLI session. File persistence alone is not acceptance.
+running. Extra Awake is not installation, recovery, or acceptance plumbing.
+Recovery is an owner-invoked, idempotent bootstrap followed by a real Grok
+Computer Update check that covers SSH, userspace Tailscale, the TCP forwarder,
+the receiver, and the exact Grok CLI session. File persistence alone is not
+acceptance.
 
 The receiver prompt is goal-aware: it must inspect current goal state, may
 continue a matching receiver goal, must not overwrite an unrelated owner goal,
@@ -121,6 +124,109 @@ disabled commands, and exchange-root restriction remain mandatory. Tailnet
 policy must deny by default and permit only TCP port 22 between the two dedicated
 HawkGrokSpan nodes. Tailscale Funnel and public SSH exposure are not part of this
 design.
+
+### M2 Tailscale setup
+
+Install the official macOS Tailscale package, approve its system extension and
+VPN configuration, enable start-at-login, and sign the Mac into the owner's
+tailnet. Give the node a stable HGS-specific hostname such as
+`hawkgrokspan-m2`. Record its MagicDNS name and Tailscale IP as deployment
+evidence. If an App Store copy was previously installed, remove the duplicate
+and reboot before acceptance; two macOS Tailscale installations conflict.
+
+Do not enable an exit node, subnet routes, Funnel, or Tailscale SSH. Replace the
+tailnet's initial allow-all policy with a deny-by-default grant that permits only
+TCP 22 from the M2 HGS node to the Grok VM HGS node and back. Replace the two
+addresses below with the recorded HGS node addresses, preview the policy, and
+save only when the preview contains exactly these two grants:
+
+```json
+{
+  "grants": [
+    { "src": ["M2_TAILSCALE_IP"], "dst": ["GROK_VM_TAILSCALE_IP"], "ip": ["tcp:22"] },
+    { "src": ["GROK_VM_TAILSCALE_IP"], "dst": ["M2_TAILSCALE_IP"], "ip": ["tcp:22"] }
+  ]
+}
+```
+
+A green Tailscale UI is not sufficient evidence. Acceptance must prove native
+SSH from M2 to the VM and the VM's configured `tailscale-nc` path back to M2,
+including one real transfer in each direction.
+
+### Persistent Grok VM Tailscale setup
+
+For a Grok Docker computer without systemd or network capabilities, install the
+official stable Debian package and run a user-scoped daemon in userspace mode:
+
+```sh
+mkdir -p "$HOME/HawkGrokSpan/TailscaleState"
+chmod 700 "$HOME/HawkGrokSpan" "$HOME/HawkGrokSpan/TailscaleState"
+nohup tailscaled \
+  --tun=userspace-networking \
+  --state="$HOME/HawkGrokSpan/TailscaleState/tailscaled.state" \
+  --socket="$HOME/HawkGrokSpan/TailscaleState/tailscaled.sock" \
+  --socks5-server=127.0.0.1:1055 \
+  >"$HOME/HawkGrokSpan/TailscaleState/tailscaled.log" 2>&1 &
+tailscale --socket="$HOME/HawkGrokSpan/TailscaleState/tailscaled.sock" up \
+  --hostname=hawkgrokspan-grok-vm --accept-dns=false
+```
+
+The owner must open the resulting one-time login URL. After the tailnet policy
+is in place, expose only the VM's existing OpenSSH receiver to the private
+tailnet:
+
+```sh
+tailscale --socket="$HOME/HawkGrokSpan/TailscaleState/tailscaled.sock" \
+  serve --bg --tcp=22 tcp://127.0.0.1:22
+```
+
+The Grok workspace sandbox may report a root-owned `/usr/bin/tailscale` as an
+unrelated owner. Copy that already-reviewed binary to the owner-only workspace,
+verify both SHA-256 values match, and point only `peer.transport.command` at the
+owned regular executable:
+
+```sh
+mkdir -p "$HOME/HawkGrokSpan/bin"
+chmod 700 "$HOME/HawkGrokSpan/bin"
+cp /usr/bin/tailscale "$HOME/HawkGrokSpan/bin/tailscale"
+chmod 755 "$HOME/HawkGrokSpan/bin/tailscale"
+sha256sum /usr/bin/tailscale "$HOME/HawkGrokSpan/bin/tailscale"
+```
+
+Keep `peer.transport.socket` set to the persistent userspace socket. After a
+Grok Computer Update, packages, host keys, IPs, and processes may change even
+when home-directory files persist. The reviewed recovery sequence is: restore
+OpenSSH and `rsync` if missing, start `sshd`, start the userspace daemon, reapply
+the private TCP forwarder, verify the new SSH host key with the owner, refresh
+the owner-controlled Tailscale copy and digest if the package changed, then
+restart HGS and verify its exact release and session. Keep the recovery command
+owner-invoked unless the hosting product provides a reviewed persistent service
+facility. Extra Awake must remain disabled during message-wake acceptance and
+is never part of normal delivery or recovery.
+
+### Dedicated SSH key installation
+
+On each receiving node, install only the peer's public key in
+`~/.ssh/authorized_keys` with one forced-command entry. Replace the absolute
+release, state, and public-key placeholders; do not use a shell alias or a
+relative path:
+
+```text
+restrict,command="/usr/bin/env node /ABSOLUTE/HGS/CURRENT/scripts/hawkgrokspan-ssh-gateway.mjs --state-root /ABSOLUTE/HOME/.hawkgrokspan" ssh-ed25519 PEER_PUBLIC_KEY HGS_PEER_LABEL
+```
+
+`restrict` disables forwarding, PTY, agent, X11, and user startup behavior.
+The gateway then permits only the receive-side HGS protocol. Acceptance must
+prove the HGS transport probe succeeds and an arbitrary command such as
+`uname -a` is rejected by the gateway.
+
+Populate the dedicated HGS `known_hosts` file only after independently
+verifying the peer's Ed25519 host-key fingerprint. Its host token must exactly
+match `peer.primary_host`: record the MagicDNS name when configuration uses the
+name, or the 100.x address when configuration uses the address. A Grok Computer
+Update may replace the VM host key. If it does, stop delivery, independently
+verify the new fingerprint, replace only the stale VM entry on M2, and repeat
+the strict-host-key transport probe. Never weaken `StrictHostKeyChecking=yes`.
 
 ## Why current Grok Build helps
 
@@ -155,18 +261,18 @@ or GitHub credentials.
 4. Create `~/.hawkgrokspan` and `~/HawkGrokSpan/Exchange` with owner-only
    permissions.
 5. Create a dedicated SSH key, exchange only public keys, independently verify
-   each host key, and install each public key only with the documented
-   forced-command gateway restrictions. A plain login-capable key is a failed
-   installation.
-6. Install the official Grok CLI, authenticate with the documented headless
-   device-code flow, create a dedicated persisted CLI session, and record the
-   real executable path, version, digest, and exact resumable session UUID as
-   deployment evidence. The external CLI digest is not a permanent startup pin;
-   reverify it and the session after a Grok CLI update before accepting HGS again.
+   each host key, and install each key only with the forced-command gateway
+   entry above. A plain login-capable key is a failed installation.
+6. Stage the same committed HGS revision and tree on M2 and the VM. Activate it
+   on both nodes under the separate HGS state and stable-link paths. Run the
+   local release audit on each node. Do not begin acceptance until both installed
+   receipts, stable links, and live receiver processes report that exact revision.
 7. Customize `config/hawkgrokspan-grok-vm.example.json`; create every dedicated
-   receiver working directory, replace every example UUID with an exact persisted
-   Grok session UUID, and do not enable any disabled feature or broaden the
-   artifact root. Create `.grok/sandbox.toml` in the dedicated workspace with
+   receiver working directory and do not enable any disabled feature or broaden
+   the artifact root. Point `config/hawkgrokspan-grok.config.toml.example` at the
+   stable release path, never an extracted handoff or old package path, and merge
+   it into trusted user-level `~/.grok/config.toml`. Create
+   `.grok/sandbox.toml` in the dedicated workspace with
    the following profile so the sandboxed Grok session can write only HGS state:
 
    ```toml
@@ -178,26 +284,39 @@ or GitHub credentials.
    Set each Grok receiver target's `sandbox` to `hawkgrokspan`. The built-in
    `workspace` profile cannot open the HGS SQLite state outside the workspace,
    while `off` grants substantially broader machine access and is not accepted.
-8. Activate with `HAWKSPAN_STATE_DIR=~/.hawkgrokspan`,
-   `HAWKSPAN_STABLE_RELEASE_ROOT=~/.local/share/hawkgrokspan/current`, and an
-   isolated `HAWKSPAN_LAUNCH_AGENTS_DIR`; do not overwrite normal HawkSpan
-   service definitions.
-9. Merge `config/hawkgrokspan-grok.config.toml.example` into the trusted
-   user-level `~/.grok/config.toml` using absolute paths.
-10. Install and review one owner-only VM bootstrap script for SSH, userspace
-    Tailscale, the private TCP forwarder, and the HGS receiver. Configure the
-    prompt-only Extra Awake agent to call only that absolute script, then perform
-    a real Grok Computer Update and prove every process, the exact CLI session,
-    and the HGS MCP surface recover without changing trust boundaries.
-11. Start Grok and confirm it lists only the thirteen `hawkgrokspan__*` tools;
-   then prove the configured exact session UUID resumes without creating a new
-   session.
-12. Run acceptance in this order: link status, M2-to-VM targeted message and
+   Because no person is present to answer a headless tool prompt, the installed
+   receiver passes exact per-tool allow rules for the same thirteen HGS
+   message/file tools. It does not enable Grok's broad always-approve mode.
+   Without these narrow rules, Grok cancels the first `receive_messages` call
+   and a delivered message remains unread.
+8. Install the official Grok CLI and authenticate with the documented headless
+   device-code flow. Only after the stable MCP path, sandbox profile, state
+   directory, and owned Tailscale command are correct, create the dedicated
+   persisted Grok session
+   under `--sandbox hawkgrokspan`. Confirm that exact session lists all thirteen
+   HGS tools, then write its UUID into the receiver target. Grok binds a session
+   to its creation profile and may retain MCP startup failure state; a session
+   created under `workspace`, `off`, or before the MCP prerequisites were fixed
+   is not an accepted receiver session.
+   Record its exact real executable, version, digest, and resumable UUID. Recheck
+   all four after a Grok CLI update.
+9. Start the exact installed HGS receiver on both nodes. On macOS, install the
+   dedicated HGS launchd service. On the VM, keep an owner-invoked, idempotent
+   recovery command that restores or verifies OpenSSH, `rsync`, `sshd`, the
+   userspace Tailscale socket, private TCP-22 Serve mapping, owned Tailscale
+   client copy, host-key pins, exact HGS revision, and exact Grok session before
+   starting the receiver. It must log each bounded step and stop nonzero on the
+   first failure so partial recovery cannot masquerade as ready.
+10. Perform a real Grok Computer Update and run that recovery sequence. Prove
+    any new VM host key was explicitly re-verified and re-pinned, then repeat
+    bidirectional transport and message acceptance with Extra Awake off.
+11. Run acceptance in this order: compare exact source/tree/receipt/live-receiver
+    revision on both nodes; link status; M2-to-VM targeted message and
     durable acknowledgement, VM-to-M2 targeted message and acknowledgement, a
     second target on each configured multi-bot side, one deliberately slow
     target while another completes, acknowledgement/no-notification non-wake,
     one harmless text file each direction, exact SHA-256 comparison, and one
-    outside-root transfer rejection.
+    outside-root transfer rejection, plus an arbitrary SSH-command rejection.
 
 ## Acceptance evidence
 

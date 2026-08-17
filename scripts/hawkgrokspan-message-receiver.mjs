@@ -839,7 +839,8 @@ function commandFor(prompt) {
     "hawkgrokspan__send_artifact",
     "hawkgrokspan__send_message",
     "hawkgrokspan__verify_artifact",
-  ].join(",");
+  ];
+  const toolPermissions = tools.flatMap((toolName) => ["--allow", `MCPTool(${toolName})`]);
   return [target.command, [
     "-p", prompt,
     "--resume", target.session_id,
@@ -847,7 +848,8 @@ function commandFor(prompt) {
     "--output-format", "json",
     "--sandbox", target.sandbox,
     "--max-turns", String(target.maximumTurns),
-    "--tools", tools,
+    "--tools", tools.join(","),
+    ...toolPermissions,
   ]];
 }
 

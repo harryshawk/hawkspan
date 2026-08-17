@@ -54,7 +54,7 @@
     "known_hosts": "/home/GROK_VM_USER/.hawkgrokspan/known_hosts",
     "transport": {
       "kind": "tailscale-nc",
-      "command": "/usr/bin/tailscale",
+      "command": "/home/GROK_VM_USER/HawkGrokSpan/bin/tailscale",
       "socket": "/home/GROK_VM_USER/HawkGrokSpan/TailscaleState/tailscaled.sock"
     },
     "remote_state_dir": "/Users/M2_USER/.hawkgrokspan",
