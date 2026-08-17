@@ -788,16 +788,6 @@ function targetMessageIds() {
 }
 
 function receiverPrompt(messageIds) {
-  const filter = JSON.stringify({ limit: 50, target_bot_id: workerTarget });
-  const directReceive = [
-    `HAWKSPAN_STATE_DIR=${promptShellQuote(stateRoot)}`,
-    `HAWKSPAN_CONFIG=${promptShellQuote(path.join(stateRoot, "config.json"))}`,
-    `HAWKGROKSPAN_TARGET_BOT_ID=${promptShellQuote(workerTarget)}`,
-    promptShellQuote(process.execPath),
-    promptShellQuote(path.join(scriptsRoot, "call-tool.mjs")),
-    "receive_messages",
-    promptShellQuote(filter),
-  ].join(" ");
   const sessionGuidance = target.adapter === "codex"
     ? "Inspect goal state before changing it. Never blindly create a goal. Continue a matching active receiver goal. If an unrelated unfinished owner goal exists, do not overwrite it and do not acknowledge unprocessed inbound work; send a correlated busy/deferred report if possible and leave the original message pending. A completed, blocked, or stale receiver-bootstrap goal must not suppress this delivery."
     : "This exact persisted Grok session has no HawkGrokSpan goal-state control. Process the routed inbox directly. If the session cannot accept the work, do not acknowledge the unprocessed inbound message; send a correlated busy/deferred report if possible and leave the original pending.";
@@ -805,9 +795,9 @@ function receiverPrompt(messageIds) {
     `HawkGrokSpan delivered durable messages for target_bot_id ${workerTarget}: ${messageIds.join(", ")}.`,
     "This is agent notification and inbox continuation, not authorization for machine control.",
     sessionGuidance,
-    `Import all unread HawkGrokSpan envelopes for target_bot_id ${workerTarget}, process each message ID once, and durably acknowledge each. Check the same filtered inbox again immediately before ending.`,
+    `Your first action must be a direct call to the MCP tool hawkgrokspan__receive_messages with {"limit":50,"target_bot_id":"${workerTarget}"}. Do not search for the tool and do not use a terminal or call-tool fallback.`,
+    `Process each delivered message ID once and durably acknowledge each with the HawkGrokSpan MCP tools. Check the same filtered inbox again immediately before ending.`,
     "Operational replies go to the peer agent endpoint through HawkGrokSpan. Harry is the human owner and should be contacted only for a new decision, authorization, or physical action.",
-    `Direct receive fallback: ${directReceive}`,
     "Do not enable or invoke shell control, peer commands, training, Funnel, Tailscale SSH, exit nodes, subnet routes, or broader access. End without leaving a synthetic receiver-only goal active.",
   ].join(" ");
 }
