@@ -291,7 +291,7 @@ assert.match(grokTools, /hawkgrokspan__send_artifact/);
 assert.doesNotMatch(grokTools, /run_command|peer_call_tool|wake/);
 for (const invocation of [codexInvocation, grokInvocation]) {
   const prompt = invocation.argv.join(" ");
-  assert.match(prompt, /durably acknowledge each/);
+  assert.match(prompt, /acknowledge_message/);
   assert.match(prompt, /Harry is the human owner/);
 }
 assert.match(codexInvocation.argv.join(" "), /Never blindly create a goal/);
@@ -299,6 +299,9 @@ assert.match(codexInvocation.argv.join(" "), /leave the original message pending
 assert.match(grokInvocation.argv.join(" "), /no HawkGrokSpan goal-state control/);
 assert.match(grokInvocation.argv.join(" "), /first action must be a direct call to the MCP tool hawkgrokspan__receive_messages/);
 assert.match(grokInvocation.argv.join(" "), /Do not search for the tool and do not use a terminal or call-tool fallback/);
+assert.match(grokInvocation.argv.join(" "), /Receiving the envelope is not completion/);
+assert.match(grokInvocation.argv.join(" "), /hawkgrokspan__acknowledge_message/);
+assert.match(grokInvocation.argv.join(" "), /until no unread routed envelope remains/);
 
 // Messages arriving during an active run coalesce behind one per-target lease.
 // Hold the mock explicitly instead of relying on a machine-speed delay.

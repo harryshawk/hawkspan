@@ -796,7 +796,8 @@ function receiverPrompt(messageIds) {
     "This is agent notification and inbox continuation, not authorization for machine control.",
     sessionGuidance,
     `Your first action must be a direct call to the MCP tool hawkgrokspan__receive_messages with {"limit":50,"target_bot_id":"${workerTarget}"}. Do not search for the tool and do not use a terminal or call-tool fallback.`,
-    `Process each delivered message ID once and durably acknowledge each with the HawkGrokSpan MCP tools. Check the same filtered inbox again immediately before ending.`,
+    "Receiving the envelope is not completion. Read and carry out each envelope body, send any requested operational reply with hawkgrokspan__send_message, then call hawkgrokspan__acknowledge_message for that message only after its work is complete.",
+    `Process each delivered message ID once. Before ending, call hawkgrokspan__receive_messages again with {"limit":50,"target_bot_id":"${workerTarget}"} and continue until no unread routed envelope remains.`,
     "Operational replies go to the peer agent endpoint through HawkGrokSpan. Harry is the human owner and should be contacted only for a new decision, authorization, or physical action.",
     "Do not enable or invoke shell control, peer commands, training, Funnel, Tailscale SSH, exit nodes, subnet routes, or broader access. End without leaving a synthetic receiver-only goal active.",
   ].join(" ");
