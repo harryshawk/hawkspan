@@ -64,7 +64,9 @@ only to `message_receiver.default_target`; unknown targets never fall through to
 another bot. This supports several bots on either endpoint without running a
 second HawkGrokSpan installation or sharing one bot's lease with another.
 An unknown target is terminally marked `routing_failed` and produces a
-correlated failure message to the sender; it is never silently rerouted.
+correlated failure message to the sender; it is never silently rerouted. A
+received `routing_failure` is a terminal status notice: HGS records it once and
+never wakes a bot or sends a reply to that notice.
 
 Each configured target has its own owner-controlled working directory, exact
 CLI executable, matching sandbox, maximum runtime, and fenced process lease.

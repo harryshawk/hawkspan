@@ -436,6 +436,20 @@ waitFor(() => Boolean(db.prepare(`
     WHERE direction='outbound' AND kind='routing_failure' AND correlation_id='msg-unknown'
   `).get()), "durable sender-visible routing failure");
 
+// A routing-failure report is a terminal status notice. Record it once without
+// launching a bot or replying to the report, which would create a loop.
+const beforeRoutingNotice = argvLines().length;
+seed("msg-routing-failure-notice", { target: "grok-review", kind: "routing_failure" });
+const routingNotice = request();
+assert.equal(routingNotice.targets.length, 0);
+assert.equal(stateOf("msg-routing-failure-notice"), "acknowledged");
+assert.equal(argvLines().length, beforeRoutingNotice);
+const routingNoticeStatus = JSON.parse(fs.readFileSync(
+  path.join(audit, "message-receiver-msg-routing-failure-notice.status.json"), "utf8",
+));
+assert.equal(routingNoticeStatus.terminal_notice, "routing_failure");
+assert.equal(routingNoticeStatus.replied, false);
+
 const beforeConflict = argvLines().length;
 envelopeOnly("msg-conflicting-route", { target: "codex-primary" });
 const conflictingPath = path.join(inbox, "msg-conflicting-route.json");

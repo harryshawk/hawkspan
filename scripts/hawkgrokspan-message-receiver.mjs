@@ -226,12 +226,28 @@ function pendingByTarget() {
   try {
     scanDb.exec("PRAGMA busy_timeout=10000");
     const rows = scanDb.prepare(`
-      SELECT id,sender,metadata_json
+      SELECT id,sender,kind,metadata_json
       FROM messages
       WHERE direction='inbound' AND state='received' AND kind!='acknowledgement'
       ORDER BY created_at ASC
     `).all();
     for (const row of rows) {
+      if (row.kind === "routing_failure") {
+        const acknowledgedAt = new Date().toISOString();
+        scanDb.prepare(`
+          UPDATE messages SET state='acknowledged', acknowledged_at=?
+          WHERE id=? AND state='received'
+        `).run(acknowledgedAt, row.id);
+        atomicWrite(path.join(audit, `message-receiver-${row.id}.status.json`), `${JSON.stringify({
+          schema_version: 1,
+          message_id: row.id,
+          state: "acknowledged",
+          terminal_notice: "routing_failure",
+          replied: false,
+          recorded_at: acknowledgedAt,
+        }, null, 2)}\n`);
+        continue;
+      }
       const metadata = JSON.parse(row.metadata_json || "{}");
       // Inbound/old envelopes with notify_receiver=false still wake.
       // if (metadata.notify_receiver === false) continue;
