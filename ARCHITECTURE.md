@@ -43,6 +43,16 @@ A token-fenced per-task remote lease serializes wakeups. The bounded runner
 reports `STARTED`, `BUSY`, or `FAILED`, terminates a hung process group after its
 deadline, and only its current token can remove the lease.
 
+Terminal-message pruning is deliberately payload-only. Given an explicit past
+cutoff, `prune_terminal_messages` previews by default and can remove JSON
+envelopes plus subject/body text only for acknowledged messages, delivered
+machine acknowledgements (which intentionally receive no reply), inbound
+messages with a durable cancellation tombstone, or outbound cancellations with
+an `applied` peer receipt. It never removes message rows, identities, states,
+correlations, cancellation metadata, timestamps, queue items, or append-only
+audit events. Pruned rows remain the replay authority; a late duplicate envelope
+is discarded, and `list_messages` hides pruned rows unless explicitly requested.
+
 ## Codex coordination
 
 A delivered message is imported before `codex exec resume` wakes the configured

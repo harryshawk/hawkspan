@@ -26,6 +26,10 @@ Use this skill whenever work must cross between the owner's M2 and M4 Macs.
    authoritative: `applied` confirms the peer tombstone, while `too_late` or
    `in_flight` means recall was not proved. Repeating cancellation must reuse
    the original cancellation identity.
+   Use `prune_terminal_messages` with an explicit past cutoff to preview or
+   remove only safely terminal envelope and subject/body material. Keep the
+   default preview unless cleanup is intended; durable replay identities,
+   cancellation evidence, metadata, queue items, and audit events are retained.
 3. Use `run_command` for broad routine control on either trusted Mac. Invoke it
    on the paired Mac through `peer_call_tool`. Routine file work, status,
    configuration, logs, packaging, and maintenance do not need an artificial

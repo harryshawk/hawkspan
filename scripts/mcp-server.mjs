@@ -260,6 +260,7 @@ execWithRetry(`
     envelope_path TEXT NOT NULL,
     delivered_via TEXT,
     acknowledged_at TEXT,
+    pruned_at TEXT,
     wake_requested INTEGER NOT NULL DEFAULT 1,
     metadata_json TEXT NOT NULL
   );
@@ -311,6 +312,9 @@ if (!messageColumns.has("wake_requested")) {
   execWithRetry(
     "ALTER TABLE messages ADD COLUMN wake_requested INTEGER NOT NULL DEFAULT 1",
   );
+}
+if (!messageColumns.has("pruned_at")) {
+  execWithRetry("ALTER TABLE messages ADD COLUMN pruned_at TEXT");
 }
 
 const queueRegistry = createQueueRegistry(db, {
@@ -547,8 +551,14 @@ function ingestInbox() {
       if (!envelope.id || !envelope.sender || !envelope.recipient) {
         throw new Error("missing required envelope fields");
       }
-      const exists = db.prepare("SELECT 1 FROM messages WHERE id=?").get(envelope.id);
-      if (exists) continue;
+      const exists = db.prepare("SELECT pruned_at FROM messages WHERE id=?").get(envelope.id);
+      if (exists) {
+        if (exists.pruned_at) {
+          fs.rmSync(filePath, { force: true });
+          audit("drop_replay", "message", envelope.id, "pruned", { file_path: filePath });
+        }
+        continue;
+      }
       const kind = envelope.kind || "message";
       if (kind === "cancellation") {
         const cancellationTarget = String(envelope.correlation_id || "").trim();
@@ -1172,16 +1182,24 @@ function wakePeerThread(args) {
   }
   const storedMessage = args.message_id
     ? db.prepare(`
-        SELECT recipient,subject,body,envelope_path,state,kind FROM messages
+        SELECT recipient,subject,body,envelope_path,state,kind,pruned_at FROM messages
         WHERE id=? AND direction='outbound'
       `).get(args.message_id)
     : null;
-  if (storedMessage?.state === "cancelled" || SILENT_PROTOCOL_MESSAGE_KINDS.has(storedMessage?.kind)) {
+  if (
+    storedMessage?.pruned_at
+    || storedMessage?.state === "cancelled"
+    || SILENT_PROTOCOL_MESSAGE_KINDS.has(storedMessage?.kind)
+  ) {
     return {
       ok: true,
       skipped: true,
       cancelled: storedMessage.state === "cancelled",
-      reason: storedMessage.state === "cancelled" ? "message cancelled" : "silent protocol message",
+      reason: storedMessage.pruned_at
+        ? "terminal message pruned"
+        : storedMessage.state === "cancelled"
+          ? "message cancelled"
+          : "silent protocol message",
       attempts: [],
     };
   }
@@ -1409,7 +1427,7 @@ function receiveMessages(args) {
     SELECT id,created_at,sender,recipient,kind,subject,body,correlation_id,state,
            metadata_json
     FROM messages
-    WHERE direction='inbound' AND state IN (${placeholders})
+    WHERE direction='inbound' AND state IN (${placeholders}) AND pruned_at IS NULL
     ORDER BY created_at ASC
     LIMIT ?
   `).all(...states, limit);
@@ -1436,11 +1454,12 @@ function listMessages(args) {
     clauses.push("state=?");
     values.push(args.state);
   }
+  if (args.include_pruned !== true) clauses.push("pruned_at IS NULL");
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = db.prepare(`
     SELECT id,created_at,sender,recipient,kind,subject,body,correlation_id,
            direction,state,envelope_path,delivered_via,acknowledged_at,
-           wake_requested,metadata_json
+           pruned_at,wake_requested,metadata_json
     FROM messages ${where}
     ORDER BY created_at DESC LIMIT ?
   `).all(...values, limit);
@@ -1450,6 +1469,219 @@ function listMessages(args) {
     metadata: JSON.parse(row.metadata_json),
     metadata_json: undefined,
   }));
+}
+
+function terminalMessagePruningEligibility(row) {
+  if (row.state === "acknowledged") return { eligible: true };
+  if (
+    row.direction === "outbound"
+    && row.kind === "acknowledgement"
+    && row.state === "delivered"
+  ) {
+    return { eligible: true };
+  }
+  if (row.state !== "cancelled") {
+    return { eligible: false, reason: "message is not safely terminal" };
+  }
+  if (row.direction === "inbound") {
+    const tombstone = db.prepare(`
+      SELECT id FROM messages
+      WHERE direction='inbound' AND kind='cancellation' AND correlation_id=?
+      ORDER BY created_at ASC LIMIT 1
+    `).get(row.id);
+    return tombstone
+      ? { eligible: true, evidence_message_id: tombstone.id }
+      : { eligible: false, reason: "cancelled inbound message has no durable peer tombstone" };
+  }
+  const cancellation = db.prepare(`
+    SELECT id FROM messages
+    WHERE direction='outbound' AND kind='cancellation' AND correlation_id=?
+    ORDER BY created_at ASC LIMIT 1
+  `).get(row.id);
+  if (!cancellation) {
+    return { eligible: false, reason: "cancelled outbound message has no durable cancellation" };
+  }
+  const receipt = db.prepare(`
+    SELECT id,metadata_json FROM messages
+    WHERE direction='inbound' AND kind='acknowledgement' AND correlation_id=?
+    ORDER BY created_at ASC LIMIT 1
+  `).get(cancellation.id);
+  let peerResult = null;
+  try {
+    peerResult = JSON.parse(receipt?.metadata_json || "{}")?.message_cancellation?.result || null;
+  } catch {
+    peerResult = null;
+  }
+  return peerResult === "applied"
+    ? { eligible: true, evidence_message_id: receipt.id }
+    : {
+        eligible: false,
+        reason: "cancelled outbound message has no applied peer tombstone receipt",
+        peer_status: peerResult || "pending",
+      };
+}
+
+function messageEnvelopePruningPath(row) {
+  const expectedRoot = row.direction === "inbound" ? INBOX : OUTBOX;
+  const resolved = path.resolve(row.envelope_path);
+  const relative = path.relative(expectedRoot, resolved);
+  if (
+    relative.startsWith("..")
+    || path.isAbsolute(relative)
+    || path.basename(resolved) !== `${row.id}.json`
+  ) {
+    throw new Error(`message envelope path is outside its durable spool: ${row.id}`);
+  }
+  return resolved;
+}
+
+function pruneTerminalMessages(args) {
+  ingestInbox();
+  const beforeDate = new Date(String(args.before || ""));
+  if (!Number.isFinite(beforeDate.getTime())) {
+    throw new Error("before must be a valid ISO-8601 timestamp");
+  }
+  const before = beforeDate.toISOString();
+  if (beforeDate.getTime() >= Date.now()) {
+    throw new Error("before must be earlier than the current time");
+  }
+  const limit = Math.min(Math.max(Number(args.limit || 100), 1), 1000);
+  const messageIds = Array.isArray(args.message_ids)
+    ? [...new Set(args.message_ids.map((value) => String(value).trim()).filter(Boolean))]
+    : [];
+  if (messageIds.length > 1000) throw new Error("message_ids cannot contain more than 1000 IDs");
+  const clauses = [
+    "created_at < ?",
+    "(state IN ('acknowledged','cancelled') OR "
+      + "(direction='outbound' AND kind='acknowledgement' AND state='delivered'))",
+  ];
+  const values = [before];
+  if (messageIds.length) {
+    clauses.push(`id IN (${messageIds.map(() => "?").join(",")})`);
+    values.push(...messageIds);
+  }
+  const candidates = db.prepare(`
+    SELECT * FROM messages
+    WHERE ${clauses.join(" AND ")}
+    ORDER BY created_at ASC
+    LIMIT ?
+  `).all(...values, limit);
+  const selected = [];
+  const skipped = [];
+  for (const row of candidates) {
+    const eligibility = terminalMessagePruningEligibility(row);
+    if (!eligibility.eligible) {
+      skipped.push({ message_id: row.id, state: row.state, ...eligibility });
+      continue;
+    }
+    const envelopePath = messageEnvelopePruningPath(row);
+    let envelopeBytes = 0;
+    try {
+      envelopeBytes = fs.statSync(envelopePath).size;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    selected.push({
+      row,
+      envelope_path: envelopePath,
+      envelope_bytes: envelopeBytes,
+      payload_bytes: Buffer.byteLength(row.subject) + Buffer.byteLength(row.body),
+      evidence_message_id: eligibility.evidence_message_id || null,
+    });
+  }
+  const dryRun = args.dry_run !== false;
+  const prunedAt = now();
+  const outcomes = [];
+  if (!dryRun) {
+    for (const entry of selected) {
+      if (entry.envelope_bytes) fs.rmSync(entry.envelope_path, { force: true });
+      if (entry.row.pruned_at) {
+        if (entry.envelope_bytes) {
+          audit("drop_replay", "message", entry.row.id, "pruned", {
+            file_path: entry.envelope_path,
+            envelope_bytes_removed: entry.envelope_bytes,
+          });
+        }
+        outcomes.push({
+          message_id: entry.row.id,
+          already_pruned: true,
+          payload_bytes_removed: 0,
+          envelope_bytes_removed: entry.envelope_bytes,
+          evidence_message_id: entry.evidence_message_id,
+        });
+        continue;
+      }
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const current = db.prepare("SELECT * FROM messages WHERE id=?").get(entry.row.id);
+        if (!current) throw new Error(`message disappeared while pruning: ${entry.row.id}`);
+        if (current.pruned_at) {
+          db.exec("COMMIT");
+          outcomes.push({
+            message_id: current.id,
+            already_pruned: true,
+            payload_bytes_removed: 0,
+            envelope_bytes_removed: entry.envelope_bytes,
+            evidence_message_id: entry.evidence_message_id,
+          });
+          continue;
+        }
+        const currentEligibility = terminalMessagePruningEligibility(current);
+        if (!currentEligibility.eligible) {
+          throw new Error(`message is no longer safely terminal: ${current.id}`);
+        }
+        const payloadBytes = Buffer.byteLength(current.subject) + Buffer.byteLength(current.body);
+        const changed = db.prepare(`
+          UPDATE messages SET subject='',body='',pruned_at=?
+          WHERE id=? AND pruned_at IS NULL
+        `).run(prunedAt, current.id);
+        if (changed.changes !== 1) {
+          throw new Error(`message changed while pruning: ${current.id}`);
+        }
+        audit("prune", "message", current.id, "pruned", {
+          created_at: current.created_at,
+          direction: current.direction,
+          state: current.state,
+          kind: current.kind,
+          payload_bytes_removed: payloadBytes,
+          envelope_bytes_removed: entry.envelope_bytes,
+          evidence_message_id: currentEligibility.evidence_message_id || null,
+        });
+        db.exec("COMMIT");
+        outcomes.push({
+          message_id: current.id,
+          already_pruned: false,
+          payload_bytes_removed: payloadBytes,
+          envelope_bytes_removed: entry.envelope_bytes,
+          evidence_message_id: currentEligibility.evidence_message_id || null,
+        });
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+  }
+  return {
+    before,
+    dry_run: dryRun,
+    candidate_count: candidates.length,
+    selected_count: selected.length,
+    pruned_count: outcomes.filter((entry) => !entry.already_pruned).length,
+    already_pruned_count: outcomes.filter((entry) => entry.already_pruned).length,
+    payload_bytes_selected: selected.reduce((total, entry) => total + entry.payload_bytes, 0),
+    envelope_bytes_selected: selected.reduce((total, entry) => total + entry.envelope_bytes, 0),
+    selected: selected.map((entry) => ({
+      message_id: entry.row.id,
+      state: entry.row.state,
+      direction: entry.row.direction,
+      already_pruned: Boolean(entry.row.pruned_at),
+      payload_bytes: entry.payload_bytes,
+      envelope_bytes: entry.envelope_bytes,
+      evidence_message_id: entry.evidence_message_id,
+    })),
+    outcomes,
+    skipped,
+  };
 }
 
 function acknowledgeMessage(args) {
@@ -4140,6 +4372,43 @@ const coreTools = [
     handler: cancelMessage,
   },
   {
+    name: "prune_terminal_messages",
+    description: "Preview or prune message payload text and JSON envelopes older than an explicit cutoff, but only after durable state proves each message terminal. Message identities, states, correlations, cancellation tombstones and receipts, metadata, timestamps, and append-only audit evidence remain in SQLite to prevent replay.",
+    inputSchema: {
+      type: "object",
+      required: ["before"],
+      properties: {
+        before: {
+          type: "string",
+          format: "date-time",
+          description: "Exclusive ISO-8601 creation-time cutoff; must be in the past.",
+        },
+        message_ids: {
+          type: "array",
+          minItems: 1,
+          maxItems: 1000,
+          uniqueItems: true,
+          items: { type: "string", minLength: 1 },
+          description: "Optional exact-ID filter for a bounded acceptance or cleanup.",
+        },
+        limit: { type: "integer", minimum: 1, maximum: 1000, default: 100 },
+        dry_run: {
+          type: "boolean",
+          default: true,
+          description: "Preview by default; set false to remove eligible operational material.",
+        },
+      },
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: pruneTerminalMessages,
+  },
+  {
     name: "wake_peer_thread",
     description: "Wake the configured Codex task on the paired Mac after an audited message has been delivered.",
     inputSchema: {
@@ -4175,12 +4444,13 @@ const coreTools = [
   },
   {
     name: "list_messages",
-    description: "List durable inbound and outbound messages by direction or state.",
+    description: "List unpruned durable inbound and outbound messages by direction or state. Set include_pruned to inspect preserved replay and audit authority.",
     inputSchema: {
       type: "object",
       properties: {
         direction: { type: "string", enum: ["inbound", "outbound"] },
         state: { type: "string" },
+        include_pruned: { type: "boolean", default: false },
         limit: { type: "integer", minimum: 1, maximum: 1000 },
       },
       additionalProperties: false,

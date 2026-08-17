@@ -221,6 +221,13 @@ reviving it. A peer that already acknowledged the original reports `too_late`,
 and a peer with an active receiver lease reports `in_flight` rather than
 claiming recall. Repeating the same cancellation reuses its original durable
 cancellation identity.
+Safely terminal messages can be pruned with an explicit past cutoff. The tool
+previews by default and removes only the terminal JSON envelope and subject/body
+payload when execution is requested. Durable IDs, states, correlations,
+cancellation tombstones and receipts, metadata, timestamps, queue records, and
+audit events remain intact, so delayed replay stays suppressed. Pruned rows are
+hidden from the normal message list and remain inspectable with
+`include_pruned`.
 When several messages should be read before a reply, say so in their
 message bodies (for example, “Sending 4 messages; wait for #4”) instead of
 suppressing delivery or wake.

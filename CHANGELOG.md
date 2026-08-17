@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added cutoff-bounded terminal-message pruning that removes envelope and
+  subject/body operational payload only after durable terminal proof, while
+  retaining replay IDs, states, correlations, cancellation evidence, queue
+  records, metadata, and append-only audit history.
 - Added idempotent durable message cancellation. Cancelling an unacknowledged
   outbound message stops its queued retries and wakes, sends a silent peer
   tombstone that blocks replay, and reports acknowledged or active-handoff

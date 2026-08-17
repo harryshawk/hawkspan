@@ -314,6 +314,17 @@ assert.equal(
 assert.equal(listedByName.get("cancel_message")?.annotations?.readOnlyHint, false);
 assert.equal(listedByName.get("cancel_message")?.annotations?.destructiveHint, true);
 assert.equal(listedByName.get("cancel_message")?.annotations?.idempotentHint, true);
+assert.equal(listedByName.get("prune_terminal_messages")?.annotations?.readOnlyHint, false);
+assert.equal(listedByName.get("prune_terminal_messages")?.annotations?.destructiveHint, true);
+assert.equal(listedByName.get("prune_terminal_messages")?.annotations?.idempotentHint, true);
+assert.deepEqual(
+  listedByName.get("prune_terminal_messages")?.inputSchema?.required,
+  ["before"],
+);
+assert.equal(
+  listedByName.get("prune_terminal_messages")?.inputSchema?.properties?.dry_run?.default,
+  true,
+);
 for (const routineIpcTool of [
   "send_message",
   "retry_message",
@@ -343,6 +354,7 @@ for (const required of [
   "send_message",
   "retry_message",
   "cancel_message",
+  "prune_terminal_messages",
   "wake_peer_thread",
   "receive_messages",
   "list_messages",
