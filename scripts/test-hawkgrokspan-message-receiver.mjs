@@ -293,6 +293,8 @@ for (const invocation of [codexInvocation, grokInvocation]) {
   const prompt = invocation.argv.join(" ");
   assert.match(prompt, /acknowledge_message/);
   assert.match(prompt, /Harry is the human owner/);
+  assert.match(prompt, /target_bot_id must be the peer target named by the envelope/);
+  assert.match(prompt, /never this local target/);
 }
 assert.match(codexInvocation.argv.join(" "), /Never blindly create a goal/);
 assert.match(codexInvocation.argv.join(" "), /leave the original message pending/);

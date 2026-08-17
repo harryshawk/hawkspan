@@ -798,7 +798,7 @@ function receiverPrompt(messageIds) {
     `Your first action must be a direct call to the MCP tool hawkgrokspan__receive_messages with {"limit":50,"target_bot_id":"${workerTarget}"}. Do not search for the tool and do not use a terminal or call-tool fallback.`,
     "Receiving the envelope is not completion. Read and carry out each envelope body, send any requested operational reply with hawkgrokspan__send_message, then call hawkgrokspan__acknowledge_message for that message only after its work is complete.",
     `Process each delivered message ID once. Before ending, call hawkgrokspan__receive_messages again with {"limit":50,"target_bot_id":"${workerTarget}"} and continue until no unread routed envelope remains.`,
-    "Operational replies go to the peer agent endpoint through HawkGrokSpan. Harry is the human owner and should be contacted only for a new decision, authorization, or physical action.",
+    `Operational replies go to the peer agent endpoint through HawkGrokSpan. In hawkgrokspan__send_message, recipient identifies the peer node; target_bot_id must be the peer target named by the envelope (for example m2-primary), never this local target ${workerTarget}. Harry is the human owner and should be contacted only for a new decision, authorization, or physical action.`,
     "Do not enable or invoke shell control, peer commands, training, Funnel, Tailscale SSH, exit nodes, subnet routes, or broader access. End without leaving a synthetic receiver-only goal active.",
   ].join(" ");
 }
