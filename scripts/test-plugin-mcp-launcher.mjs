@@ -15,7 +15,15 @@ const stableRoot = path.join(root, "current");
 fs.mkdirSync(path.join(releaseRoot, "scripts"), { recursive: true });
 fs.mkdirSync(stateRoot, { recursive: true });
 fs.writeFileSync(path.join(releaseRoot, "scripts", "mcp-server.mjs"), `
-process.stdin.pipe(process.stdout);
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({
+    input,
+    localControlDisabled: process.env.HAWKSPAN_LOCAL_CONTROL_DISABLED,
+  }));
+});
 `);
 fs.writeFileSync(path.join(stateRoot, "installed-revision.json"), `${JSON.stringify({
   schema_version: 2,
@@ -33,7 +41,10 @@ const launched = spawnSync(process.execPath, [path.join(scripts, "plugin-mcp-lau
   env: { ...process.env, HAWKSPAN_STATE_DIR: stateRoot },
 });
 assert.equal(launched.status, 0, launched.stderr);
-assert.equal(launched.stdout, request);
+assert.deepEqual(JSON.parse(launched.stdout), {
+  input: request,
+  localControlDisabled: "1",
+});
 
 const missingAuthority = spawnSync(
   process.execPath,

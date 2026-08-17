@@ -18,7 +18,9 @@ if (!fs.existsSync(serverPath) || !fs.statSync(serverPath).isFile()) {
 // Codex runs this launcher from its immutable plugin cache. The release
 // authority, not the cache pathname, selects the single executable server.
 const child = spawn(process.execPath, [serverPath], {
-  env: process.env,
+  // The persistent HawkSpan agent owns the local-control listener. A Codex
+  // plugin process is stdio-only and must not contend for that same port.
+  env: { ...process.env, HAWKSPAN_LOCAL_CONTROL_DISABLED: "1" },
   stdio: "inherit",
 });
 
