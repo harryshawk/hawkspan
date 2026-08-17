@@ -36,9 +36,11 @@ while (( SECONDS < deadline )); do
     const l=JSON.parse(fs.readFileSync(path.join(state,"audit","message-receiver-supervisor.lock","lease.json")));
     const command=spawnSync("ps",["-ww","-p",String(l.pid),"-o","command="],{encoding:"utf8"});
     const expected=path.join(path.resolve(a.active_release_root),"scripts","hawkgrokspan-message-receiver.mjs");
+    const stable=path.join(path.resolve(a.stable_release_root),"scripts","hawkgrokspan-message-receiver.mjs");
     process.exit(l.managed_service===true && l.revision===a.revision &&
       path.resolve(l.script_path)===expected && command.status===0 &&
-      command.stdout.includes(l.script_path) && command.stdout.includes("--service") ? 0 : 1);
+      (command.stdout.includes(l.script_path) || command.stdout.includes(stable)) &&
+      command.stdout.includes("--service") ? 0 : 1);
   ' "$state_root" 2>/dev/null; then
     print "$label is running the installed HawkGrokSpan revision"
     exit 0
