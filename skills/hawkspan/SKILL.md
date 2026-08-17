@@ -10,9 +10,11 @@ Use this skill whenever work must cross between the owner's M2 and M4 Macs.
 ## Operating rules
 
 1. Call `link_status` before assuming the peer or preferred route is available.
-2. Use `send_message` for instructions, questions, acknowledgements, and status.
-   The durable inbox is authoritative. Peer wakeup resumes the configured task
-   so the owner does not have to relay the instruction.
+2. Use `send_message` with the exact `target_thread_id` for instructions,
+   questions, actionable acknowledgements, and status. Every sent coordination
+   message wakes that task. Use `acknowledge_message` for a silent machine-level
+   protocol receipt. The durable inbox is authoritative, so the owner does not
+   have to relay the instruction.
    Routine private M2/M4 messages, acknowledgements, retries, outbox flushing,
    task wakeups, peer-tool transport, and scoped trainer controls are
    pre-authorized local IPC. Never request a separate approval for the

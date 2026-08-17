@@ -299,6 +299,18 @@ const names = new Set(listed.result.tools.map((entry) => entry.name));
 const listedByName = new Map(
   listed.result.tools.map((entry) => [entry.name, entry]),
 );
+const sendMessageSchema = listedByName.get("send_message")?.inputSchema;
+assert(sendMessageSchema.required.includes("target_thread_id"));
+assert.equal(Object.hasOwn(sendMessageSchema.properties, "wake"), false);
+assert.equal(Object.hasOwn(sendMessageSchema.properties, "deliver"), false);
+assert.equal(
+  Object.hasOwn(listedByName.get("retry_message").inputSchema.properties, "wake"),
+  false,
+);
+assert.equal(
+  Object.hasOwn(listedByName.get("flush_outbox").inputSchema.properties, "wake"),
+  false,
+);
 for (const routineIpcTool of [
   "send_message",
   "retry_message",
@@ -387,11 +399,18 @@ const rejectedMessageBatch = await tool("enqueue_queue_batch", {
   items: [
     {
       item_id: "atomic-message-valid",
-      payload: { subject: "must roll back", body: "must roll back" },
+      payload: {
+        target_thread_id: "00000000-0000-0000-0000-000000000011",
+        subject: "must roll back",
+        body: "must roll back",
+      },
     },
     {
       item_id: "atomic-message-invalid",
-      payload: { subject: "missing body must reject batch" },
+      payload: {
+        target_thread_id: "00000000-0000-0000-0000-000000000011",
+        subject: "missing body must reject batch",
+      },
     },
   ],
 });
@@ -427,7 +446,11 @@ const auditFailureBatch = await tool("enqueue_queue_batch", {
   queue_id: "hawkspan-messages",
   items: [{
     item_id: "atomic-message-audit-failure",
-    payload: { subject: "audit failure rollback", body: "audit failure rollback" },
+    payload: {
+      target_thread_id: "00000000-0000-0000-0000-000000000011",
+      subject: "audit failure rollback",
+      body: "audit failure rollback",
+    },
   }],
 });
 assert.equal(auditFailureBatch.result.isError, true);
@@ -1171,10 +1194,9 @@ assert.equal(
 );
 
 const queued = await tool("send_message", {
+  target_thread_id: "00000000-0000-0000-0000-000000000011",
   subject: "MCP test",
   body: "Queued without a configured peer.",
-  deliver: false,
-  wake: false,
 });
 assert.equal(queued.result.isError, false);
 const queuedMessageId = queued.result.structuredContent.message_id;

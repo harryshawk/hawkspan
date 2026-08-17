@@ -69,6 +69,7 @@ fs.writeFileSync(configPath, `${JSON.stringify({
     fallback_enabled: false,
     remote_inbox: "/Users/peeruser/.hawkspan/inbox",
     remote_audit: "/Users/peeruser/.hawkspan/audit",
+    codex_ipc_socket: "/peer/codex/ipc.sock",
     thread_id: "00000000-0000-0000-0000-000000000001",
     allow_remote_wake: true,
   },
@@ -157,6 +158,18 @@ function tool(name, args = {}) {
   return response.structuredContent;
 }
 
+function toolError(name, args = {}) {
+  const result = spawnSync(
+    process.execPath,
+    [path.join(scripts, "call-tool.mjs"), name, JSON.stringify(args)],
+    { encoding: "utf8", timeout: 30000, env: environment },
+  );
+  assert.equal(result.status, 1, result.stderr);
+  const response = JSON.parse(result.stderr.slice(result.stderr.indexOf("{")));
+  assert.equal(response.isError, true);
+  return response.content?.[0]?.text || "";
+}
+
 const afterMigration = tool("list_messages", { direction: "outbound" });
 assert.equal(afterMigration.find((entry) => entry.id === "legacy-message")?.wake_requested, true);
 const migratedDb = new DatabaseSync(path.join(root, "spool.sqlite3"));
@@ -166,96 +179,105 @@ assert.equal(
 );
 migratedDb.close();
 
-const directNoWake = tool("send_message", {
-  subject: "direct no wake",
-  body: "must remain no-wake after restart and retry(true)",
-  deliver: false,
-  wake: false,
-});
-assert.equal(directNoWake.wake_requested, false);
-assert.equal(
-  JSON.parse(fs.readFileSync(directNoWake.envelope_path, "utf8")).wake_requested,
-  false,
+assert.match(
+  toolError("send_message", {
+    subject: "missing exact target",
+    body: "must not create a targetless actionable message",
+  }),
+  /exact target_thread_id/,
 );
-const directRetry = tool("retry_message", {
-  message_id: directNoWake.message_id,
-  wake: true,
-});
-assert.equal(directRetry.delivery.ok, true);
-assert.equal(directRetry.wake_requested, false);
-assert.equal(directRetry.wake, null);
 
-const flushNoWake = tool("send_message", {
-  subject: "flush no wake",
-  body: "link-agent flush(true) must not upgrade this message",
+const legacyFlagsIgnored = tool("send_message", {
+  target_thread_id: "00000000-0000-0000-0000-000000000009",
+  subject: "obsolete no-wake flags",
+  body: "stale clients cannot suppress delivery or wake",
   deliver: false,
   wake: false,
 });
-const flushed = tool("flush_outbox", { wake: true });
-const flushedMessage = flushed.messages.find((entry) => entry.message_id === flushNoWake.message_id);
-assert.equal(flushedMessage.delivery.ok, true);
-assert.equal(flushedMessage.wake_requested, false);
-assert.equal(flushedMessage.wake, null);
-
-const oneAttemptSuppression = tool("send_message", {
-  subject: "one attempt suppression",
-  body: "stored true, this delivery attempt suppresses wake",
-  deliver: false,
-  wake: true,
-});
-const suppressed = tool("retry_message", {
-  message_id: oneAttemptSuppression.message_id,
-  wake: false,
-});
-assert.equal(suppressed.wake_requested, true);
-assert.equal(suppressed.wake_pending, true);
-assert.equal(suppressed.wake, null);
+assert.equal(legacyFlagsIgnored.delivery.ok, true);
+assert.equal(legacyFlagsIgnored.wake_requested, true);
+assert.equal(legacyFlagsIgnored.wake.busy, true);
 assert.equal(
-  JSON.parse(fs.readFileSync(oneAttemptSuppression.envelope_path, "utf8")).wake_requested,
+  JSON.parse(fs.readFileSync(legacyFlagsIgnored.envelope_path, "utf8")).wake_requested,
   true,
 );
-fs.writeFileSync(path.join(root, "inbox", "suppression-ack.json"), `${JSON.stringify({
+const retrySuppressionIgnored = tool("retry_message", {
+  message_id: legacyFlagsIgnored.message_id,
+  wake: false,
+});
+assert.equal(retrySuppressionIgnored.wake_requested, true);
+assert.equal(retrySuppressionIgnored.wake.busy, true);
+fs.writeFileSync(path.join(root, "inbox", "legacy-flags-ack.json"), `${JSON.stringify({
   schema_version: 1,
-  id: "suppression-ack",
+  id: "legacy-flags-ack",
   created_at: new Date().toISOString(),
   sender: "peer",
   recipient: "wake-intent-test",
   kind: "acknowledgement",
-  subject: "suppression accepted",
+  subject: "obsolete flags ignored",
   body: "accepted",
-  correlation_id: oneAttemptSuppression.message_id,
+  correlation_id: legacyFlagsIgnored.message_id,
   metadata: {},
 })}\n`);
 tool("receive_messages");
 
 const queued = tool("enqueue_queue_item", {
   queue_id: "hawkspan-messages",
-  item_id: "queued-no-wake",
+  item_id: "queued-obsolete-no-wake",
   payload: {
-    subject: "queue no wake",
-    body: "message adapter must preserve immutable no-wake intent",
+    target_thread_id: "00000000-0000-0000-0000-000000000009",
+    subject: "queue obsolete no wake",
+    body: "message adapter must normalize obsolete suppression away",
     wake: false,
   },
 });
-assert.equal(queued.item.payload.wake, false);
-const supervised = tool("supervise_queue", {
-  queue_id: "hawkspan-messages",
-  worker_id: "wake-intent-worker",
-  max_items: 1,
-});
-assert.equal(supervised.outcomes[0].state, "completed");
+assert.deepEqual(Object.keys(queued.item.payload), ["message_id"]);
 const queueMessage = tool("list_messages", { direction: "outbound" })
-  .find((entry) => entry.subject === "queue no wake");
-assert.equal(queueMessage.wake_requested, false);
+  .find((entry) => entry.subject === "queue obsolete no wake");
+assert.equal(queueMessage.wake_requested, true);
+fs.writeFileSync(path.join(root, "inbox", "queued-message-ack.json"), `${JSON.stringify({
+  schema_version: 1,
+  id: "queued-message-ack",
+  created_at: new Date().toISOString(),
+  sender: "peer",
+  recipient: "wake-intent-test",
+  kind: "acknowledgement",
+  subject: "queued message accepted",
+  body: "accepted",
+  correlation_id: queueMessage.id,
+  metadata: {},
+})}\n`);
+tool("receive_messages");
+tool("queue_control", {
+  queue_id: "hawkspan-messages",
+  item_id: "queued-obsolete-no-wake",
+  action: "cancel-item",
+  reason: "test cleanup after wake-intent assertion",
+});
 
-const noWakeRoutes = fs.readFileSync(routeLog, "utf8");
-assert.doesNotMatch(noWakeRoutes, /installed-revision\.json/);
-assert.doesNotMatch(noWakeRoutes, /wake-runner\.mjs/);
+fs.writeFileSync(path.join(root, "inbox", "protocol-source.json"), `${JSON.stringify({
+  schema_version: 1,
+  id: "protocol-source",
+  created_at: new Date().toISOString(),
+  sender: "peer",
+  recipient: "wake-intent-test",
+  kind: "message",
+  subject: "protocol receipt source",
+  body: "acknowledge silently",
+  correlation_id: null,
+  metadata: {},
+})}\n`);
+tool("receive_messages");
+const protocolReceipt = tool("acknowledge_message", { message_id: "protocol-source" });
+assert.equal(protocolReceipt.wake_requested, false);
+assert.equal(protocolReceipt.wake, null);
+
+const preDurableRoutes = fs.readFileSync(routeLog, "utf8");
 
 const durable = tool("send_message", {
+  target_thread_id: "00000000-0000-0000-0000-000000000009",
   subject: "durable wake pending",
   body: "delivery succeeds while receiver is busy",
-  wake: true,
 });
 assert.equal(durable.delivery.ok, true);
 assert.equal(durable.wake.busy, true);
@@ -296,12 +318,11 @@ fs.writeFileSync(path.join(root, "inbox", "durable-ack.json"), `${JSON.stringify
 })}\n`);
 const acceptedRetry = tool("retry_message", {
   message_id: durable.message_id,
-  wake: true,
 });
 assert.equal(acceptedRetry.wake_pending, false);
 assert.equal(acceptedRetry.delivery.already_delivered, true);
 assert.equal(acceptedRetry.wake, null);
-const afterAcceptance = tool("flush_outbox", { wake: true });
+const afterAcceptance = tool("flush_outbox");
 assert.equal(
   afterAcceptance.messages.some((entry) => entry.message_id === durable.message_id),
   false,
@@ -318,9 +339,9 @@ const afterAcceptedSupervisor = tool("supervise_queue", {
   max_items: 1,
 });
 assert.equal(afterAcceptedSupervisor.idle, true);
-tool("flush_outbox", { wake: true });
+tool("flush_outbox");
 
-const durableRoutes = fs.readFileSync(routeLog, "utf8").slice(noWakeRoutes.length);
+const durableRoutes = fs.readFileSync(routeLog, "utf8").slice(preDurableRoutes.length);
 assert.equal(durableRoutes.split("\n").filter((line) => line.includes("wake-runner.mjs")).length, 2);
 assert.equal(durableRoutes.split("\n").filter((line) => line.startsWith("rsync ")).length, 1);
 assert.deepEqual(fs.readFileSync(durableEnvelopePath), durableEnvelopeBefore);

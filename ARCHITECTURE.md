@@ -22,9 +22,10 @@ The background agent retries queued work. A temporary disconnect, sleep,
 screen lock, or stopped SSH service therefore delays delivery without losing
 the instruction or creating a duplicate.
 
-Peer wakeups are not sent for acknowledgement envelopes. Each outbound message
-persists immutable wake intent in both SQLite and its envelope; a retry may
-suppress a requested wake for that attempt but cannot upgrade `wake: false`.
+Peer wakeups are not sent for machine-protocol acknowledgement envelopes. Each
+caller-sent coordination message names one exact target task and persists
+immutable wake intent in both SQLite and its envelope. Retries always preserve
+and attempt that wake; callers cannot suppress it.
 A successfully delivered wake-requested message enters `wake_pending`, and its
 durable queue item is deferred until the sender ingests the application
 acknowledgement. Wake-only retries never rsync or recreate that envelope.

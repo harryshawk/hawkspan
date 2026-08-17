@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Persisted immutable per-message wake intent so outbox flushes, restarts,
-  explicit retries, and message queue adapters cannot upgrade `wake: false`.
+- Require every caller-sent coordination message to name and wake an exact
+  target task; only machine-protocol acknowledgement envelopes remain silent.
 - Kept delivered wake-requested messages durably wake-pending across sender
   restarts, retrying the wake without another rsync until acknowledgement.
 - Added a bounded, token-fenced peer wake runner with distinct started/busy/

@@ -94,20 +94,25 @@ function tool(name, args, marker = "started") {
   return response.structuredContent;
 }
 
-const message = tool("send_message", {
-  recipient: "peer",
-  target_thread_id: "00000000-0000-0000-0000-000000000003",
-  subject: "wake runner marker test",
-  body: "test body",
-  deliver: false,
-  wake: true,
+const queuedMessage = tool("enqueue_queue_item", {
+  queue_id: "hawkspan-messages",
+  item_id: "wake-runner-marker-message",
+  payload: {
+    recipient: "peer",
+    target_thread_id: "00000000-0000-0000-0000-000000000003",
+    subject: "wake runner marker test",
+    body: "test body",
+  },
 });
+const message = tool("list_messages", { direction: "outbound" })
+  .find((entry) => entry.id === queuedMessage.item.payload.message_id);
+assert.ok(message);
 assert.equal(
   JSON.parse(fs.readFileSync(message.envelope_path, "utf8")).target_thread_id,
   "00000000-0000-0000-0000-000000000003",
 );
 
-const started = tool("wake_peer_thread", { message_id: message.message_id }, "started");
+const started = tool("wake_peer_thread", { message_id: message.id }, "started");
 assert.equal(started.ok, true);
 assert.match(started.result_path, /\.result\.json$/);
 assert.equal(started.attempts.at(-1).marker.status, "started");
@@ -125,7 +130,7 @@ assert.match(wakeRequest.handoff_prompt, /wake runner marker test/);
 assert.match(wakeRequest.handoff_prompt, /test body/);
 
 const beforeBusy = fs.readFileSync(log, "utf8").split("\n").filter(Boolean).length;
-const busy = tool("wake_peer_thread", { message_id: message.message_id }, "busy");
+const busy = tool("wake_peer_thread", { message_id: message.id }, "busy");
 assert.equal(busy.ok, false);
 assert.equal(busy.skipped, true);
 assert.equal(busy.busy, true);
@@ -134,7 +139,7 @@ const busyLines = fs.readFileSync(log, "utf8").split("\n").filter(Boolean).slice
 assert.equal(busyLines.filter((line) => line.includes("wake-runner.mjs")).length, 1);
 
 const beforeFailure = fs.readFileSync(log, "utf8").split("\n").filter(Boolean).length;
-const failed = tool("wake_peer_thread", { message_id: message.message_id }, "failed");
+const failed = tool("wake_peer_thread", { message_id: message.id }, "failed");
 assert.equal(failed.ok, false);
 assert.equal(failed.error, "runner rejected request");
 const failureLines = fs.readFileSync(log, "utf8").split("\n").filter(Boolean).slice(beforeFailure);
@@ -143,7 +148,7 @@ assert.equal(failureLines.filter((line) => line.includes("wake-runner.mjs")).len
 const configWithoutEndpoint = JSON.parse(fs.readFileSync(configPath, "utf8"));
 delete configWithoutEndpoint.peer.codex_ipc_socket;
 fs.writeFileSync(configPath, `${JSON.stringify(configWithoutEndpoint, null, 2)}\n`);
-const missingEndpoint = tool("wake_peer_thread", { message_id: message.message_id });
+const missingEndpoint = tool("wake_peer_thread", { message_id: message.id });
 assert.equal(missingEndpoint.ok, false);
 assert.equal(
   missingEndpoint.error,

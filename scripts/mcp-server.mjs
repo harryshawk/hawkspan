@@ -702,7 +702,9 @@ function retryMessage(args) {
   }
   const envelope = JSON.parse(fs.readFileSync(row.envelope_path, "utf8"));
   const wakeRequested = row.wake_requested !== 0 && envelope.wake_requested !== false;
-  const shouldWake = wakeRequested && args.wake !== false;
+  // Retrying an actionable message always retries its immutable wake. Callers
+  // cannot turn delivery into a hidden "do not read" operation.
+  const shouldWake = wakeRequested;
   const wakeEligible = row.kind !== "acknowledgement" && wakeRequested;
   let delivery;
   if (row.state === "wake_pending") {
@@ -752,11 +754,17 @@ function retryMessage(args) {
 
 function sendMessage(args, { onEnvelopeWritten = null } = {}) {
   const messageId = id("msg");
-  const wakeRequested = args.wake !== false;
+  const kind = args.kind || "message";
+  // Pure protocol receipts remain silent. Every actual coordination message
+  // targets and wakes one exact Codex task; there is no caller no-wake mode.
+  const wakeRequested = kind !== "acknowledgement";
   const recipient = args.recipient || config.peer?.node_id || "peer";
   const targetThreadId = typeof args.target_thread_id === "string" && args.target_thread_id.trim()
     ? args.target_thread_id.trim()
-    : (CODEX_TASK_ID.test(String(recipient)) ? recipient : null);
+    : null;
+  if (wakeRequested && !targetThreadId) {
+    throw new Error("actionable messages require exact target_thread_id");
+  }
   const envelope = {
     schema_version: 1,
     id: messageId,
@@ -764,7 +772,7 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
     sender: config.node_id,
     recipient,
     target_thread_id: targetThreadId,
-    kind: args.kind || "message",
+    kind,
     subject: args.subject,
     body: args.body,
     correlation_id: args.correlation_id || null,
@@ -836,6 +844,15 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
     delivery,
     wake,
   };
+}
+
+function sendCoordinationMessage(args) {
+  if ((args.kind || "message") === "acknowledgement") {
+    throw new Error("protocol receipts must use acknowledge_message");
+  }
+  // Ignore obsolete caller wake/deliver flags from older clients. Sending a
+  // message means delivering it and waking its exact target.
+  return sendMessage({ ...args, deliver: true });
 }
 
 function wakePeerThread(args) {
@@ -1467,7 +1484,7 @@ function queueArtifactDelivery(args) {
   return { artifact_id: row.id, queued: true, queue_item: queued.item };
 }
 
-function flushOutbox(args) {
+function flushOutbox() {
   ingestInbox();
   const messageRows = db.prepare(`
     SELECT id FROM messages
@@ -1483,7 +1500,7 @@ function flushOutbox(args) {
   const artifacts = [];
   for (const row of messageRows) {
     try {
-      messages.push(retryMessage({ message_id: row.id, wake: args.wake }));
+      messages.push(retryMessage({ message_id: row.id }));
     } catch (error) {
       messages.push({ message_id: row.id, error: String(error?.message || error) });
     }
@@ -3145,11 +3162,14 @@ function normalizeQueuePayload(queue, payload = {}, rollbackFiles = []) {
     if (!payload.subject || !payload.body) {
       throw new Error("message queue items require message_id or subject and body");
     }
+    if ((payload.kind || "message") === "acknowledgement") {
+      throw new Error("protocol receipts must use acknowledge_message");
+    }
     const message = sendMessage(
       { ...payload, deliver: false },
       { onEnvelopeWritten: (envelopePath) => rollbackFiles.push(envelopePath) },
     );
-    return { message_id: message.message_id, wake: message.wake_requested };
+    return { message_id: message.message_id };
   }
   if (queue.adapter === "artifact" && !payload.artifact_id) {
     if (!payload.path) throw new Error("artifact queue items require artifact_id or path");
@@ -3731,7 +3751,7 @@ const coreTools = [
     description: "Send routine private M2/M4 coordination over the already-authorized local HawkSpan-D. This is durable, idempotent IPC, not an external communication or consequential action.",
     inputSchema: {
       type: "object",
-      required: ["subject", "body"],
+      required: ["target_thread_id", "subject", "body"],
       properties: {
         recipient: { type: "string" },
         target_thread_id: {
@@ -3744,8 +3764,6 @@ const coreTools = [
         body: { type: "string" },
         correlation_id: { type: "string" },
         metadata: { type: "object" },
-        deliver: { type: "boolean", default: true },
-        wake: { type: "boolean", default: true },
       },
       additionalProperties: false,
     },
@@ -3755,7 +3773,7 @@ const coreTools = [
       idempotentHint: true,
       openWorldHint: false,
     },
-    handler: sendMessage,
+    handler: sendCoordinationMessage,
   },
   {
     name: "retry_message",
@@ -3765,7 +3783,6 @@ const coreTools = [
       required: ["message_id"],
       properties: {
         message_id: { type: "string" },
-        wake: { type: "boolean", default: true },
       },
       additionalProperties: false,
     },
@@ -3988,9 +4005,7 @@ const coreTools = [
     description: "Retry queued delivery, delivered-but-unacknowledged wake requests, and previously attempted artifacts over the preferred route with automatic fallback.",
     inputSchema: {
       type: "object",
-      properties: {
-        wake: { type: "boolean", default: true },
-      },
+      properties: {},
       additionalProperties: false,
     },
     annotations: {

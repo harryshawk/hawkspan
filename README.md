@@ -212,8 +212,11 @@ only after the target handoff succeeds or receiver handling completes, and only
 then does the runner write the application acknowledgement. A token-fenced
 lease, timeout, and TERM/KILL escalation prevent a hung receiver from retaining
 the task writer indefinitely.
-The immutable `wake_requested` field prevents background flushes, restarts, or
-queue retries from upgrading a message originally sent with `wake: false`.
+Every caller-sent coordination message includes an exact `target_thread_id` and
+immutable wake intent. Pure machine-protocol acknowledgement envelopes remain
+silent. When several messages should be read before a reply, say so in their
+message bodies (for example, “Sending 4 messages; wait for #4”) instead of
+suppressing delivery or wake.
 A delivered wake-requested message remains durably `wake_pending` until its
 acknowledgement arrives. Retries reuse the same remote envelope and issue only
 the wake, so a busy receiver or sender restart cannot strand the message or
