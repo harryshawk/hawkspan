@@ -107,7 +107,7 @@ if (original.startsWith("rsync --server ")) {
   const dot = tokens.indexOf(".");
   if (dot < 3 || dot !== tokens.length - 2) fail("rsync server command shape is invalid");
   for (const option of tokens.slice(2, dot)) {
-    const allowed = option === "-logDtpre.iLsfxCIvu" || option === "-g" ||
+    const allowed = /^-[logDtpre.iLsfxCIvug]+$/.test(option) ||
       /^--(?:dirs|partial|append|append-verify|log-format=[A-Za-z0-9%._-]+)$/.test(option);
     if (!allowed) fail(`rsync option is not allowed: ${option}`);
   }
