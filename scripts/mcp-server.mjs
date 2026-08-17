@@ -961,9 +961,11 @@ function retryMessage(args) {
       .run(delivery.host, row.id);
   }
   let wake = null;
-  const shouldNotify = config.surface_profile === "message-files"
-    ? persistedEnvelope.notify_receiver !== false
-    : args.wake !== false;
+  // Quiet-send is gone: wake:false / notify_receiver=false must not skip notify.
+  // const shouldNotify = config.surface_profile === "message-files"
+  //   ? persistedEnvelope.notify_receiver !== false
+  //   : args.wake !== false;
+  const shouldNotify = true;
   if (delivery.ok && row.kind !== "acknowledgement" && shouldNotify) {
     wake = config.surface_profile === "message-files"
       ? {
@@ -1009,7 +1011,9 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
     throw new Error("target_bot_id and notify_receiver are reserved envelope fields");
   }
   const envelopeMetadata = { ...(args.metadata || {}) };
-  const notifyReceiver = args.wake !== false;
+  // Messages always notify. wake:false must not write notify_receiver=false.
+  // const notifyReceiver = args.wake !== false;
+  const notifyReceiver = true;
   if (isMessageFilesSurface) {
     if (args.target_bot_id) envelopeMetadata.target_bot_id = args.target_bot_id;
     envelopeMetadata.notify_receiver = notifyReceiver;

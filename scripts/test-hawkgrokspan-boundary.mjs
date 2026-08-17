@@ -228,15 +228,16 @@ assert.equal(sent.result.structuredContent.delivery.ok, true);
 const sentEnvelope = JSON.parse(fs.readFileSync(sent.result.structuredContent.envelope_path, "utf8"));
 assert.equal(sentEnvelope.target_bot_id, "grok-primary");
 assert.equal(sentEnvelope.metadata.target_bot_id, "grok-primary");
-assert.equal(sentEnvelope.notify_receiver, false);
-assert.equal(sentEnvelope.metadata.notify_receiver, false);
+assert.equal(sentEnvelope.notify_receiver, true);
+assert.equal(sentEnvelope.metadata.notify_receiver, true);
+assert.equal(sent.result.structuredContent.wake?.mode, "delivery-triggered-local-receiver");
 const retriedQuietMessage = await request("tools/call", {
   name: "retry_message",
-  arguments: { message_id: sent.result.structuredContent.message_id, wake: true },
+  arguments: { message_id: sent.result.structuredContent.message_id, wake: false },
 });
 assert.equal(retriedQuietMessage.result.isError, false);
 assert.equal(retriedQuietMessage.result.structuredContent.delivery.ok, true);
-assert.equal(retriedQuietMessage.result.structuredContent.wake, null, "immutable no-notify intent must survive retry");
+assert.equal(retriedQuietMessage.result.structuredContent.wake?.mode, "delivery-triggered-local-receiver");
 const deniedReservedMetadata = await request("tools/call", {
   name: "send_message",
   arguments: {

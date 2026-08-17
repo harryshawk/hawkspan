@@ -233,7 +233,8 @@ function pendingByTarget() {
     `).all();
     for (const row of rows) {
       const metadata = JSON.parse(row.metadata_json || "{}");
-      if (metadata.notify_receiver === false) continue;
+      // Inbound/old envelopes with notify_receiver=false still wake.
+      // if (metadata.notify_receiver === false) continue;
       const targetId = metadata.target_bot_id || receiver.default_target;
       if (!Object.hasOwn(receiver.targets, targetId)) {
         const toolEnvironment = {

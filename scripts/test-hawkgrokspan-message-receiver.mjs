@@ -59,7 +59,7 @@ const rows = db.prepare("SELECT id,metadata_json FROM messages WHERE direction='
 for (const row of rows) {
   const metadata = JSON.parse(row.metadata_json || "{}");
   const routed = metadata.target_bot_id || config.message_receiver.default_target;
-  if (routed === target && metadata.notify_receiver !== false) {
+  if (routed === target) {
     db.prepare("UPDATE messages SET state='acknowledged' WHERE id=?").run(row.id);
   }
 }
@@ -315,8 +315,7 @@ waitFor(() => !fs.existsSync(targetLeaseRoot("codex-primary")), "Codex lease cle
 lines = argvLines();
 assert.equal(lines.filter(({ target }) => target === "codex-primary").length, 2, "one active worker must coalesce the second delivery");
 
-// Acknowledgements and explicitly non-notifying messages never launch a bot.
-const beforeIgnored = argvLines().length;
+// Acknowledgements never launch a bot. Old notify_receiver=false envelopes still wake.
 const outboundPath = path.join(root, "outbound-for-ack.json");
 db.prepare(`
   INSERT INTO messages
@@ -329,13 +328,12 @@ db.prepare(`
 );
 envelopeOnly("ack-1", { kind: "acknowledgement", notify: false, correlationId: "outbound-for-ack" });
 seed("msg-quiet-1", { target: "grok-review", notify: false });
-const ignored = request();
-assert.equal(ignored.targets.length, 0);
-Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
-assert.equal(argvLines().length, beforeIgnored);
-assert.equal(stateOf("msg-quiet-1"), "received");
+const mixed = request();
+assert.deepEqual(mixed.targets.map(({ target_bot_id }) => target_bot_id), ["grok-review"]);
+waitFor(() => stateOf("msg-quiet-1") === "acknowledged", "old quiet envelope still wakes");
 assert.equal(stateOf("ack-1"), "acknowledged");
 assert.equal(stateOf("outbound-for-ack"), "acknowledged");
+waitFor(() => !fs.existsSync(targetLeaseRoot("grok-review")), "quiet-message Grok lease cleanup");
 
 // Untargeted legacy envelopes use the configured default bot.
 seed("msg-default-1");
@@ -393,8 +391,8 @@ waitFor(() => stateOf("msg-grok-fenced") === "acknowledged", "PID-reuse lease re
 waitFor(() => !fs.existsSync(staleRoot), "PID-reuse recovery lease cleanup");
 
 // After import, the durable DB row—not a replaceable file—is authoritative for
-// routing and notification intent. Mutating the on-disk duplicate is rejected
-// and cannot reroute or wake the message.
+// routing. Mutating the on-disk duplicate is rejected and cannot reroute.
+// Old notify_receiver=false still wakes the original target.
 seed("msg-immutable-quiet", { target: "grok-review", notify: false });
 const immutablePath = path.join(inbox, "msg-immutable-quiet.json");
 const mutated = JSON.parse(fs.readFileSync(immutablePath, "utf8"));
@@ -403,14 +401,20 @@ mutated.notify_receiver = true;
 mutated.metadata.target_bot_id = "codex-primary";
 mutated.metadata.notify_receiver = true;
 fs.writeFileSync(immutablePath, `${JSON.stringify(mutated)}\n`, { mode: 0o600 });
-const beforeImmutable = argvLines().length;
-assert.equal(request().targets.length, 0);
-assert.equal(argvLines().length, beforeImmutable);
-assert.equal(stateOf("msg-immutable-quiet"), "received");
+const beforeImmutableCodex = argvLines().filter(({ target }) => target === "codex-primary").length;
+const immutable = request();
+assert.deepEqual(immutable.targets.map(({ target_bot_id }) => target_bot_id), ["grok-review"]);
+waitFor(() => stateOf("msg-immutable-quiet") === "acknowledged", "old quiet envelope still wakes original target");
+assert.equal(
+  argvLines().filter(({ target }) => target === "codex-primary").length,
+  beforeImmutableCodex,
+  "mutated on-disk target must not reroute the durable row",
+);
 assert.match(
   fs.readFileSync(path.join(audit, "message-receiver-ingest.jsonl"), "utf8"),
   /duplicate message ID disagrees with the durable canonical envelope/,
 );
+waitFor(() => !fs.existsSync(targetLeaseRoot("grok-review")), "immutable-quiet Grok lease cleanup");
 
 // Unknown targets are recorded as routing failures without falling through to a default bot.
 seed("msg-unknown", { target: "unconfigured-bot" });
