@@ -751,6 +751,10 @@ function recordRouteSuccess(host) {
 
 function sshClientArgs() {
   const args = [];
+  // HGS supplies every security-relevant SSH setting explicitly. Ignore host
+  // and user SSH config so an unrelated or malformed machine-wide include
+  // cannot disable the private message/file link.
+  if (config.surface_profile === "message-files") args.push("-F", "/dev/null");
   if (config.peer.ssh_identity) args.push("-i", config.peer.ssh_identity);
   const connectSeconds = Math.max(1, Math.ceil(config.link.connect_timeout_ms / 1000));
   args.push(

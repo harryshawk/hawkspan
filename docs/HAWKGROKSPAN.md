@@ -37,6 +37,10 @@ Use on both nodes:
   exact receive-directory checks, artifact digesting, and a transport probe;
 - one dedicated `known_hosts` file populated from an independently verified
   host key;
+- HGS ignores user and machine-wide OpenSSH client configuration and supplies
+  its identity, pinned host file, proxy, timeouts, and keepalive settings
+  explicitly; an unrelated broken `/etc/ssh/ssh_config.d` include must not
+  take the message/file link down;
 - remote inbox, artifact, and audit paths under the peer's
   `~/.hawkgrokspan` directory;
 - a distinct MCP server name, `hawkgrokspan`.

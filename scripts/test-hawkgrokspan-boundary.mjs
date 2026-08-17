@@ -276,6 +276,7 @@ assert.match(rejectedManifest.result.structuredContent.artifacts[0].error, /file
 
 const transport = fs.readFileSync(transportLog, "utf8");
 for (const expected of [
+  "-F /dev/null",
   `-i ${identity}`,
   "-o IdentitiesOnly=yes",
   "-o StrictHostKeyChecking=yes",
