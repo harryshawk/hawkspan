@@ -214,7 +214,14 @@ lease, timeout, and TERM/KILL escalation prevent a hung receiver from retaining
 the task writer indefinitely.
 Every caller-sent coordination message includes an exact `target_thread_id` and
 immutable wake intent. Pure machine-protocol acknowledgement envelopes remain
-silent. When several messages should be read before a reply, say so in their
+silent, as do the internal tombstones created by `cancel_message`. Cancelling an
+unacknowledged outbound message durably stops its queued retries and future
+wakes; the peer tombstone prevents a delayed or replayed original envelope from
+reviving it. A peer that already acknowledged the original reports `too_late`,
+and a peer with an active receiver lease reports `in_flight` rather than
+claiming recall. Repeating the same cancellation reuses its original durable
+cancellation identity.
+When several messages should be read before a reply, say so in their
 message bodies (for example, “Sending 4 messages; wait for #4”) instead of
 suppressing delivery or wake.
 A delivered wake-requested message remains durably `wake_pending` until its

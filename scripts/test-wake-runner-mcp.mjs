@@ -102,7 +102,7 @@ const acknowledgement = db.prepare(`
 `).get(messageId);
 assert.equal(acknowledgement.kind, "acknowledgement");
 assert.equal(acknowledgement.correlation_id, messageId);
-assert.equal(acknowledgement.wake_requested, 1);
+assert.equal(acknowledgement.wake_requested, 0);
 db.close();
 
 fs.rmSync(root, { recursive: true, force: true });

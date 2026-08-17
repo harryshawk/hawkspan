@@ -441,6 +441,10 @@ export async function runWake(leasePath, token) {
       result = { status: "already_acknowledged", acknowledged: true };
       return;
     }
+    if (imported.state === "cancelled") {
+      result = { status: "cancelled", acknowledged: false, cancelled: true };
+      return;
+    }
 
     if (request.target_thread_id) {
       let handoff;

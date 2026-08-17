@@ -311,6 +311,9 @@ assert.equal(
   Object.hasOwn(listedByName.get("flush_outbox").inputSchema.properties, "wake"),
   false,
 );
+assert.equal(listedByName.get("cancel_message")?.annotations?.readOnlyHint, false);
+assert.equal(listedByName.get("cancel_message")?.annotations?.destructiveHint, true);
+assert.equal(listedByName.get("cancel_message")?.annotations?.idempotentHint, true);
 for (const routineIpcTool of [
   "send_message",
   "retry_message",
@@ -339,6 +342,7 @@ for (const required of [
   "peer_call_tool",
   "send_message",
   "retry_message",
+  "cancel_message",
   "wake_peer_thread",
   "receive_messages",
   "list_messages",

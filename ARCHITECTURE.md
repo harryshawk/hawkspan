@@ -22,13 +22,23 @@ The background agent retries queued work. A temporary disconnect, sleep,
 screen lock, or stopped SSH service therefore delays delivery without losing
 the instruction or creating a duplicate.
 
-Peer wakeups are not sent for machine-protocol acknowledgement envelopes. Each
-caller-sent coordination message names one exact target task and persists
-immutable wake intent in both SQLite and its envelope. Retries always preserve
-and attempt that wake; callers cannot suppress it.
+Peer wakeups are not sent for machine-protocol acknowledgement or cancellation
+envelopes. Each caller-sent coordination message names one exact target task
+and persists immutable wake intent in both SQLite and its envelope. Retries
+always preserve and attempt that wake; callers cannot suppress it.
 A successfully delivered wake-requested message enters `wake_pending`, and its
 durable queue item is deferred until the sender ingests the application
 acknowledgement. Wake-only retries never rsync or recreate that envelope.
+A sender can cancel an unacknowledged outbound message by creating one correlated
+silent cancellation envelope, transitioning the original message to
+`cancelled`, and cancelling every pending generic or automatic queue reference
+to that message in the same SQLite transaction. Retry, flush, queue-worker, and
+wake-runner paths all treat `cancelled` as terminal. The cancellation envelope
+is also a peer tombstone: if it arrives before a delayed original, the original
+is imported directly as `cancelled`. A previously acknowledged original returns
+`too_late`; a live receiver lease returns `in_flight` and remains authoritative
+so HawkSpan never reports an unproved recall. Repeated requests reuse the first
+cancellation envelope and its correlated receipt.
 A token-fenced per-task remote lease serializes wakeups. The bounded runner
 reports `STARTED`, `BUSY`, or `FAILED`, terminates a hung process group after its
 deadline, and only its current token can remove the lease.

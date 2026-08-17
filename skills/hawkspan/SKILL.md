@@ -21,6 +21,11 @@ Use this skill whenever work must cross between the owner's M2 and M4 Macs.
    transport and never classify a message itself as process control.
    If delivery fails because the peer is offline, retain the immutable message
    and use `retry_message`; do not create a replacement message.
+   If an unacknowledged outbound message must be withdrawn, use
+   `cancel_message` with its exact durable message ID. Treat `peer_status` as
+   authoritative: `applied` confirms the peer tombstone, while `too_late` or
+   `in_flight` means recall was not proved. Repeating cancellation must reuse
+   the original cancellation identity.
 3. Use `run_command` for broad routine control on either trusted Mac. Invoke it
    on the paired Mac through `peer_call_tool`. Routine file work, status,
    configuration, logs, packaging, and maintenance do not need an artificial

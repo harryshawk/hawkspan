@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+- Added idempotent durable message cancellation. Cancelling an unacknowledged
+  outbound message stops its queued retries and wakes, sends a silent peer
+  tombstone that blocks replay, and reports acknowledged or active-handoff
+  messages as `too_late` or `in_flight` instead of claiming recall.
 - Require every caller-sent coordination message to name and wake an exact
-  target task; only machine-protocol acknowledgement envelopes remain silent.
+  target task; only machine-protocol acknowledgement and cancellation
+  envelopes remain silent.
 - Kept delivered wake-requested messages durably wake-pending across sender
   restarts, retrying the wake without another rsync until acknowledgement.
 - Added a bounded, token-fenced peer wake runner with distinct started/busy/

@@ -18,6 +18,7 @@
     "defaultPrompt": [
       "Show link, message, artifact, and job status.",
       "Send an acknowledged message to the other Mac.",
+      "Cancel an unacknowledged durable message by its message ID.",
       "Package and transfer a verified artifact."
     ]
   },
