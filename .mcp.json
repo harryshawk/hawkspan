@@ -3,7 +3,7 @@
     "hawkspan": {
       "command": "node",
       "args": [
-        "./scripts/mcp-server.mjs"
+        "./scripts/plugin-mcp-launcher.mjs"
       ],
       "cwd": "."
     }
