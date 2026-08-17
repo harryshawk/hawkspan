@@ -20,7 +20,7 @@
         "command": "/home/GROK_VM_USER/.grok/downloads/grok-linux-x86_64",
         "workdir": "/home/GROK_VM_USER/HawkGrokSpan/Receiver/grok-primary",
         "session_id": "20000000-0000-0000-0000-000000000001",
-        "sandbox": "workspace",
+        "sandbox": "hawkgrokspan",
         "maximum_runtime_seconds": 600,
         "maximum_turns": 10
       },
@@ -29,7 +29,7 @@
         "command": "/home/GROK_VM_USER/.grok/downloads/grok-linux-x86_64",
         "workdir": "/home/GROK_VM_USER/HawkGrokSpan/Receiver/grok-review",
         "session_id": "20000000-0000-0000-0000-000000000002",
-        "sandbox": "workspace",
+        "sandbox": "hawkgrokspan",
         "maximum_runtime_seconds": 600,
         "maximum_turns": 10
       }

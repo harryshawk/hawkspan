@@ -142,8 +142,8 @@ function validateTarget(targetId) {
   if (target.adapter === "codex" && target.sandbox !== "workspace-write") {
     fail(`Codex target ${targetId} requires the workspace-write sandbox`);
   }
-  if (target.adapter === "grok" && target.sandbox !== "workspace") {
-    fail(`Grok target ${targetId} requires the workspace sandbox`);
+  if (target.adapter === "grok" && !new Set(["workspace", "hawkgrokspan"]).has(target.sandbox)) {
+    fail(`Grok target ${targetId} requires the workspace or hawkgrokspan sandbox`);
   }
   const maximumRuntimeSeconds = Number(target.maximum_runtime_seconds);
   if (!Number.isSafeInteger(maximumRuntimeSeconds) || maximumRuntimeSeconds < 30 ||

@@ -166,7 +166,18 @@ or GitHub credentials.
 7. Customize `config/hawkgrokspan-grok-vm.example.json`; create every dedicated
    receiver working directory, replace every example UUID with an exact persisted
    Grok session UUID, and do not enable any disabled feature or broaden the
-   artifact root.
+   artifact root. Create `.grok/sandbox.toml` in the dedicated workspace with
+   the following profile so the sandboxed Grok session can write only HGS state:
+
+   ```toml
+   [profiles.hawkgrokspan]
+   extends = "workspace"
+   read_write = ["/home/GROK_VM_USER/.hawkgrokspan"]
+   ```
+
+   Set each Grok receiver target's `sandbox` to `hawkgrokspan`. The built-in
+   `workspace` profile cannot open the HGS SQLite state outside the workspace,
+   while `off` grants substantially broader machine access and is not accepted.
 8. Activate with `HAWKSPAN_STATE_DIR=~/.hawkgrokspan`,
    `HAWKSPAN_STABLE_RELEASE_ROOT=~/.local/share/hawkgrokspan/current`, and an
    isolated `HAWKSPAN_LAUNCH_AGENTS_DIR`; do not overwrite normal HawkSpan
