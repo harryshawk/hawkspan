@@ -200,8 +200,9 @@ sha256sum /usr/bin/tailscale "$HOME/HawkGrokSpan/bin/tailscale"
 ```
 
 Keep `peer.transport.socket` set to the persistent userspace socket. After a
-Grok Computer Update, packages, host keys, IPs, and processes may change even
-when home-directory files persist. The reviewed recovery sequence is: restore
+Grok Computer Update, packages, host keys, tailnet identity, IPs, and processes
+may change even when home-directory files persist. The reviewed recovery
+sequence is: restore
 OpenSSH and `rsync` if missing, start `sshd`, start the userspace daemon, reapply
 the private TCP forwarder, verify the new SSH host key with the owner, refresh
 the owner-controlled Tailscale copy and digest if the package changed, then
@@ -209,6 +210,12 @@ restart HGS and verify its exact release and session. Keep the recovery command
 owner-invoked unless the hosting product provides a reviewed persistent service
 facility. Extra Awake must remain disabled during message-wake acceptance and
 is never part of normal delivery or recovery.
+
+If Tailscale creates a replacement device identity, stop HGS delivery. Have the
+owner authorize it, record its new MagicDNS name and 100.x address, replace the
+old address in both TCP-22 ACL grants, preview and save the policy, update
+`peer.primary_host` and its exact `known_hosts` token when needed, and repeat
+both directional transport probes. Do not leave an allow-all compatibility rule.
 
 ### Dedicated SSH key installation
 
@@ -218,7 +225,7 @@ release, state, and public-key placeholders; do not use a shell alias or a
 relative path:
 
 ```text
-restrict,command="/usr/bin/env node /ABSOLUTE/HGS/CURRENT/scripts/hawkgrokspan-ssh-gateway.mjs --state-root /ABSOLUTE/HOME/.hawkgrokspan" ssh-ed25519 PEER_PUBLIC_KEY HGS_PEER_LABEL
+restrict,command="/ABSOLUTE/PERSISTENT/NODE /ABSOLUTE/HGS/CURRENT/scripts/hawkgrokspan-ssh-gateway.mjs --state-root /ABSOLUTE/HOME/.hawkgrokspan" ssh-ed25519 PEER_PUBLIC_KEY HGS_PEER_LABEL
 ```
 
 `restrict` disables forwarding, PTY, agent, X11, and user startup behavior.
@@ -233,6 +240,8 @@ name, or the 100.x address when configuration uses the address. A Grok Computer
 Update may replace the VM host key. If it does, stop delivery, independently
 verify the new fingerprint, replace only the stale VM entry on M2, and repeat
 the strict-host-key transport probe. Never weaken `StrictHostKeyChecking=yes`.
+Before acceptance, resolve the configured `peer.primary_host` from the opposite
+node and record the result. A console label alone is not resolution evidence.
 
 ## Why current Grok Build helps
 
@@ -249,11 +258,47 @@ Install the official Linux CLI from `https://x.ai/cli/install.sh`. The current
 installer places a convenience symlink at `~/.grok/bin/grok`; resolve it and
 configure the owner-controlled regular executable under `~/.grok/downloads`,
 not the symlink. A Grok Bot application agent UUID is not a Grok
-CLI session UUID. Authenticate a headless VM with `grok login --device-auth`,
-create a dedicated persisted CLI session, and prove `--resume` against that exact
-session before adding it to `message_receiver.targets`. Browser-login
-credentials expire periodically. HawkGrokSpan never transports or stores Grok
-or GitHub credentials.
+CLI session UUID. Authenticate the headless VM with the installed CLI's `login`
+subcommand, create a dedicated persisted CLI session, and prove `--resume`
+against that exact session before adding it to `message_receiver.targets`.
+Check `grok login --help` on the installed version rather than assuming a flag
+from another release. Browser-login credentials expire periodically.
+HawkGrokSpan never transports or stores Grok or GitHub credentials.
+
+### Grok CLI login and recovery
+
+Run login from the same resolved regular executable recorded in the receiver
+configuration, for example:
+
+```sh
+GROK_REAL="$HOME/.grok/downloads/grok-linux-x86_64"
+"$GROK_REAL" login
+```
+
+The CLI prints or opens a one-time xAI device authorization. The owner must
+complete that browser flow and any 2FA personally. Never copy a password, 2FA
+code, browser cookie, or resulting credential into HawkGrokSpan, a handoff
+packet, or an HGS message.
+
+Treat these outcomes differently:
+
+- **Invalid or expired device code:** stop the waiting CLI with `Ctrl-C`, run
+  the same `login` command again, and use only the newly issued code.
+- **Browser remains on a post-password spinner:** this is not proof of HGS or
+  Tailscale failure. Wait briefly once. If it remains stalled, cancel the CLI,
+  close the authorization page, and retry later rather than leaving a possible
+  2FA prompt unattended.
+- **Grok Bot or a CLI/session resume reports its model provider is overloaded:**
+  do not infer that HGS delivery failed. Authentication, model availability,
+  and HGS transport are separate checks. Record which one failed.
+- **Authorization succeeds:** return to the terminal and require the `login`
+  process to exit successfully. Then prove the exact configured session resumes
+  and lists all thirteen HGS tools before starting the receiver.
+
+Do not start live message acceptance while a login command is still waiting,
+while a browser authorization page is unresolved, or while the configured
+session cannot resume. A clean cancellation leaves the installed HGS release,
+messages, and files unchanged; it only postpones bot processing.
 
 ## Grok VM handoff sequence
 
@@ -315,6 +360,9 @@ or GitHub credentials.
    client copy, host-key pins, exact HGS revision, and exact Grok session before
    starting the receiver. It must log each bounded step and stop nonzero on the
    first failure so partial recovery cannot masquerade as ready.
+   This release documents the required behavior but does not ship a complete VM
+   recovery command. Until one is reviewed and supplied, perform and record each
+   step explicitly; do not claim unattended post-update recovery.
 10. Perform a real Grok Computer Update and run that recovery sequence. Prove
     any new VM host key was explicitly re-verified and re-pinned, then repeat
     bidirectional transport and message acceptance with Extra Awake off.
@@ -322,9 +370,26 @@ or GitHub credentials.
     revision on both nodes; link status; M2-to-VM targeted message and
     durable acknowledgement, VM-to-M2 targeted message and acknowledgement, a
     second target on each configured multi-bot side, one deliberately slow
-    target while another completes, acknowledgement/no-notification non-wake,
+    target while another completes, acknowledgement import without a bot launch,
     one harmless text file each direction, exact SHA-256 comparison, and one
     outside-root transfer rejection, plus an arbitrary SSH-command rejection.
+
+### Exact lockstep evidence
+
+Run the release audit locally on each node with that node's HGS state and config
+and its exact persistent Node executable:
+
+```sh
+HAWKSPAN_STATE_DIR="$HOME/.hawkgrokspan" \
+HAWKSPAN_CONFIG="$HOME/.hawkgrokspan/config.json" \
+/ABSOLUTE/PERSISTENT/NODE \
+  "$HOME/.local/share/hawkgrokspan/current/scripts/audit-release-authority.mjs"
+```
+
+For both nodes, retain the source commit and tree, package provenance,
+`installed-revision.json` revision, resolved `current` link, live receiver PID,
+script path, and lease revision. The receipt identifies the revision; obtain the
+tree from source/package provenance. Any mismatch blocks acceptance.
 
 ## Acceptance evidence
 
