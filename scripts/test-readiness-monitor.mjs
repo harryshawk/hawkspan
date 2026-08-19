@@ -7,12 +7,12 @@ const config = {
   peer: {
     primary_enabled: true,
     primary_label: "Thunderbolt",
-    primary_local_host: "10.44.45.2",
-    primary_host: "10.44.45.3",
+    primary_local_host: "192.0.2.10",
+    primary_host: "192.0.2.11",
     fallback_enabled: false,
     fallback_label: "Ethernet",
-    fallback_local_host: "10.44.44.2",
-    fallback_host: "10.44.44.3",
+    fallback_local_host: "192.0.2.12",
+    fallback_host: "192.0.2.13",
   },
   readiness: {
     ssh_login_timeout_ms: 7000,
@@ -28,15 +28,15 @@ const config = {
 assert.deepEqual(__test.routeDefinitions(config), [{
   role: "primary",
   label: "Thunderbolt",
-  local_host: "10.44.45.2",
-  host: "10.44.45.3",
+  local_host: "192.0.2.10",
+  host: "192.0.2.11",
 }]);
 
 assert.equal(__test.readinessConfig(config).ssh_login_timeout_ms, 7000);
 assert.deepEqual(__test.readinessConfig(config).retry_delays_ms, [1000, 2000]);
 assert.equal(__test.readinessConfig({}).total_timeout_ms, __test.DEFAULTS.total_timeout_ms);
 assert.equal(__test.shellQuote("a'b"), "'a'\"'\"'b'");
-const sshArgs = __test.sshArgs(config, "10.44.45.3", "true");
+const sshArgs = __test.sshArgs(config, "192.0.2.11", "true");
 assert(sshArgs.includes("ConnectTimeout=9"));
 assert(sshArgs.includes("ServerAliveInterval=11"));
 assert(sshArgs.includes("ServerAliveCountMax=4"));
