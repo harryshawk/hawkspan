@@ -46,7 +46,7 @@ const baseConfig = {
   peer: {
     node_id: "wake-test-worker",
     user: "peeruser",
-    thread_id: "01a008f3-825f-7e71-9e4c-eb29af26d48d",
+    thread_id: "01900000-0000-7000-8000-000000000001",
     codex_command: "/Applications/ChatGPT.app/Contents/Resources/codex",
     codex_workdir: "/Users/peeruser/Documents/Codex/HawkSpan-Wake-Receiver",
     codex_sandbox: "workspace-write",
