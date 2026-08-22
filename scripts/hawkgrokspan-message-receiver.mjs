@@ -385,7 +385,9 @@ function matchesLeaseProcess(lease, { mode, targetId = null } = {}) {
   if (!lease || !pidAlive(Number(lease.pid))) return false;
   const observed = observedProcess(lease.pid);
   if (!observed || !observed.includes(String(lease.script_path || "")) ||
-      !observed.includes(`--${mode}`) || !observed.includes(`--nonce ${lease.nonce}`)) return false;
+      !observed.includes(`--${mode}`) ||
+      !observed.includes(`--state-root ${stateRoot}`)) return false;
+  if (mode !== "service" && !observed.includes(`--nonce ${lease.nonce}`)) return false;
   return !targetId || observed.includes(`--target ${targetId}`);
 }
 
@@ -555,7 +557,9 @@ function quarantineStoppedSupervisor() {
   if (lease && pidAlive(Number(lease.pid))) {
     const ageMs = Date.now() - Number(lease.started_at_ms || 0);
     if (lease.initializing === true && ageMs <= 10000) return false;
-    const verified = matchesLeaseProcess(lease, { mode: "supervisor" });
+    const verified = matchesLeaseProcess(lease, {
+      mode: lease.managed_service === true ? "service" : "supervisor",
+    });
     const currentRelease = path.resolve(String(lease.script_path || "")) === scriptPath &&
       lease.revision === receiverRevision;
     if (verified && currentRelease) return false;

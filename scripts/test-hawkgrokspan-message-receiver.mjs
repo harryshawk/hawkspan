@@ -504,6 +504,16 @@ waitFor(() => {
   const lease = JSON.parse(fs.readFileSync(supervisorLeasePath, "utf8"));
   return lease.managed_service === true && Number(lease.pid) === managed.pid;
 }, "managed receiver service lease");
+const ensureManagedResult = spawnSync(process.execPath, [receiver, "--state-root", state, "--ensure-supervisor"], {
+  encoding: "utf8",
+  timeout: 5000,
+});
+assert.equal(ensureManagedResult.status, 0, ensureManagedResult.stderr);
+const ensuredManaged = JSON.parse(ensureManagedResult.stdout);
+assert.equal(ensuredManaged.supervisor.started, false);
+assert.equal(ensuredManaged.supervisor.already_running, true);
+assert.equal(Number(ensuredManaged.supervisor.pid), managed.pid);
+assert.equal(JSON.parse(fs.readFileSync(supervisorLeasePath, "utf8")).managed_service, true);
 process.kill(Number(managed.pid), "SIGTERM");
 waitFor(() => !fs.existsSync(path.dirname(supervisorLeasePath)), "managed receiver service cleanup");
 
