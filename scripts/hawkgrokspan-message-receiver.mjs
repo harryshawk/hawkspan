@@ -573,9 +573,22 @@ function reconcileOnce() {
 
 const supervisorLeaseRoot = path.join(audit, "message-receiver-supervisor.lock");
 const supervisorLeasePath = path.join(supervisorLeaseRoot, "lease.json");
+const managedServiceStatusPath = path.join(audit, "message-receiver-service.status.json");
 
 function readSupervisorLease() {
   try { return JSON.parse(fs.readFileSync(supervisorLeasePath, "utf8")); } catch { return null; }
+}
+
+function recentManagedService() {
+  try {
+    const status = JSON.parse(fs.readFileSync(managedServiceStatusPath, "utf8"));
+    if (status.revision === receiverRevision &&
+        Number.isSafeInteger(Number(status.pid)) && Number(status.pid) > 1 &&
+        Date.now() - Number(status.heartbeat_at_ms || 0) <= 5000) {
+      return Number(status.pid);
+    }
+  } catch {}
+  return null;
 }
 
 function quarantineStoppedSupervisor() {
@@ -617,7 +630,7 @@ function quarantineStoppedSupervisor() {
 function ensureSupervisorProcess() {
   // A managed service is the receiver authority even if a concurrent or stale
   // writer displaced its lease. MCP startup must never create a second receiver.
-  const managedServicePid = findManagedService();
+  const managedServicePid = recentManagedService() || findManagedService();
   if (managedServicePid) {
     return { started: false, already_running: true, pid: managedServicePid };
   }
@@ -690,11 +703,17 @@ function activeReleaseStillMatches() {
   }
 }
 
-async function runSupervisorLoop(nonce) {
+async function runSupervisorLoop(nonce, { managedService = false } = {}) {
   const cleanupSupervisor = () => {
     const current = readSupervisorLease();
     if (current?.nonce === nonce && Number(current.pid) === process.pid) {
       fs.rmSync(supervisorLeaseRoot, { recursive: true, force: true });
+    }
+    if (managedService) {
+      try {
+        const status = JSON.parse(fs.readFileSync(managedServiceStatusPath, "utf8"));
+        if (Number(status.pid) === process.pid) fs.rmSync(managedServiceStatusPath, { force: true });
+      } catch {}
     }
   };
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
@@ -706,6 +725,16 @@ async function runSupervisorLoop(nonce) {
   try {
     let nextReconcileAt = 0;
     while (activeReleaseStillMatches()) {
+      if (managedService) {
+        atomicWrite(managedServiceStatusPath, `${JSON.stringify({
+          schema_version: 1,
+          pid: process.pid,
+          revision: receiverRevision,
+          script_path: scriptPath,
+          heartbeat_at_ms: Date.now(),
+          heartbeat_at: new Date().toISOString(),
+        }, null, 2)}\n`);
+      }
       if (Date.now() >= nextReconcileAt) {
         try {
           const result = reconcileOnce();
@@ -763,7 +792,7 @@ if (service) {
     revision: receiverRevision,
     reconcile_interval_seconds: reconcileIntervalSeconds,
   }, null, 2)}\n`);
-  await runSupervisorLoop(nonce);
+  await runSupervisorLoop(nonce, { managedService: true });
   process.exit(0);
 }
 

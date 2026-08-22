@@ -506,6 +506,7 @@ waitFor(
 );
 
 const supervisorLeasePath = path.join(audit, "message-receiver-supervisor.lock", "lease.json");
+const managedServiceStatusPath = path.join(audit, "message-receiver-service.status.json");
 const supervisorLease = JSON.parse(fs.readFileSync(supervisorLeasePath, "utf8"));
 process.kill(Number(supervisorLease.pid), "SIGTERM");
 waitFor(() => !fs.existsSync(path.dirname(supervisorLeasePath)), "supervisor cleanup");
@@ -521,6 +522,7 @@ waitFor(() => {
   const lease = JSON.parse(fs.readFileSync(supervisorLeasePath, "utf8"));
   return lease.managed_service === true && Number(lease.pid) === managed.pid;
 }, "managed receiver service lease");
+waitFor(() => fs.existsSync(managedServiceStatusPath), "managed receiver service heartbeat");
 const ensureManagedResult = spawnSync(process.execPath, [receiver, "--state-root", state, "--ensure-supervisor"], {
   encoding: "utf8",
   timeout: 5000,
