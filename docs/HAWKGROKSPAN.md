@@ -423,8 +423,11 @@ messages, and files unchanged; it only postpones bot processing.
    receiver passes exact per-tool allow rules for the same thirteen HGS
    message/file tools. For coding/file assignments it also derives exact
    `Write(ROOT/**)` and `Edit(ROOT/**)` rules only from the configured
-   `transfer.allowed_artifact_roots`; unmatched writes remain denied. It does
-   not enable Grok's broad always-approve mode.
+   `transfer.allowed_artifact_roots`, plus `Bash(node ROOT/*)` for a single-file
+   Node self-test in that root. The receiver prompt requires Write/Edit for file
+   creation and forbids terminal redirection or command chaining. Unmatched
+   writes and terminal commands remain denied. It does not enable Grok's broad
+   always-approve mode.
    Without these narrow rules, Grok cancels the first `receive_messages` call
    and a delivered message remains unread.
 8. Install the official Grok CLI and authenticate with the documented headless

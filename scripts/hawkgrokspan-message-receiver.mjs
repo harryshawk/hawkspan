@@ -893,6 +893,7 @@ function receiverPrompt(messageIds) {
     "Receiving the envelope is not completion. Read and carry out each envelope body, send any requested operational reply with hawkgrokspan__send_message, then call hawkgrokspan__acknowledge_message for that message only after its work is complete.",
     `Process each delivered message ID once. Before ending, call hawkgrokspan__receive_messages again with {"limit":50,"target_bot_id":"${workerTarget}"} and continue until no unread routed envelope remains.`,
     `Operational replies go to the peer agent endpoint through HawkGrokSpan. In hawkgrokspan__send_message, recipient identifies the peer node; target_bot_id must be the peer target named by the envelope (for example m2-primary), never this local target ${workerTarget}. Harry is the human owner and should be contacted only for a new decision, authorization, or physical action.`,
+    "For requested returned files, use the built-in Write or Edit tool directly; do not create files with terminal redirection. A requested Node self-test may run only as `node ABSOLUTE_FILE_UNDER_THE_CONFIGURED_EXCHANGE_ROOT`; do not combine it with another shell command.",
     "Do not enable or invoke shell control, peer commands, training, Funnel, Tailscale SSH, exit nodes, subnet routes, or broader access. End without leaving a synthetic receiver-only goal active.",
   ].join(" ");
 }
@@ -929,6 +930,7 @@ function commandFor(prompt) {
   const artifactWritePermissions = artifactWriteRoots.flatMap((root) => [
     "--allow", `Write(${root}/**)`,
     "--allow", `Edit(${root}/**)`,
+    "--allow", `Bash(node ${root}/*)`,
   ]);
   return [target.command, [
     "-p", prompt,

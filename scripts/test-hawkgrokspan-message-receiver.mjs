@@ -289,6 +289,7 @@ assert.ok(grokInvocation.argv.includes("--resume"));
 assert.ok(grokInvocation.argv.includes("MCPTool(hawkgrokspan__receive_messages)"));
 assert.ok(grokInvocation.argv.includes(`Write(${artifacts}/**)`));
 assert.ok(grokInvocation.argv.includes(`Edit(${artifacts}/**)`));
+assert.ok(grokInvocation.argv.includes(`Bash(node ${artifacts}/*)`));
 assert.ok(grokInvocation.argv.includes("20000000-0000-0000-0000-000000000002"));
 const grokTools = grokInvocation.argv[grokInvocation.argv.indexOf("--tools") + 1];
 assert.match(grokTools, /hawkgrokspan__receive_messages/);
@@ -309,6 +310,7 @@ assert.match(grokInvocation.argv.join(" "), /Do not search for the tool and do n
 assert.match(grokInvocation.argv.join(" "), /Receiving the envelope is not completion/);
 assert.match(grokInvocation.argv.join(" "), /hawkgrokspan__acknowledge_message/);
 assert.match(grokInvocation.argv.join(" "), /until no unread routed envelope remains/);
+assert.match(grokInvocation.argv.join(" "), /use the built-in Write or Edit tool directly/);
 
 // Messages arriving during an active run coalesce behind one per-target lease.
 // Hold the mock explicitly instead of relying on a machine-speed delay.
