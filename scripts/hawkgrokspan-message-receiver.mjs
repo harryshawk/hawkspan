@@ -361,20 +361,25 @@ function retryQueuedRoutingFailureReports() {
   return started;
 }
 
-function installedRevision() {
+function installedAuthority() {
   try {
     const authority = JSON.parse(fs.readFileSync(path.join(stateRoot, "installed-revision.json"), "utf8"));
     if (path.resolve(authority.active_release_root) !== releaseRoot ||
         !/^[0-9a-f]{40}$/.test(authority.revision || "")) {
       fail("installed release authority does not match this receiver");
     }
-    return authority.revision;
+    return authority;
   } catch (error) {
     fail(`installed release authority is unavailable: ${error.message}`);
   }
 }
 
-const receiverRevision = installedRevision();
+const receiverAuthority = installedAuthority();
+const receiverRevision = receiverAuthority.revision;
+const stableScriptPath = path.join(
+  path.resolve(receiverAuthority.stable_release_root),
+  path.relative(releaseRoot, scriptPath),
+);
 
 function observedProcess(pid) {
   const result = spawnSync("ps", ["-ww", "-p", String(pid), "-o", "command="], { encoding: "utf8" });
@@ -384,7 +389,10 @@ function observedProcess(pid) {
 function matchesLeaseProcess(lease, { mode, targetId = null } = {}) {
   if (!lease || !pidAlive(Number(lease.pid))) return false;
   const observed = observedProcess(lease.pid);
-  if (!observed || !observed.includes(String(lease.script_path || "")) ||
+  const scriptMatches = observed && (
+    observed.includes(String(lease.script_path || "")) || observed.includes(stableScriptPath)
+  );
+  if (!scriptMatches ||
       !observed.includes(`--${mode}`) ||
       !observed.includes(`--state-root ${stateRoot}`)) return false;
   if (mode !== "service" && !observed.includes(`--nonce ${lease.nonce}`)) return false;

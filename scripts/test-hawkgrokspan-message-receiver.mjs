@@ -29,6 +29,9 @@ fs.writeFileSync(knownHosts, "peer ssh-ed25519 AAAATEST\n", { mode: 0o600 });
 fs.writeFileSync(path.join(bin, "rsync"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
 fs.writeFileSync(path.join(bin, "ssh"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
 process.env.PATH = `${bin}:${process.env.PATH}`;
+const stableReleaseRoot = path.join(root, "current");
+fs.symlinkSync(path.resolve(scripts, ".."), stableReleaseRoot);
+const stableReceiver = path.join(stableReleaseRoot, "scripts", "hawkgrokspan-message-receiver.mjs");
 
 const mockAgent = path.join(root, "mock-agent.mjs");
 fs.writeFileSync(mockAgent, `#!/usr/bin/env node
@@ -126,7 +129,7 @@ fs.writeFileSync(path.join(state, "installed-revision.json"), `${JSON.stringify(
   schema_version: 2,
   revision: "a".repeat(40),
   active_release_root: path.resolve(scripts, ".."),
-  stable_release_root: path.resolve(scripts, ".."),
+  stable_release_root: stableReleaseRoot,
 }, null, 2)}\n`, { mode: 0o600 });
 fs.writeFileSync(path.join(state, "hawkspan.env"), [
   `HAWKSPAN_ACTIVE_RELEASE_ROOT=${path.resolve(scripts, "..")}`,
@@ -509,7 +512,7 @@ waitFor(() => !fs.existsSync(path.dirname(supervisorLeasePath)), "supervisor cle
 
 // A managed foreground service acquires the same canonical supervisor lease,
 // survives independently of MCP, and cleans up on service-manager termination.
-const managed = spawn(process.execPath, [receiver, "--state-root", state, "--service"], {
+const managed = spawn(process.execPath, [stableReceiver, "--state-root", state, "--service"], {
   detached: true,
   stdio: "ignore",
 });
