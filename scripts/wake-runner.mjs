@@ -237,6 +237,7 @@ export function launchWake(rawRequest) {
       additionalProperties: false,
     });
     const leaseDurationMs = request.timeout_ms + request.termination_grace_ms + 35000;
+    const deadlineAt = new Date(Date.now() + leaseDurationMs).toISOString();
     writeJsonAtomic(path.join(request.lease_path, "owner.json"), {
       schema_version: 1,
       token,
@@ -246,7 +247,7 @@ export function launchWake(rawRequest) {
       pid: process.pid,
       state: "starting",
       started_at: new Date().toISOString(),
-      deadline_at: new Date(Date.now() + leaseDurationMs).toISOString(),
+      deadline_at: deadlineAt,
     });
 
     const logFd = fs.openSync(request.log_path, "a", 0o600);
@@ -269,7 +270,7 @@ export function launchWake(rawRequest) {
       pid: worker.pid,
       state: "running",
       started_at: new Date().toISOString(),
-      deadline_at: new Date(Date.now() + leaseDurationMs).toISOString(),
+      deadline_at: deadlineAt,
     });
     worker.unref();
     return responseMarker("started", {
@@ -278,6 +279,7 @@ export function launchWake(rawRequest) {
       pid: worker.pid,
       log_path: request.log_path,
       result_path: request.result_path,
+      deadline_at: deadlineAt,
       recovered_lease: recoveredLease,
     });
   } catch (error) {

@@ -1171,6 +1171,181 @@ function cancelMessage(args) {
   });
 }
 
+function latestWakeReceipt(messageId, receiverThreadId) {
+  const row = db.prepare(`
+    SELECT sequence,timestamp,details_json FROM audit_events
+    WHERE action='wake' AND object_type='thread' AND object_id=? AND result='started'
+      AND json_extract(details_json,'$.message_id')=?
+    ORDER BY sequence DESC LIMIT 1
+  `).get(receiverThreadId, messageId);
+  if (!row) return null;
+  let details;
+  try {
+    details = JSON.parse(row.details_json);
+  } catch {
+    return null;
+  }
+  const wakeId = String(details.wake_id || "");
+  const resultPath = String(details.result_path || "");
+  const deadlineAt = String(details.deadline_at || "");
+  const host = String(details.host || "");
+  const configuredHosts = new Set([
+    config.peer?.primary_host,
+    config.peer?.fallback_host,
+  ].filter(Boolean));
+  if (!wakeId || !path.posix.isAbsolute(resultPath) ||
+      path.posix.basename(resultPath) !== `${wakeId}.result.json` ||
+      !Number.isFinite(Date.parse(deadlineAt)) || !configuredHosts.has(host)) {
+    return null;
+  }
+  return {
+    wake_id: wakeId,
+    message_id: messageId,
+    host,
+    result_path: resultPath,
+    deadline_at: deadlineAt,
+    started_sequence: row.sequence,
+    started_at: row.timestamp,
+  };
+}
+
+function existingWakeReconciliation(receipt) {
+  const row = db.prepare(`
+    SELECT result,details_json FROM audit_events
+    WHERE action='wake_reconcile' AND object_type='message' AND object_id=?
+      AND json_extract(details_json,'$.wake_id')=?
+    ORDER BY sequence DESC LIMIT 1
+  `).get(receipt.message_id, receipt.wake_id);
+  if (!row) return null;
+  try {
+    return { result: row.result, details: JSON.parse(row.details_json) };
+  } catch {
+    return null;
+  }
+}
+
+function readRemoteWakeResult(receipt) {
+  const command = `if [ -f ${shellQuote(receipt.result_path)} ]; then ` +
+    `cat ${shellQuote(receipt.result_path)}; else exit 44; fi`;
+  const hosts = [receipt.host, ...peerCandidates()]
+    .filter((host, index, values) => host && values.indexOf(host) === index);
+  const attempts = [];
+  for (const host of hosts) {
+    const result = spawnSync("ssh", sshArgs(host, command), {
+      encoding: "utf8",
+      timeout: Math.max(15000, Number(config.link.connect_timeout_ms) + 5000),
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const attempt = {
+      host,
+      status: result.status,
+      error: result.error
+        ? String(result.error.message || result.error)
+        : result.stderr?.trim() || "",
+    };
+    attempts.push(attempt);
+    if (result.status === 44) {
+      recordRouteSuccess(host);
+      return { state: "pending", attempts };
+    }
+    if (result.error || result.status !== 0) {
+      recordRouteFailure(host);
+      continue;
+    }
+    recordRouteSuccess(host);
+    try {
+      const terminalResult = JSON.parse(result.stdout);
+      if (terminalResult?.schema_version !== 1 ||
+          terminalResult.wake_id !== receipt.wake_id ||
+          terminalResult.message_id !== receipt.message_id ||
+          typeof terminalResult.status !== "string" || !terminalResult.status ||
+          typeof terminalResult.acknowledged !== "boolean" ||
+          !Number.isFinite(Date.parse(String(terminalResult.completed_at || "")))) {
+        throw new Error("wake result identity or terminal fields do not match the STARTED receipt");
+      }
+      return { state: "terminal", terminal_result: terminalResult, attempts };
+    } catch (error) {
+      return {
+        state: "invalid",
+        error: String(error?.message || error),
+        attempts,
+      };
+    }
+  }
+  return { state: "unavailable", attempts };
+}
+
+function terminalWakeResponse(receipt, terminalResult, attempts = []) {
+  const acknowledged = terminalResult.acknowledged === true;
+  const beforeDeadline = Date.now() < Date.parse(receipt.deadline_at);
+  return {
+    ok: acknowledged,
+    skipped: true,
+    deferred: !acknowledged && beforeDeadline,
+    reconciled: true,
+    acknowledged,
+    ...(acknowledged ? {} : { error: `prior wake ended with status ${terminalResult.status}` }),
+    host: receipt.host,
+    wake_id: receipt.wake_id,
+    result_path: receipt.result_path,
+    deadline_at: receipt.deadline_at,
+    terminal_result: terminalResult,
+    attempts,
+  };
+}
+
+function reconcileWakeBeforeLaunch(messageId, receiverThreadId) {
+  if (!messageId) return null;
+  const receipt = latestWakeReceipt(messageId, receiverThreadId);
+  if (!receipt) return null;
+  const existing = existingWakeReconciliation(receipt);
+  if (existing?.result === "terminal" && existing.details?.terminal_result) {
+    const terminalResult = existing.details.terminal_result;
+    if (terminalResult.acknowledged === true || Date.now() < Date.parse(receipt.deadline_at)) {
+      return terminalWakeResponse(receipt, terminalResult);
+    }
+    return null;
+  }
+  if (existing?.result === "deadline_expired") return null;
+
+  const collected = readRemoteWakeResult(receipt);
+  if (collected.state === "terminal") {
+    audit("wake_reconcile", "message", messageId, "terminal", {
+      ...receipt,
+      terminal_result: collected.terminal_result,
+      attempts: collected.attempts,
+    });
+    return terminalWakeResponse(receipt, collected.terminal_result, collected.attempts);
+  }
+
+  if (Date.now() < Date.parse(receipt.deadline_at)) {
+    return {
+      ok: false,
+      skipped: true,
+      deferred: true,
+      reconciled: false,
+      error: collected.state === "pending"
+        ? "prior wake is still within its deadline"
+        : "prior wake result is unavailable within its deadline",
+      host: receipt.host,
+      wake_id: receipt.wake_id,
+      result_path: receipt.result_path,
+      deadline_at: receipt.deadline_at,
+      result_state: collected.state,
+      ...(collected.error ? { result_error: collected.error } : {}),
+      attempts: collected.attempts,
+    };
+  }
+
+  audit("wake_reconcile", "message", messageId, "deadline_expired", {
+    ...receipt,
+    result_state: collected.state,
+    ...(collected.error ? { result_error: collected.error } : {}),
+    attempts: collected.attempts,
+  });
+  return null;
+}
+
 function wakePeerThread(args) {
   if (!config.peer?.allow_remote_wake) {
     return {
@@ -1236,6 +1411,8 @@ function wakePeerThread(args) {
       attempts: [],
     };
   }
+  const priorWake = reconcileWakeBeforeLaunch(args.message_id, receiverThreadId);
+  if (priorWake) return priorWake;
   const codexCommand = config.peer.codex_command || "codex";
   const remoteNode = config.peer.remote_node || "node";
   let peerRelease = null;
@@ -1354,12 +1531,30 @@ function wakePeerThread(args) {
       });
       if (result.status === 0 && marker?.status === "started") {
         recordRouteSuccess(host);
+        const deadlineAt = Number.isFinite(Date.parse(String(marker.deadline_at || "")))
+          ? marker.deadline_at
+          : null;
+        if (!deadlineAt) {
+          const error = "wake runner STARTED response omitted its deadline";
+          audit("wake", "thread", receiverThreadId, "failed", {
+            host,
+            peer_revision: peerRelease.revision,
+            wake_id: wakeId,
+            result_path: resultPath,
+            message_id: args.message_id || null,
+            target_thread_id: targetThreadId,
+            error,
+            marker,
+          });
+          return { ok: false, error, host, wake_id: wakeId, attempts };
+        }
         audit("wake", "thread", receiverThreadId, "started", {
           host,
           peer_revision: peerRelease.revision,
           wake_id: wakeId,
           log_path: logPath,
           result_path: resultPath,
+          deadline_at: deadlineAt,
           message_id: args.message_id || null,
           target_thread_id: targetThreadId,
           runner_pid: marker.pid || null,
@@ -1370,6 +1565,7 @@ function wakePeerThread(args) {
           wake_id: wakeId,
           log_path: logPath,
           result_path: resultPath,
+          deadline_at: deadlineAt,
           target_thread_id: targetThreadId,
           attempts,
         };
@@ -3907,15 +4103,23 @@ async function superviseQueue(args) {
         clearInterval(heartbeat);
       }
       if (queue.adapter === "message" && result?.wake_pending === true) {
+        const pollDelayMs = Math.max(
+          1000,
+          Number(config.queue_supervisor.poll_interval_ms || 120000),
+        );
+        const wakeDeadlineMs = Date.parse(String(result?.wake?.deadline_at || ""));
+        const hasWakeDeadline = Number.isFinite(wakeDeadlineMs) &&
+          !(result?.wake?.reconciled === true && result?.wake?.acknowledged === true)
+          && wakeDeadlineMs > Date.now();
+        const deferDelayMs = hasWakeDeadline
+          ? Math.min(86400000, Math.max(1000, wakeDeadlineMs - Date.now()))
+          : Math.min(86400000, pollDelayMs);
         const item = queueRegistry.defer({
           queue_id: queue.queue_id,
           item_id: claim.item.item_id,
           worker_id: workerId,
           lease_token: claim.item.lease_token,
-          delay_ms: Math.max(
-            1000,
-            Number(config.queue_supervisor.poll_interval_ms || 120000),
-          ),
+          delay_ms: deferDelayMs,
           reason: "message delivered; waiting for application acknowledgement",
         });
         outcomes.push({
@@ -3929,6 +4133,11 @@ async function superviseQueue(args) {
           queue_id: queue.queue_id,
           message_id: claim.item.payload.message_id,
           next_attempt_at: item.next_attempt_at,
+          wake_id: result?.wake?.wake_id || null,
+          result_path: result?.wake?.result_path || null,
+          deadline_at: result?.wake?.deadline_at || null,
+          reconciled: result?.wake?.reconciled === true,
+          terminal_status: result?.wake?.terminal_result?.status || null,
         });
         continue;
       }

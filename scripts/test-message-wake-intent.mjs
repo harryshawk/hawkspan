@@ -13,6 +13,9 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "hawkspan-wake-intent-"));
 const bin = path.join(root, "bin");
 const routeLog = path.join(root, "route.log");
 const wakeMarker = path.join(root, "wake-marker");
+const wakeResult = path.join(root, "wake-result.json");
+const wakePrimaryFailure = path.join(root, "wake-primary-failure");
+let wakeDeadline = "";
 const configPath = path.join(root, "config.json");
 const outbox = path.join(root, "outbox");
 fs.mkdirSync(bin, { recursive: true });
@@ -26,11 +29,25 @@ case "$*" in
     printf '%s\\n' '{"schema_version":2,"revision":"test-revision","active_release_root":"/peer/release"}'
     exit 0
     ;;
+  *.result.json*)
+    case "$*" in
+      *peeruser@192.0.2.20*)
+        if [ -f "$HAWKSPAN_TEST_WAKE_PRIMARY_FAILURE" ]; then
+          exit 255
+        fi
+        ;;
+    esac
+    if [ -f "$HAWKSPAN_TEST_WAKE_RESULT" ]; then
+      cat "$HAWKSPAN_TEST_WAKE_RESULT"
+      exit 0
+    fi
+    exit 44
+    ;;
   *wake-runner.mjs*)
     marker=$(tr -d '\\n' < "$HAWKSPAN_TEST_WAKE_MARKER")
     case "$marker" in
       started)
-        printf '%s\\n' '{"schema_version":1,"status":"started","pid":1234}'
+        printf '{"schema_version":1,"status":"started","pid":1234,"deadline_at":"%s"}\\n' "$HAWKSPAN_TEST_WAKE_DEADLINE"
         exit 0
         ;;
       busy)
@@ -66,7 +83,8 @@ fs.writeFileSync(configPath, `${JSON.stringify({
     user: "peeruser",
     primary_enabled: true,
     primary_host: "192.0.2.20",
-    fallback_enabled: false,
+    fallback_enabled: true,
+    fallback_host: "198.51.100.20",
     remote_inbox: "/Users/peeruser/.hawkspan/inbox",
     remote_audit: "/Users/peeruser/.hawkspan/audit",
     codex_ipc_socket: "/peer/codex/ipc.sock",
@@ -144,6 +162,8 @@ const environment = {
   HAWKSPAN_CONFIG: configPath,
   HAWKSPAN_TEST_ROUTE_LOG: routeLog,
   HAWKSPAN_TEST_WAKE_MARKER: wakeMarker,
+  HAWKSPAN_TEST_WAKE_RESULT: wakeResult,
+  HAWKSPAN_TEST_WAKE_PRIMARY_FAILURE: wakePrimaryFailure,
 };
 
 function tool(name, args = {}) {
@@ -291,6 +311,8 @@ const pendingQueue = tool("queue_status", { queue_id: "hawkspan-messages" })
   .items.find((entry) => entry.item_id === `message-${durable.message_id}`);
 assert.equal(pendingQueue.state, "queued");
 
+wakeDeadline = new Date(Date.now() + 60000).toISOString();
+environment.HAWKSPAN_TEST_WAKE_DEADLINE = wakeDeadline;
 fs.writeFileSync(wakeMarker, "started\n");
 const restartedSupervisor = tool("supervise_queue", {
   queue_id: "hawkspan-messages",
@@ -301,8 +323,67 @@ assert.equal(restartedSupervisor.outcomes[0].item_id, `message-${durable.message
 assert.equal(restartedSupervisor.outcomes[0].state, "queued");
 assert.equal(restartedSupervisor.outcomes[0].deferred, true);
 assert.equal(restartedSupervisor.outcomes[0].result.delivery.already_delivered, true);
-assert.equal(restartedSupervisor.outcomes[0].result.wake.ok, true);
+assert.equal(
+  restartedSupervisor.outcomes[0].result.wake.ok,
+  true,
+  JSON.stringify(restartedSupervisor.outcomes[0].result.wake),
+);
 assert.deepEqual(fs.readFileSync(durableEnvelopePath), durableEnvelopeBefore);
+
+const startedWake = restartedSupervisor.outcomes[0].result.wake;
+const wakeLaunchesBeforeEarlyRetry = fs.readFileSync(routeLog, "utf8").split("\n")
+  .filter((line) => line.includes("wake-runner.mjs")).length;
+const earlyRetry = tool("retry_message", { message_id: durable.message_id });
+assert.equal(earlyRetry.wake.ok, false);
+assert.equal(earlyRetry.wake.skipped, true);
+assert.equal(earlyRetry.wake.deferred, true);
+assert.equal(earlyRetry.wake.wake_id, startedWake.wake_id);
+assert.equal(earlyRetry.wake.result_path, startedWake.result_path);
+assert.equal(earlyRetry.wake.deadline_at, wakeDeadline);
+assert.equal(
+  fs.readFileSync(routeLog, "utf8").split("\n")
+    .filter((line) => line.includes("wake-runner.mjs")).length,
+  wakeLaunchesBeforeEarlyRetry,
+);
+const pendingAfterStart = tool("queue_status", { queue_id: "hawkspan-messages" })
+  .items.find((entry) => entry.item_id === `message-${durable.message_id}`);
+assert.ok(Date.parse(pendingAfterStart.next_attempt_at) >= Date.parse(earlyRetry.wake.deadline_at));
+
+const terminalResult = {
+  schema_version: 1,
+  wake_id: startedWake.wake_id,
+  message_id: durable.message_id,
+  thread_id: "00000000-0000-0000-0000-000000000001",
+  target_thread_id: "00000000-0000-0000-0000-000000000009",
+  completed_at: "2026-08-22T00:00:00.000Z",
+  status: "process_failed",
+  acknowledged: false,
+  lease_released: true,
+};
+fs.writeFileSync(wakeResult, `${JSON.stringify(terminalResult)}\n`);
+fs.writeFileSync(wakePrimaryFailure, "fail primary result read\n");
+const terminalRetry = tool("retry_message", { message_id: durable.message_id });
+assert.equal(terminalRetry.wake.reconciled, true);
+assert.equal(terminalRetry.wake.deferred, true);
+assert.deepEqual(terminalRetry.wake.terminal_result, terminalResult);
+assert.deepEqual(
+  terminalRetry.wake.attempts.map((attempt) => attempt.host),
+  ["192.0.2.20", "198.51.100.20"],
+);
+assert.equal(
+  fs.readFileSync(routeLog, "utf8").split("\n")
+    .filter((line) => line.includes("wake-runner.mjs")).length,
+  wakeLaunchesBeforeEarlyRetry,
+);
+const wakeReconciliation = tool("list_audit_events", { limit: 100 })
+  .find((entry) => entry.action === "wake_reconcile" && entry.object_id === durable.message_id);
+assert.ok(wakeReconciliation);
+assert.equal(wakeReconciliation.details.wake_id, startedWake.wake_id);
+assert.deepEqual(wakeReconciliation.details.terminal_result, terminalResult);
+const resultReadLines = fs.readFileSync(routeLog, "utf8").split("\n")
+  .filter((line) => line.includes(".result.json"));
+assert.equal(resultReadLines.length, 3);
+assert.equal(resultReadLines.every((line) => line.includes(startedWake.result_path)), true);
 
 fs.writeFileSync(path.join(root, "inbox", "durable-ack.json"), `${JSON.stringify({
   schema_version: 1,
