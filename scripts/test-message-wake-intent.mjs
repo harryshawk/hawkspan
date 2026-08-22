@@ -249,9 +249,12 @@ const queued = tool("enqueue_queue_item", {
     subject: "queue obsolete no wake",
     body: "message adapter must normalize obsolete suppression away",
     wake: false,
+    concurrency_key: "wake:caller-controlled",
   },
 });
-assert.deepEqual(Object.keys(queued.item.payload), ["message_id"]);
+assert.deepEqual(Object.keys(queued.item.payload), ["message_id", "concurrency_key"]);
+assert.match(queued.item.payload.concurrency_key, /^wake:[0-9a-f]{64}$/);
+assert.notEqual(queued.item.payload.concurrency_key, "wake:caller-controlled");
 const queueMessage = tool("list_messages", { direction: "outbound" })
   .find((entry) => entry.subject === "queue obsolete no wake");
 assert.equal(queueMessage.wake_requested, true);
@@ -426,6 +429,87 @@ const durableRoutes = fs.readFileSync(routeLog, "utf8").slice(preDurableRoutes.l
 assert.equal(durableRoutes.split("\n").filter((line) => line.includes("wake-runner.mjs")).length, 2);
 assert.equal(durableRoutes.split("\n").filter((line) => line.startsWith("rsync ")).length, 1);
 assert.deepEqual(fs.readFileSync(durableEnvelopePath), durableEnvelopeBefore);
+
+fs.rmSync(wakeResult, { force: true });
+fs.rmSync(wakePrimaryFailure, { force: true });
+wakeDeadline = new Date(Date.now() + 60000).toISOString();
+environment.HAWKSPAN_TEST_WAKE_DEADLINE = wakeDeadline;
+fs.writeFileSync(wakeMarker, "started\n");
+const sameReceiverFirst = tool("send_message", {
+  target_thread_id: "00000000-0000-0000-0000-000000000020",
+  subject: "same receiver first",
+  body: "first wake owns this exact receiver until its deadline",
+});
+assert.equal(sameReceiverFirst.wake.ok, true);
+const sameReceiverSecond = tool("send_message", {
+  target_thread_id: "00000000-0000-0000-0000-000000000020",
+  subject: "same receiver second",
+  body: "second wake must not launch while the first owns this receiver",
+});
+assert.equal(sameReceiverSecond.wake.deferred, true);
+assert.equal(sameReceiverSecond.wake.busy, undefined);
+assert.equal(sameReceiverSecond.wake.active_message_id, sameReceiverFirst.message_id);
+assert.equal(sameReceiverSecond.wake.wake_id, sameReceiverFirst.wake.wake_id);
+const otherReceiver = tool("send_message", {
+  target_thread_id: "00000000-0000-0000-0000-000000000021",
+  subject: "different receiver",
+  body: "a different exact receiver may still run in parallel",
+});
+assert.equal(otherReceiver.wake.ok, true);
+const sameFirstItem = `message-${sameReceiverFirst.message_id}`;
+const sameSecondItem = `message-${sameReceiverSecond.message_id}`;
+const otherItem = `message-${otherReceiver.message_id}`;
+for (const [itemId, priority] of [
+  [sameFirstItem, 100],
+  [sameSecondItem, 101],
+  [otherItem, 102],
+]) {
+  tool("queue_control", {
+    queue_id: "hawkspan-messages",
+    item_id: itemId,
+    action: "set-priority",
+    priority,
+  });
+}
+const firstReceiver = tool("supervise_queue", {
+  queue_id: "hawkspan-messages",
+  worker_id: "serial-worker-a",
+  max_items: 1,
+});
+assert.equal(firstReceiver.outcomes[0].item_id, sameFirstItem);
+assert.equal(firstReceiver.outcomes[0].deferred, true);
+const parallelReceiver = tool("supervise_queue", {
+  queue_id: "hawkspan-messages",
+  worker_id: "serial-worker-b",
+  max_items: 1,
+});
+assert.equal(
+  parallelReceiver.outcomes[0].item_id,
+  otherItem,
+  "a second same-receiver wake launched before the retained deadline",
+);
+assert.equal(parallelReceiver.outcomes[0].deferred, true);
+const serializedStatus = tool("queue_status", { queue_id: "hawkspan-messages" });
+const sameFirstStatus = serializedStatus.items.find((entry) => entry.item_id === sameFirstItem);
+const sameSecondStatus = serializedStatus.items.find((entry) => entry.item_id === sameSecondItem);
+const otherStatus = serializedStatus.items.find((entry) => entry.item_id === otherItem);
+assert.equal(
+  sameSecondStatus.state,
+  "queued",
+);
+assert.equal(sameSecondStatus.attempts, 0);
+assert.ok(Date.parse(sameSecondStatus.next_attempt_at) >= Date.parse(sameReceiverFirst.wake.deadline_at));
+assert.equal(sameFirstStatus.payload.concurrency_key, sameSecondStatus.payload.concurrency_key);
+assert.notEqual(sameFirstStatus.payload.concurrency_key, otherStatus.payload.concurrency_key);
+const launchRequests = [...fs.readFileSync(routeLog, "utf8").matchAll(/\slaunch '([A-Za-z0-9+/=]+)'/g)]
+  .map((match) => JSON.parse(Buffer.from(match[1], "base64").toString("utf8")));
+const firstLaunches = launchRequests.filter((request) => request.message_id === sameReceiverFirst.message_id);
+const secondLaunches = launchRequests.filter((request) => request.message_id === sameReceiverSecond.message_id);
+const otherLaunches = launchRequests.filter((request) => request.message_id === otherReceiver.message_id);
+assert.equal(firstLaunches.length, 1);
+assert.equal(secondLaunches.length, 0);
+assert.equal(otherLaunches.length, 1);
+assert.notEqual(firstLaunches[0].lease_path, otherLaunches[0].lease_path);
 
 fs.rmSync(root, { recursive: true, force: true });
 process.stdout.write("immutable message wake-intent tests passed\n");

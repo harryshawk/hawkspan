@@ -302,6 +302,22 @@ export function createQueueRegistry(db, options = {}) {
       throw new Error(`queue admission limit reached: ${queue.id}`);
     }
     const createdAt = timestamp();
+    let nextAttemptAt = createdAt;
+    if (args.not_before !== undefined && args.not_before !== null) {
+      const parsed = Date.parse(String(args.not_before));
+      if (!Number.isFinite(parsed)) throw new Error("not_before must be an ISO-8601 timestamp");
+      const requested = new Date(parsed).toISOString();
+      if (requested > nextAttemptAt) nextAttemptAt = requested;
+    }
+    const concurrencyKey = parseJson(payloadJson)?.concurrency_key;
+    if (typeof concurrencyKey === "string" && concurrencyKey) {
+      const blocked = db.prepare(`
+        SELECT MAX(next_attempt_at) AS blocked_until FROM queue_items
+        WHERE queue_id=? AND state='queued' AND next_attempt_at>?
+          AND json_extract(payload_json,'$.concurrency_key')=?
+      `).get(queue.id, createdAt, concurrencyKey)?.blocked_until;
+      if (blocked && blocked > nextAttemptAt) nextAttemptAt = blocked;
+    }
     db.prepare(`
       INSERT INTO queue_items
         (id,queue_id,created_at,updated_at,state,priority,attempts,next_attempt_at,
@@ -309,7 +325,7 @@ export function createQueueRegistry(db, options = {}) {
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       requestedItemId, queue.id, createdAt, createdAt, "queued",
-      integer(args.priority ?? 1000, "priority", -1000000, 1000000), 0, createdAt,
+      integer(args.priority ?? 1000, "priority", -1000000, 1000000), 0, nextAttemptAt,
       null, null, payloadJson, null, null,
     );
     return { enqueued: true, already_present: false, item: publicItem(getItemRow(queue.id, requestedItemId)) };
@@ -426,11 +442,37 @@ export function createQueueRegistry(db, options = {}) {
           recovered_expired_leases: recovered,
         };
       }
-      const order = queue.ordering === "fifo" ? "created_at,id" : "priority,created_at,id";
+      const order = queue.ordering === "fifo"
+        ? "candidate.created_at,candidate.id"
+        : "candidate.priority,candidate.created_at,candidate.id";
+      const precedes = queue.ordering === "fifo"
+        ? `(blocker.created_at<candidate.created_at OR
+            (blocker.created_at=candidate.created_at AND blocker.id<candidate.id))`
+        : `(blocker.priority<candidate.priority OR
+            (blocker.priority=candidate.priority AND
+              (blocker.created_at<candidate.created_at OR
+                (blocker.created_at=candidate.created_at AND blocker.id<candidate.id))))`;
+      const observedAt = timestamp();
       const row = db.prepare(`
-        SELECT * FROM queue_items WHERE queue_id=? AND state='queued'
-          AND (next_attempt_at IS NULL OR next_attempt_at<=?) ORDER BY ${order} LIMIT 1
-      `).get(queue.id, timestamp());
+        SELECT candidate.* FROM queue_items AS candidate
+        WHERE candidate.queue_id=? AND candidate.state='queued'
+          AND (candidate.next_attempt_at IS NULL OR candidate.next_attempt_at<=?)
+          AND (
+            COALESCE(json_extract(candidate.payload_json,'$.concurrency_key'),'')=''
+            OR NOT EXISTS (
+              SELECT 1 FROM queue_items AS blocker
+              WHERE blocker.queue_id=candidate.queue_id AND blocker.id<>candidate.id
+                AND blocker.state IN ('queued','running')
+                AND json_extract(blocker.payload_json,'$.concurrency_key')=
+                  json_extract(candidate.payload_json,'$.concurrency_key')
+                AND (
+                  blocker.state='running'
+                  OR (blocker.state='queued' AND ${precedes})
+                )
+            )
+          )
+        ORDER BY ${order} LIMIT 1
+      `).get(queue.id, observedAt);
       if (!row) {
         db.exec("COMMIT");
         return { claimed: false, reason: "no eligible items", recovered_expired_leases: recovered };
@@ -489,18 +531,36 @@ export function createQueueRegistry(db, options = {}) {
 
   function defer(args) {
     const queue = getQueueRow(args.queue_id);
-    const item = getItemRow(queue.id, args.item_id);
-    if (item.state !== "running" || item.lease_owner !== args.worker_id ||
-        item.lease_token !== args.lease_token) {
-      throw new Error(`worker does not own running queue item: ${item.id}`);
-    }
     const delayMs = integer(args.delay_ms ?? 60000, "delay_ms", 1000, 86400000);
     const nextAttemptAt = new Date(Date.now() + delayMs).toISOString();
-    db.prepare(`
-      UPDATE queue_items SET state='queued',updated_at=?,attempts=MAX(attempts-1,0),
-        next_attempt_at=?,lease_owner=NULL,lease_expires_at=NULL,lease_token=NULL,error=? WHERE id=?
-    `).run(timestamp(), nextAttemptAt, String(args.reason || "queue item deferred"), item.id);
-    return publicItem(getItemRow(queue.id, item.id));
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const item = getItemRow(queue.id, args.item_id);
+      if (item.state !== "running" || item.lease_owner !== args.worker_id ||
+          item.lease_token !== args.lease_token) {
+        throw new Error(`worker does not own running queue item: ${item.id}`);
+      }
+      const updatedAt = timestamp();
+      db.prepare(`
+        UPDATE queue_items SET state='queued',updated_at=?,attempts=MAX(attempts-1,0),
+          next_attempt_at=?,lease_owner=NULL,lease_expires_at=NULL,lease_token=NULL,error=? WHERE id=?
+      `).run(updatedAt, nextAttemptAt, String(args.reason || "queue item deferred"), item.id);
+      const concurrencyKey = parseJson(item.payload_json)?.concurrency_key;
+      if (typeof concurrencyKey === "string" && concurrencyKey) {
+        db.prepare(`
+          UPDATE queue_items SET updated_at=?,next_attempt_at=?
+          WHERE queue_id=? AND id<>? AND state='queued'
+            AND (next_attempt_at IS NULL OR next_attempt_at<?)
+            AND json_extract(payload_json,'$.concurrency_key')=?
+        `).run(updatedAt, nextAttemptAt, queue.id, item.id, nextAttemptAt, concurrencyKey);
+      }
+      const deferred = publicItem(getItemRow(queue.id, item.id));
+      db.exec("COMMIT");
+      return deferred;
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   function renewLease(args) {

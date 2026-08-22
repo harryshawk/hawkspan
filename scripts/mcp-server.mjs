@@ -396,17 +396,57 @@ for (const definition of [
   if (created.created) audit("create", "queue", definition.queue_id, "created", definition);
 }
 
-function enqueueDeliveryReference(queueId, itemIdValue, payload, priority = 1000) {
+function enqueueDeliveryReference(
+  queueId,
+  itemIdValue,
+  payload,
+  priority = 1000,
+  notBefore = null,
+) {
   const result = queueRegistry.enqueueItem({
     queue_id: queueId,
     item_id: itemIdValue,
     payload,
     priority,
+    ...(notBefore ? { not_before: notBefore } : {}),
   });
   if (!result.already_present) {
     audit("enqueue", "queue_item", itemIdValue, "queued", { queue_id: queueId, payload });
   }
   return result;
+}
+
+function exactWakeTarget(envelope, recipient = null) {
+  const explicitTarget = envelope?.target_thread_id;
+  if (typeof explicitTarget === "string" && explicitTarget.trim()) return explicitTarget.trim();
+  const candidate = String(envelope?.recipient || recipient || "");
+  return CODEX_TASK_ID.test(candidate) ? candidate : null;
+}
+
+function wakeReceiverDigest(targetThreadId = null) {
+  const identity = String(targetThreadId || config.peer?.thread_id || "").trim();
+  return identity ? crypto.createHash("sha256").update(identity).digest("hex") : null;
+}
+
+function messageQueuePayload(
+  messageId,
+  wakeRequested,
+  targetThreadId,
+  includeWake = true,
+  preserveExisting = true,
+) {
+  const itemIdValue = `message-${messageId}`;
+  if (preserveExisting) {
+    const existing = db.prepare(`
+      SELECT payload_json FROM queue_items WHERE id=? AND queue_id='hawkspan-messages'
+    `).get(itemIdValue);
+    if (existing) return JSON.parse(existing.payload_json);
+  }
+  const payload = { message_id: messageId };
+  if (includeWake) payload.wake = wakeRequested;
+  const receiverDigest = wakeRequested ? wakeReceiverDigest(targetThreadId) : null;
+  if (receiverDigest) payload.concurrency_key = `wake:${receiverDigest}`;
+  return payload;
 }
 
 function clearMessageWakeRetry(messageId) {
@@ -894,7 +934,11 @@ function retryMessage(args) {
   });
   if ((!delivery.ok || wakePending) && !cancelledDuringRetry) {
     enqueueDeliveryReference(
-      "hawkspan-messages", `message-${row.id}`, { message_id: row.id, wake: wakeRequested }, 100,
+      "hawkspan-messages",
+      `message-${row.id}`,
+      messageQueuePayload(row.id, wakeRequested, exactWakeTarget(envelope, row.recipient)),
+      100,
+      wake?.deferred === true ? wake.deadline_at : null,
     );
   }
   return {
@@ -989,7 +1033,11 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
   });
   if (args.deliver !== false && (!delivery?.ok || wakePending)) {
     enqueueDeliveryReference(
-      "hawkspan-messages", `message-${messageId}`, { message_id: messageId, wake: wakeRequested }, 100,
+      "hawkspan-messages",
+      `message-${messageId}`,
+      messageQueuePayload(messageId, wakeRequested, targetThreadId),
+      100,
+      wake?.deferred === true ? wake.deadline_at : null,
     );
   }
   return {
@@ -1346,6 +1394,39 @@ function reconcileWakeBeforeLaunch(messageId, receiverThreadId) {
   return null;
 }
 
+function activeReceiverWakeBeforeLaunch(messageId, receiverThreadId, targetThreadId) {
+  if (!messageId) return null;
+  const row = targetThreadId
+    ? db.prepare(`
+        SELECT json_extract(details_json,'$.message_id') AS message_id
+        FROM audit_events
+        WHERE action='wake' AND object_type='thread' AND object_id=? AND result='started'
+          AND json_extract(details_json,'$.target_thread_id')=?
+          AND json_extract(details_json,'$.message_id')<>?
+        ORDER BY sequence DESC LIMIT 1
+      `).get(receiverThreadId, targetThreadId, messageId)
+    : db.prepare(`
+        SELECT json_extract(details_json,'$.message_id') AS message_id
+        FROM audit_events
+        WHERE action='wake' AND object_type='thread' AND object_id=? AND result='started'
+          AND json_extract(details_json,'$.target_thread_id') IS NULL
+          AND json_extract(details_json,'$.message_id')<>?
+        ORDER BY sequence DESC LIMIT 1
+      `).get(receiverThreadId, messageId);
+  const activeMessageId = String(row?.message_id || "");
+  if (!activeMessageId) return null;
+  const active = reconcileWakeBeforeLaunch(activeMessageId, receiverThreadId);
+  if (!active || (active.reconciled === true && active.terminal_result)) return null;
+  return {
+    ...active,
+    ok: false,
+    skipped: true,
+    deferred: true,
+    active_message_id: activeMessageId,
+    error: "another wake for this exact receiver is still within its retained deadline",
+  };
+}
+
 function wakePeerThread(args) {
   if (!config.peer?.allow_remote_wake) {
     return {
@@ -1390,12 +1471,7 @@ function wakePeerThread(args) {
       };
     }
   }
-  const explicitTarget = storedEnvelope?.target_thread_id;
-  const targetThreadId = typeof explicitTarget === "string" && explicitTarget.trim()
-    ? explicitTarget.trim()
-    : (CODEX_TASK_ID.test(String(storedEnvelope?.recipient || storedMessage?.recipient || ""))
-        ? (storedEnvelope?.recipient || storedMessage.recipient)
-        : null);
+  const targetThreadId = exactWakeTarget(storedEnvelope, storedMessage?.recipient);
   if (targetThreadId && !config.peer?.codex_ipc_socket) {
     return {
       ok: false,
@@ -1413,6 +1489,12 @@ function wakePeerThread(args) {
   }
   const priorWake = reconcileWakeBeforeLaunch(args.message_id, receiverThreadId);
   if (priorWake) return priorWake;
+  const activeReceiverWake = activeReceiverWakeBeforeLaunch(
+    args.message_id,
+    receiverThreadId,
+    targetThreadId,
+  );
+  if (activeReceiverWake) return activeReceiverWake;
   const codexCommand = config.peer.codex_command || "codex";
   const remoteNode = config.peer.remote_node || "node";
   let peerRelease = null;
@@ -1444,9 +1526,10 @@ function wakePeerThread(args) {
   const wakeId = id("wake");
   const logPath = path.posix.join(auditDir, `${wakeId}.log`);
   const resultPath = path.posix.join(auditDir, `${wakeId}.result.json`);
+  const receiverDigest = wakeReceiverDigest(targetThreadId);
   const leasePath = path.posix.join(
     auditDir,
-    `wake-${String(receiverThreadId).replace(/[^A-Za-z0-9._-]/g, "_")}.lock`,
+    `wake-${receiverDigest}.lock`,
   );
   const subject = args.subject || storedMessage?.subject || "";
   const body = args.body || storedMessage?.body || "";
@@ -3911,18 +3994,42 @@ function configureQueueSurface(args) {
 }
 
 function normalizeQueuePayload(queue, payload = {}, rollbackFiles = []) {
-  if (queue.adapter === "message" && !payload.message_id) {
-    if (!payload.subject || !payload.body) {
-      throw new Error("message queue items require message_id or subject and body");
+  if (queue.adapter === "message") {
+    if (!payload.message_id) {
+      if (!payload.subject || !payload.body) {
+        throw new Error("message queue items require message_id or subject and body");
+      }
+      if (SILENT_PROTOCOL_MESSAGE_KINDS.has(payload.kind || "message")) {
+        throw new Error("protocol messages must use their dedicated HawkSpan tools");
+      }
+      const message = sendMessage(
+        { ...payload, deliver: false },
+        { onEnvelopeWritten: (envelopePath) => rollbackFiles.push(envelopePath) },
+      );
+      return messageQueuePayload(
+        message.message_id,
+        message.wake_requested,
+        String(payload.target_thread_id || "").trim() || null,
+        false,
+        false,
+      );
     }
-    if (SILENT_PROTOCOL_MESSAGE_KINDS.has(payload.kind || "message")) {
-      throw new Error("protocol messages must use their dedicated HawkSpan tools");
+    const row = db.prepare(`
+      SELECT id,recipient,envelope_path,wake_requested FROM messages
+      WHERE id=? AND direction='outbound'
+    `).get(String(payload.message_id));
+    if (!row || !fs.existsSync(row.envelope_path)) {
+      throw new Error(`outbound message envelope not found: ${payload.message_id}`);
     }
-    const message = sendMessage(
-      { ...payload, deliver: false },
-      { onEnvelopeWritten: (envelopePath) => rollbackFiles.push(envelopePath) },
+    const envelope = JSON.parse(fs.readFileSync(row.envelope_path, "utf8"));
+    const wakeRequested = row.wake_requested !== 0 && envelope.wake_requested !== false;
+    return messageQueuePayload(
+      row.id,
+      wakeRequested,
+      exactWakeTarget(envelope, row.recipient),
+      false,
+      false,
     );
-    return { message_id: message.message_id };
   }
   if (queue.adapter === "artifact" && !payload.artifact_id) {
     if (!payload.path) throw new Error("artifact queue items require artifact_id or path");
