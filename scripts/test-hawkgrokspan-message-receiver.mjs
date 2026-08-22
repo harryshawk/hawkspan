@@ -531,8 +531,30 @@ assert.equal(ensuredManaged.supervisor.started, false);
 assert.equal(ensuredManaged.supervisor.already_running, true);
 assert.equal(Number(ensuredManaged.supervisor.pid), managed.pid);
 assert.equal(JSON.parse(fs.readFileSync(supervisorLeasePath, "utf8")).managed_service, true);
+
+// MCP startup must still find the managed service if another writer displaced
+// its canonical lease. This is the real Grok Build startup pattern.
+fs.writeFileSync(supervisorLeasePath, `${JSON.stringify({
+  schema_version: 1,
+  pid: process.pid,
+  nonce: "displaced-service-lease",
+  initializing: false,
+  started_at_ms: Date.now(),
+  script_path: receiver,
+  release_root: path.resolve(scripts, ".."),
+  revision: "a".repeat(40),
+}, null, 2)}\n`);
+const ensureDisplacedResult = spawnSync(process.execPath, [receiver, "--state-root", state, "--ensure-supervisor"], {
+  encoding: "utf8",
+  timeout: 5000,
+});
+assert.equal(ensureDisplacedResult.status, 0, ensureDisplacedResult.stderr);
+const ensuredDisplaced = JSON.parse(ensureDisplacedResult.stdout);
+assert.equal(ensuredDisplaced.supervisor.started, false);
+assert.equal(ensuredDisplaced.supervisor.already_running, true);
+assert.equal(Number(ensuredDisplaced.supervisor.pid), managed.pid);
 process.kill(Number(managed.pid), "SIGTERM");
-waitFor(() => !fs.existsSync(path.dirname(supervisorLeasePath)), "managed receiver service cleanup");
+fs.rmSync(path.dirname(supervisorLeasePath), { recursive: true, force: true });
 
 db.close();
 fs.rmSync(root, { recursive: true, force: true });

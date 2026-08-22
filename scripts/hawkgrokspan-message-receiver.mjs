@@ -399,6 +399,24 @@ function matchesLeaseProcess(lease, { mode, targetId = null } = {}) {
   return !targetId || observed.includes(`--target ${targetId}`);
 }
 
+function findManagedService() {
+  const result = spawnSync("ps", ["-ww", "-axo", "pid=,command="], { encoding: "utf8" });
+  if (result.status !== 0) return null;
+  for (const line of result.stdout.split("\n")) {
+    const match = line.match(/^\s*(\d+)\s+(.+)$/);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const observed = match[2];
+    const scriptMatches = observed.includes(scriptPath) || observed.includes(stableScriptPath);
+    if (pid !== process.pid && scriptMatches &&
+        observed.includes("--service") &&
+        observed.includes(`--state-root ${stateRoot}`) && pidAlive(pid)) {
+      return pid;
+    }
+  }
+  return null;
+}
+
 function leasePaths(targetId) {
   const target = receiver.targets[targetId];
   const sessionKey = `${target.adapter}-${target.session_id.toLowerCase()}`;
@@ -597,6 +615,12 @@ function quarantineStoppedSupervisor() {
 }
 
 function ensureSupervisorProcess() {
+  // A managed service is the receiver authority even if a concurrent or stale
+  // writer displaced its lease. MCP startup must never create a second receiver.
+  const managedServicePid = findManagedService();
+  if (managedServicePid) {
+    return { started: false, already_running: true, pid: managedServicePid };
+  }
   if (!quarantineStoppedSupervisor()) {
     const lease = readSupervisorLease();
     return { started: false, already_running: true, pid: lease?.pid || null };
