@@ -93,6 +93,17 @@ const receiver = config.message_receiver;
 if (config.surface_profile !== "message-files" || receiver?.enabled !== true) {
   fail("local message receiver is not enabled for the message-files surface");
 }
+const artifactWriteRoots = config.transfer?.allowed_artifact_roots;
+if (!Array.isArray(artifactWriteRoots) || artifactWriteRoots.length < 1) {
+  fail("message-files receiver requires transfer.allowed_artifact_roots");
+}
+for (const root of artifactWriteRoots) {
+  if (typeof root !== "string" || !path.isAbsolute(root) ||
+      !/^\/[A-Za-z0-9_./ -]+$/.test(root) || path.normalize(root) !== root) {
+    fail("transfer.allowed_artifact_roots entries must be normalized absolute paths");
+  }
+  assertOwnedDirectory(root, "artifact write root");
+}
 const reconcileIntervalSeconds = Number(receiver.reconcile_interval_seconds);
 if (!Number.isSafeInteger(reconcileIntervalSeconds) ||
     reconcileIntervalSeconds < 5 || reconcileIntervalSeconds > 600) {
@@ -915,6 +926,10 @@ function commandFor(prompt) {
     "hawkgrokspan__verify_artifact",
   ];
   const toolPermissions = tools.flatMap((toolName) => ["--allow", `MCPTool(${toolName})`]);
+  const artifactWritePermissions = artifactWriteRoots.flatMap((root) => [
+    "--allow", `Write(${root}/**)`,
+    "--allow", `Edit(${root}/**)`,
+  ]);
   return [target.command, [
     "-p", prompt,
     "--resume", target.session_id,
@@ -924,6 +939,7 @@ function commandFor(prompt) {
     "--max-turns", String(target.maximumTurns),
     "--tools", tools.join(","),
     ...toolPermissions,
+    ...artifactWritePermissions,
   ]];
 }
 

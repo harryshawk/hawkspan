@@ -88,6 +88,12 @@ exact release revision, script path, session, process nonce, and maximum
 runtime. A reused or unrelated PID is never signalled and cannot wedge the
 lease. The old supervisor checks release authority every second and retires when
 activation changes revisions; launchd restarts the exact stable-link revision.
+The managed service also publishes a one-second, exact-revision heartbeat in
+the isolated HGS audit directory. Grok Build starts its MCP server inside a
+sandbox that may not permit process enumeration; MCP startup uses the fresh
+heartbeat to recognize the existing receiver instead of spawning duplicates.
+The heartbeat expires after five seconds and is not treated as live after a
+service crash or revision change.
 This supervisor is local notification plumbing, not remotely invocable command
 control.
 
@@ -107,6 +113,22 @@ continue a matching receiver goal, must not overwrite an unrelated owner goal,
 and must not let a completed, blocked, or stale bootstrap goal suppress message
 delivery. The receiver is one bounded continuation and must not leave a
 synthetic receiver-only goal active.
+
+Every HGS activation must set all three isolation variables explicitly. Never
+run `activate-release.mjs` for HGS with its default environment: that default is
+normal HawkSpan and can create the wrong state or service files.
+
+```sh
+HAWKSPAN_STATE_DIR="$HOME/.hawkgrokspan" \
+HAWKSPAN_CONFIG="$HOME/.hawkgrokspan/config.json" \
+HAWKSPAN_STABLE_RELEASE_ROOT="$HOME/.local/share/hawkgrokspan/current" \
+  /ABSOLUTE/PERSISTENT/NODE RELEASE_ROOT/scripts/activate-release.mjs \
+    --release-root RELEASE_ROOT --revision FULL_COMMIT_SHA
+```
+
+Package and activate the same published commit on both endpoints, then restart
+each receiver. A commit, package, receipt, stable link, and live receiver that do
+not all name the same revision are not a deployment.
 
 ## Private overlay transport
 
@@ -254,6 +276,62 @@ protocol is required. The reviewed receiver resumes only an exact persisted
 session UUID and supplies an explicit HawkGrokSpan-only tool allowlist. Friendly
 session-name creation or discovery is not an accepted substitute.
 
+## Global Codex delegation workflow
+
+Install HGS as a separate Codex plugin, not as an alternate configuration of
+the normal HawkSpan plugin. Its MCP entry must use the stable HGS release and
+isolated state shown in `config/hawkgrokspan-codex.mcp.example.json`. Install a
+`delegate-to-grok` skill with this bounded workflow so any Codex task can use
+the same registered worker without knowing SSH, Tailscale, or session details:
+
+1. call HGS `link_status`;
+2. define one coding, research, review, or file assignment with an explicit
+   deliverable and acceptance condition;
+3. register and send only requested input files from the HGS exchange root,
+   preserving artifact IDs and SHA-256 values;
+4. send the assignment to the registered `grok-primary` target;
+5. treat delivery as mailbox receipt, not completion; wait for durable
+   acknowledgement and a result message;
+6. import and independently verify returned files before applying them;
+7. for coding, require changed files or a patch plus the command/result used to
+   check it; for research, require direct source URLs and separate sourced facts
+   from inference.
+
+The workflow permits messages and verified files only. It does not grant a
+Codex task remote shell, deployment, credential transfer, normal HawkSpan
+control, or permission to broaden the Grok sandbox. Operational replies are
+addressed to the requesting Codex endpoint; the human owner is contacted only
+for a new decision, authorization, login/2FA, or physical action.
+
+`maximum_turns` is a per-target operational bound. Set it from a real bounded
+assignment: a value that repeatedly ends before acknowledgement is not
+reliability. Raising this bound does not broaden tool permissions, but it must
+remain finite and be rechecked after a Grok CLI update.
+
+### Adding a direct second Codex node
+
+The current HGS configuration has one transport peer per state directory. To
+give a second Mac direct Grok access without relaying through M2, create a second
+peer deployment; do not turn the existing M2/Grok database into a three-writer
+store and do not fork the code.
+
+- install the same exact HGS commit on the second Mac and the Grok VM;
+- use separate state roots on both ends, for example
+  `~/.hawkgrokspan-m4`, and separate exchange/audit directories;
+- use a separate SSH key, forced-command entry, known-hosts file, receiver
+  service label, MCP server name, and registered Grok Build session;
+- add only the two TCP-22 grants between that Mac and the Grok VM to the
+  tailnet policy;
+- keep the original M2/Grok state, keys, receiver, session, and message history
+  unchanged;
+- run the same exact-revision and bidirectional message/file acceptance for the
+  new pair.
+
+This is a second isolated peer instance of the same HGS release, not a modified
+copy of HawkGrokSpan. Sharing one SQLite spool or one live Grok session between
+the two peer instances is unsupported because concurrent receivers would race
+for the same acknowledgements and session lease.
+
 Install the official Linux CLI from `https://x.ai/cli/install.sh`. The current
 installer places a convenience symlink at `~/.grok/bin/grok`; resolve it and
 configure the owner-controlled regular executable under `~/.grok/downloads`,
@@ -326,12 +404,16 @@ messages, and files unchanged; it only postpones bot processing.
    Merge it into the Grok configuration actually loaded by the dedicated
    receiver workspace. Create
    `.grok/sandbox.toml` in the dedicated workspace with
-   the following profile so the sandboxed Grok session can write only HGS state:
+   the following profile so the sandboxed Grok session can write only HGS state
+   and returned artifacts inside the configured exchange root:
 
    ```toml
    [profiles.hawkgrokspan]
    extends = "workspace"
-   read_write = ["/home/GROK_VM_USER/.hawkgrokspan"]
+   read_write = [
+     "/home/GROK_VM_USER/.hawkgrokspan",
+     "/home/GROK_VM_USER/HawkGrokSpan/Exchange"
+   ]
    ```
 
    Set each Grok receiver target's `sandbox` to `hawkgrokspan`. The built-in
@@ -339,7 +421,10 @@ messages, and files unchanged; it only postpones bot processing.
    while `off` grants substantially broader machine access and is not accepted.
    Because no person is present to answer a headless tool prompt, the installed
    receiver passes exact per-tool allow rules for the same thirteen HGS
-   message/file tools. It does not enable Grok's broad always-approve mode.
+   message/file tools. For coding/file assignments it also derives exact
+   `Write(ROOT/**)` and `Edit(ROOT/**)` rules only from the configured
+   `transfer.allowed_artifact_roots`; unmatched writes remain denied. It does
+   not enable Grok's broad always-approve mode.
    Without these narrow rules, Grok cancels the first `receive_messages` call
    and a delivered message remains unread.
 8. Install the official Grok CLI and authenticate with the documented headless

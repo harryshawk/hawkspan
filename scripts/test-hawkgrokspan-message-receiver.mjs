@@ -287,6 +287,8 @@ assert.deepEqual(codexInvocation.argv.slice(0, 7), [
 assert.ok(codexInvocation.argv.includes("10000000-0000-0000-0000-000000000001"));
 assert.ok(grokInvocation.argv.includes("--resume"));
 assert.ok(grokInvocation.argv.includes("MCPTool(hawkgrokspan__receive_messages)"));
+assert.ok(grokInvocation.argv.includes(`Write(${artifacts}/**)`));
+assert.ok(grokInvocation.argv.includes(`Edit(${artifacts}/**)`));
 assert.ok(grokInvocation.argv.includes("20000000-0000-0000-0000-000000000002"));
 const grokTools = grokInvocation.argv[grokInvocation.argv.indexOf("--tools") + 1];
 assert.match(grokTools, /hawkgrokspan__receive_messages/);

@@ -22,7 +22,7 @@
         "session_id": "20000000-0000-0000-0000-000000000001",
         "sandbox": "hawkgrokspan",
         "maximum_runtime_seconds": 600,
-        "maximum_turns": 10
+        "maximum_turns": 20
       },
       "grok-review": {
         "adapter": "grok",
@@ -31,7 +31,7 @@
         "session_id": "20000000-0000-0000-0000-000000000002",
         "sandbox": "hawkgrokspan",
         "maximum_runtime_seconds": 600,
-        "maximum_turns": 10
+        "maximum_turns": 20
       }
     }
   },
