@@ -63,10 +63,9 @@ const result = spawnSync(process.execPath, [
   path.join(scripts, "call-tool.mjs"),
   "send_message",
   JSON.stringify({
+    target_thread_id: "00000000-0000-0000-0000-000000000010",
     subject: "bounded fallback test",
     body: "The same immutable envelope must retry on primary before fallback.",
-    deliver: true,
-    wake: false,
   }),
 ], {
   encoding: "utf8",

@@ -57,7 +57,7 @@ const defaultConfig = {
     port: 0,
     allowed_tools: [
       "link_status", "application_plugin_status", "application_plugin_cancel",
-      "list_messages", "list_jobs", "list_artifacts", "list_audit_events",
+      "list_messages", "cancel_message", "list_jobs", "list_artifacts", "list_audit_events",
       "list_queue_adapters", "create_queue", "configure_queue", "delete_queue",
       "list_queues", "queue_status", "enqueue_queue_item", "enqueue_queue_batch",
       "queue_control", "start_next_queue_item", "supervise_queue",
@@ -114,6 +114,8 @@ const defaultConfig = {
 };
 
 const EXACT_TOOL_NAME = /^[a-z][a-z0-9_]{0,127}$/;
+const CODEX_TASK_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const SILENT_PROTOCOL_MESSAGE_KINDS = new Set(["acknowledgement", "cancellation"]);
 
 function assertExactToolNames(value, label) {
   if (value === "current") return;
@@ -176,6 +178,11 @@ function assertPeerCommandConfiguration(configuration) {
         extra.some((name) => typeof name !== "string" || !EXACT_TOOL_NAME.test(name))) {
       throw new Error("peer.allowed_tools must be an array of exact tool names");
     }
+  }
+  if (configuration.peer?.codex_ipc_socket !== undefined &&
+      (typeof configuration.peer.codex_ipc_socket !== "string" ||
+       !path.isAbsolute(configuration.peer.codex_ipc_socket))) {
+    throw new Error("peer.codex_ipc_socket must be an absolute path when configured");
   }
 }
 
@@ -253,6 +260,8 @@ execWithRetry(`
     envelope_path TEXT NOT NULL,
     delivered_via TEXT,
     acknowledged_at TEXT,
+    pruned_at TEXT,
+    wake_requested INTEGER NOT NULL DEFAULT 1,
     metadata_json TEXT NOT NULL
   );
 
@@ -295,6 +304,18 @@ execWithRetry(`
     details_json TEXT NOT NULL
   );
 `);
+
+const messageColumns = new Set(
+  db.prepare("PRAGMA table_info(messages)").all().map((row) => row.name),
+);
+if (!messageColumns.has("wake_requested")) {
+  execWithRetry(
+    "ALTER TABLE messages ADD COLUMN wake_requested INTEGER NOT NULL DEFAULT 1",
+  );
+}
+if (!messageColumns.has("pruned_at")) {
+  execWithRetry("ALTER TABLE messages ADD COLUMN pruned_at TEXT");
+}
 
 const queueRegistry = createQueueRegistry(db, {
   retryDelaysMs: config.queue_supervisor.worker_restart_delays_ms,
@@ -375,16 +396,161 @@ for (const definition of [
   if (created.created) audit("create", "queue", definition.queue_id, "created", definition);
 }
 
-function enqueueDeliveryReference(queueId, itemIdValue, payload, priority = 1000) {
+function enqueueDeliveryReference(
+  queueId,
+  itemIdValue,
+  payload,
+  priority = 1000,
+  notBefore = null,
+) {
   const result = queueRegistry.enqueueItem({
     queue_id: queueId,
     item_id: itemIdValue,
     payload,
     priority,
+    ...(notBefore ? { not_before: notBefore } : {}),
   });
   if (!result.already_present) {
     audit("enqueue", "queue_item", itemIdValue, "queued", { queue_id: queueId, payload });
   }
+  return result;
+}
+
+function exactWakeTarget(envelope, recipient = null) {
+  const explicitTarget = envelope?.target_thread_id;
+  if (typeof explicitTarget === "string" && explicitTarget.trim()) return explicitTarget.trim();
+  const candidate = String(envelope?.recipient || recipient || "");
+  return CODEX_TASK_ID.test(candidate) ? candidate : null;
+}
+
+function wakeReceiverDigest(targetThreadId = null) {
+  const identity = String(targetThreadId || config.peer?.thread_id || "").trim();
+  return identity ? crypto.createHash("sha256").update(identity).digest("hex") : null;
+}
+
+function messageQueuePayload(
+  messageId,
+  wakeRequested,
+  targetThreadId,
+  includeWake = true,
+  preserveExisting = true,
+) {
+  const itemIdValue = `message-${messageId}`;
+  if (preserveExisting) {
+    const existing = db.prepare(`
+      SELECT payload_json FROM queue_items WHERE id=? AND queue_id='hawkspan-messages'
+    `).get(itemIdValue);
+    if (existing) return JSON.parse(existing.payload_json);
+  }
+  const payload = { message_id: messageId };
+  if (includeWake) payload.wake = wakeRequested;
+  const receiverDigest = wakeRequested ? wakeReceiverDigest(targetThreadId) : null;
+  if (receiverDigest) payload.concurrency_key = `wake:${receiverDigest}`;
+  return payload;
+}
+
+function clearMessageWakeRetry(messageId) {
+  const itemIdValue = `message-${messageId}`;
+  const item = db.prepare(`
+    SELECT state FROM queue_items WHERE id=? AND queue_id='hawkspan-messages'
+  `).get(itemIdValue);
+  if (!item || !new Set(["queued", "paused", "failed"]).has(item.state)) return null;
+  return queueRegistry.control({
+    queue_id: "hawkspan-messages",
+    item_id: itemIdValue,
+    action: "cancel-item",
+    reason: "message acknowledgement cleared wake retry",
+  }).item;
+}
+
+function activeWakeForMessage(messageId) {
+  for (const entry of fs.readdirSync(AUDIT, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith("wake-") || !entry.name.endsWith(".lock")) {
+      continue;
+    }
+    try {
+      const leasePath = path.join(AUDIT, entry.name);
+      const owner = JSON.parse(fs.readFileSync(path.join(leasePath, "owner.json"), "utf8"));
+      if (owner.message_id !== messageId || !new Set(["starting", "running"]).has(owner.state)) {
+        continue;
+      }
+      if (owner.deadline_at && Date.parse(owner.deadline_at) <= Date.now()) continue;
+      const pid = Number(owner.pid);
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      try {
+        process.kill(pid, 0);
+      } catch (error) {
+        if (error?.code !== "EPERM") continue;
+      }
+      return {
+        wake_id: owner.wake_id || null,
+        pid,
+        state: owner.state,
+        deadline_at: owner.deadline_at || null,
+      };
+    } catch {
+      // A partial, stale, or unrelated lease is not evidence that recall is too late.
+    }
+  }
+  return null;
+}
+
+function sendCancellationReceipt(envelope, result, details = {}) {
+  const existing = db.prepare(`
+    SELECT id FROM messages
+    WHERE direction='outbound' AND kind='acknowledgement' AND correlation_id=?
+    ORDER BY created_at ASC LIMIT 1
+  `).get(envelope.id);
+  if (existing) return existing.id;
+  const receipt = sendMessage({
+    recipient: envelope.sender,
+    kind: "acknowledgement",
+    subject: `Cancellation ${result}: ${envelope.subject || envelope.correlation_id}`,
+    body: result === "applied"
+      ? "The durable message cancellation was applied."
+      : result === "too_late"
+        ? "The durable message was already acknowledged before cancellation."
+        : "The durable message may already be in an active receiver handoff.",
+    correlation_id: envelope.id,
+    metadata: {
+      message_cancellation: {
+        message_id: envelope.correlation_id,
+        cancellation_message_id: envelope.id,
+        result,
+        ...details,
+      },
+    },
+    deliver: true,
+  });
+  return receipt.message_id;
+}
+
+function applyInboundCancellation(envelope) {
+  const messageId = String(envelope.correlation_id || "").trim();
+  const original = db.prepare(`
+    SELECT id,state FROM messages WHERE id=? AND direction='inbound'
+  `).get(messageId);
+  let result = "applied";
+  let details = {};
+  if (original?.state === "acknowledged") {
+    result = "too_late";
+  } else if (original?.state === "received") {
+    const activeWake = activeWakeForMessage(messageId);
+    if (activeWake) {
+      result = "in_flight";
+      details = { active_wake: activeWake };
+    } else {
+      db.prepare("UPDATE messages SET state='cancelled' WHERE id=? AND state='received'")
+        .run(messageId);
+    }
+  }
+  const receiptId = sendCancellationReceipt(envelope, result, details);
+  audit("cancel", "message", messageId, result, {
+    origin: "peer",
+    cancellation_message_id: envelope.id,
+    receipt_id: receiptId,
+    ...details,
+  });
   return result;
 }
 
@@ -425,8 +591,35 @@ function ingestInbox() {
       if (!envelope.id || !envelope.sender || !envelope.recipient) {
         throw new Error("missing required envelope fields");
       }
-      const exists = db.prepare("SELECT 1 FROM messages WHERE id=?").get(envelope.id);
-      if (exists) continue;
+      const exists = db.prepare("SELECT pruned_at FROM messages WHERE id=?").get(envelope.id);
+      if (exists) {
+        if (exists.pruned_at) {
+          fs.rmSync(filePath, { force: true });
+          audit("drop_replay", "message", envelope.id, "pruned", { file_path: filePath });
+        }
+        continue;
+      }
+      const kind = envelope.kind || "message";
+      if (kind === "cancellation") {
+        const cancellationTarget = String(envelope.correlation_id || "").trim();
+        if (!cancellationTarget) throw new Error("cancellation envelope requires correlation_id");
+        const declaredTarget = envelope.metadata?.message_cancellation?.message_id;
+        if (declaredTarget && declaredTarget !== cancellationTarget) {
+          throw new Error("cancellation envelope metadata disagrees with correlation_id");
+        }
+      }
+      const priorCancellation = SILENT_PROTOCOL_MESSAGE_KINDS.has(kind)
+        ? null
+        : db.prepare(`
+            SELECT id FROM messages
+            WHERE direction='inbound' AND kind='cancellation' AND correlation_id=?
+            ORDER BY created_at ASC LIMIT 1
+          `).get(envelope.id);
+      const inboundState = kind === "acknowledgement" || kind === "cancellation"
+        ? "acknowledged"
+        : priorCancellation
+          ? "cancelled"
+          : "received";
       db.prepare(`
         INSERT INTO messages
           (id,created_at,sender,recipient,kind,subject,body,correlation_id,
@@ -437,24 +630,26 @@ function ingestInbox() {
         envelope.created_at || now(),
         envelope.sender,
         envelope.recipient,
-        envelope.kind || "message",
+        kind,
         envelope.subject || "",
         envelope.body || "",
         envelope.correlation_id || null,
         "inbound",
-        envelope.kind === "acknowledgement" ? "acknowledged" : "received",
+        inboundState,
         filePath,
         envelope.delivered_via || null,
         json(envelope.metadata),
       );
-      if (envelope.kind === "acknowledgement" && envelope.correlation_id) {
+      if (kind === "acknowledgement" && envelope.correlation_id) {
         db.prepare(`
           UPDATE messages
           SET state='acknowledged', acknowledged_at=?
           WHERE id=? AND direction='outbound'
         `).run(envelope.created_at || now(), envelope.correlation_id);
+        clearMessageWakeRetry(envelope.correlation_id);
       }
-      audit("ingest", "message", envelope.id, "received", { file_path: filePath });
+      if (kind === "cancellation") applyInboundCancellation(envelope);
+      audit("ingest", "message", envelope.id, inboundState, { file_path: filePath });
       imported += 1;
     } catch (error) {
       audit("ingest", "message", name, "rejected", { error: String(error) });
@@ -651,14 +846,28 @@ function rsyncFile(localPath, remoteDir, remoteName = null) {
 }
 
 function retryMessage(args) {
+  ingestInbox();
   const row = db.prepare(`
     SELECT * FROM messages WHERE id=? AND direction='outbound'
   `).get(args.message_id);
   if (!row) throw new Error(`outbound message not found: ${args.message_id}`);
+  if (row.state === "cancelled") {
+    return {
+      message_id: row.id,
+      envelope_path: row.envelope_path,
+      cancelled: true,
+      wake_requested: false,
+      wake_pending: false,
+      delivery: { ok: true, skipped: true, reason: "message cancelled", attempts: [] },
+      wake: null,
+    };
+  }
   if (row.state === "delivered" || row.state === "acknowledged") {
     return {
       message_id: row.id,
       envelope_path: row.envelope_path,
+      wake_requested: row.wake_requested !== 0,
+      wake_pending: false,
       delivery: { ok: true, already_delivered: true, host: row.delivered_via || null, attempts: [] },
       wake: null,
     };
@@ -666,44 +875,108 @@ function retryMessage(args) {
   if (!fs.existsSync(row.envelope_path)) {
     throw new Error(`immutable envelope is missing: ${row.envelope_path}`);
   }
-  if (!config.peer?.remote_inbox) throw new Error("peer.remote_inbox is not configured");
-  const delivery = rsyncFile(row.envelope_path, config.peer.remote_inbox);
-  if (delivery.ok) {
-    db.prepare("UPDATE messages SET state='delivered', delivered_via=? WHERE id=?")
-      .run(delivery.host, row.id);
+  const envelope = JSON.parse(fs.readFileSync(row.envelope_path, "utf8"));
+  const wakeRequested = row.wake_requested !== 0 && envelope.wake_requested !== false;
+  // Retrying an actionable message always retries its immutable wake. Callers
+  // cannot turn delivery into a hidden "do not read" operation.
+  const shouldWake = wakeRequested;
+  const wakeEligible = !SILENT_PROTOCOL_MESSAGE_KINDS.has(row.kind) && wakeRequested;
+  let delivery;
+  if (row.state === "wake_pending") {
+    delivery = {
+      ok: true,
+      already_delivered: true,
+      host: row.delivered_via || null,
+      attempts: [],
+    };
+  } else {
+    const current = db.prepare("SELECT state FROM messages WHERE id=?").get(row.id);
+    if (current?.state === "cancelled") {
+      return {
+        message_id: row.id,
+        envelope_path: row.envelope_path,
+        cancelled: true,
+        wake_requested: false,
+        wake_pending: false,
+        delivery: { ok: true, skipped: true, reason: "message cancelled", attempts: [] },
+        wake: null,
+      };
+    }
+    if (!config.peer?.remote_inbox) throw new Error("peer.remote_inbox is not configured");
+    delivery = rsyncFile(row.envelope_path, config.peer.remote_inbox);
+    if (delivery.ok) {
+      db.prepare("UPDATE messages SET state=?, delivered_via=? WHERE id=? AND state!='cancelled'")
+        .run(wakeEligible ? "wake_pending" : "delivered", delivery.host, row.id);
+    }
   }
   let wake = null;
-  if (delivery.ok && row.kind !== "acknowledgement" && args.wake !== false) {
+  const stateBeforeWake = db.prepare("SELECT state FROM messages WHERE id=?").get(row.id)?.state;
+  if (delivery.ok && !SILENT_PROTOCOL_MESSAGE_KINDS.has(row.kind) && shouldWake &&
+      stateBeforeWake !== "cancelled") {
     wake = wakePeerThread({
       message_id: row.id,
       subject: row.subject,
       body: row.body,
     });
   }
-  audit("retry", "message", row.id, delivery.ok ? "delivered" : "queued", {
+  const finalState = db.prepare("SELECT state FROM messages WHERE id=?").get(row.id)?.state;
+  const cancelledDuringRetry = finalState === "cancelled";
+  const wakePending = delivery.ok && wakeEligible && !cancelledDuringRetry;
+  audit("retry", "message", row.id, cancelledDuringRetry
+    ? "cancelled"
+    : delivery.ok
+      ? (wakePending ? "wake_pending" : "delivered")
+      : "queued", {
     delivery,
     wake,
+    wake_requested: wakeRequested,
+    wake_attempted: shouldWake,
   });
-  if (!delivery.ok) {
+  if ((!delivery.ok || wakePending) && !cancelledDuringRetry) {
     enqueueDeliveryReference(
-      "hawkspan-messages", `message-${row.id}`, { message_id: row.id, wake: args.wake !== false }, 100,
+      "hawkspan-messages",
+      `message-${row.id}`,
+      messageQueuePayload(row.id, wakeRequested, exactWakeTarget(envelope, row.recipient)),
+      100,
+      wake?.deferred === true ? wake.deadline_at : null,
     );
   }
-  return { message_id: row.id, envelope_path: row.envelope_path, delivery, wake };
+  return {
+    message_id: row.id,
+    envelope_path: row.envelope_path,
+    cancelled: cancelledDuringRetry,
+    wake_requested: wakeRequested,
+    wake_pending: wakePending,
+    delivery,
+    wake,
+  };
 }
 
 function sendMessage(args, { onEnvelopeWritten = null } = {}) {
   const messageId = id("msg");
+  const kind = args.kind || "message";
+  // Protocol receipts and cancellation controls remain silent. Every actual coordination message
+  // targets and wakes one exact Codex task; there is no caller no-wake mode.
+  const wakeRequested = !SILENT_PROTOCOL_MESSAGE_KINDS.has(kind);
+  const recipient = args.recipient || config.peer?.node_id || "peer";
+  const targetThreadId = typeof args.target_thread_id === "string" && args.target_thread_id.trim()
+    ? args.target_thread_id.trim()
+    : null;
+  if (wakeRequested && !targetThreadId) {
+    throw new Error("actionable messages require exact target_thread_id");
+  }
   const envelope = {
     schema_version: 1,
     id: messageId,
     created_at: now(),
     sender: config.node_id,
-    recipient: args.recipient || config.peer?.node_id || "peer",
-    kind: args.kind || "message",
+    recipient,
+    target_thread_id: targetThreadId,
+    kind,
     subject: args.subject,
     body: args.body,
     correlation_id: args.correlation_id || null,
+    wake_requested: wakeRequested,
     metadata: args.metadata || {},
   };
   const envelopePath = writeEnvelope(envelope);
@@ -712,8 +985,8 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
     db.prepare(`
       INSERT INTO messages
         (id,created_at,sender,recipient,kind,subject,body,correlation_id,
-         direction,state,envelope_path,metadata_json)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+         direction,state,envelope_path,wake_requested,metadata_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       messageId,
       envelope.created_at,
@@ -726,6 +999,7 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
       "outbound",
       "queued",
       envelopePath,
+      wakeRequested ? 1 : 0,
       json(envelope.metadata),
     );
   } catch (error) {
@@ -736,28 +1010,421 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
   if (args.deliver !== false && config.peer?.remote_inbox) {
     delivery = rsyncFile(envelopePath, config.peer.remote_inbox);
     if (delivery.ok) {
-      db.prepare("UPDATE messages SET state='delivered', delivered_via=? WHERE id=?")
-        .run(delivery.host, messageId);
+      const wakePending = !SILENT_PROTOCOL_MESSAGE_KINDS.has(envelope.kind) && wakeRequested;
+      db.prepare("UPDATE messages SET state=?, delivered_via=? WHERE id=?")
+        .run(wakePending ? "wake_pending" : "delivered", delivery.host, messageId);
     }
   }
   let wake = null;
-  if (delivery?.ok && envelope.kind !== "acknowledgement" && args.wake !== false) {
+  if (delivery?.ok && !SILENT_PROTOCOL_MESSAGE_KINDS.has(envelope.kind) && wakeRequested) {
     wake = wakePeerThread({
       message_id: messageId,
       subject: envelope.subject,
       body: envelope.body,
     });
   }
-  audit("send", "message", messageId, delivery?.ok ? "delivered" : "queued", {
+  const wakePending = Boolean(
+    delivery?.ok && !SILENT_PROTOCOL_MESSAGE_KINDS.has(envelope.kind) && wakeRequested,
+  );
+  audit("send", "message", messageId, delivery?.ok ? (wakePending ? "wake_pending" : "delivered") : "queued", {
     delivery,
     wake,
+    wake_requested: wakeRequested,
   });
-  if (args.deliver !== false && !delivery?.ok) {
+  if (args.deliver !== false && (!delivery?.ok || wakePending)) {
     enqueueDeliveryReference(
-      "hawkspan-messages", `message-${messageId}`, { message_id: messageId, wake: args.wake !== false }, 100,
+      "hawkspan-messages",
+      `message-${messageId}`,
+      messageQueuePayload(messageId, wakeRequested, targetThreadId),
+      100,
+      wake?.deferred === true ? wake.deadline_at : null,
     );
   }
-  return { message_id: messageId, envelope_path: envelopePath, delivery, wake };
+  return {
+    message_id: messageId,
+    envelope_path: envelopePath,
+    wake_requested: wakeRequested,
+    wake_pending: wakePending,
+    delivery,
+    wake,
+  };
+}
+
+function sendCoordinationMessage(args) {
+  if (SILENT_PROTOCOL_MESSAGE_KINDS.has(args.kind || "message")) {
+    throw new Error("protocol messages must use their dedicated HawkSpan tools");
+  }
+  // Ignore obsolete caller wake/deliver flags from older clients. Sending a
+  // message means delivering it and waking its exact target.
+  return sendMessage({ ...args, deliver: true });
+}
+
+function cancellationSummary(original, cancellation, extra = {}) {
+  const receipt = db.prepare(`
+    SELECT metadata_json FROM messages
+    WHERE direction='inbound' AND kind='acknowledgement' AND correlation_id=?
+    ORDER BY created_at DESC LIMIT 1
+  `).get(cancellation.id);
+  let peerStatus = "pending";
+  if (receipt) {
+    try {
+      peerStatus = JSON.parse(receipt.metadata_json)?.message_cancellation?.result || "pending";
+    } catch {
+      peerStatus = "pending";
+    }
+  }
+  return {
+    message_id: original.id,
+    cancelled: true,
+    already_cancelled: original.state === "cancelled" && extra.created !== true,
+    local_state: original.state,
+    cancellation_message_id: cancellation.id,
+    cancellation_state: cancellation.state,
+    peer_status: peerStatus,
+    ...extra,
+  };
+}
+
+function cancelMessage(args) {
+  ingestInbox();
+  const original = db.prepare(`
+    SELECT * FROM messages WHERE id=? AND direction='outbound'
+  `).get(args.message_id);
+  if (!original) throw new Error(`outbound message not found: ${args.message_id}`);
+  if (SILENT_PROTOCOL_MESSAGE_KINDS.has(original.kind)) {
+    throw new Error(`protocol message cannot be cancelled through cancel_message: ${original.kind}`);
+  }
+  const existing = db.prepare(`
+    SELECT * FROM messages
+    WHERE direction='outbound' AND kind='cancellation' AND correlation_id=?
+    ORDER BY created_at ASC LIMIT 1
+  `).get(original.id);
+  if (existing) {
+    const current = db.prepare("SELECT * FROM messages WHERE id=?").get(original.id);
+    return cancellationSummary(current, existing);
+  }
+  if (original.state === "acknowledged") {
+    audit("cancel", "message", original.id, "too_late", { origin: "local" });
+    return {
+      message_id: original.id,
+      cancelled: false,
+      too_late: true,
+      local_state: original.state,
+      cancellation_message_id: null,
+      cancellation_state: null,
+      peer_status: "too_late",
+      queue_items_cancelled: [],
+      queue_items_in_flight: [],
+    };
+  }
+
+  let cancellation = null;
+  const queueItemsCancelled = [];
+  const queueItemsInFlight = [];
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const locked = db.prepare("SELECT * FROM messages WHERE id=? AND direction='outbound'")
+      .get(original.id);
+    const raced = db.prepare(`
+      SELECT * FROM messages
+      WHERE direction='outbound' AND kind='cancellation' AND correlation_id=?
+      ORDER BY created_at ASC LIMIT 1
+    `).get(original.id);
+    if (raced) {
+      db.exec("COMMIT");
+      return cancellationSummary(locked, raced);
+    }
+    if (locked.state === "acknowledged") {
+      db.exec("COMMIT");
+      return {
+        message_id: locked.id,
+        cancelled: false,
+        too_late: true,
+        local_state: locked.state,
+        cancellation_message_id: null,
+        cancellation_state: null,
+        peer_status: "too_late",
+        queue_items_cancelled: [],
+        queue_items_in_flight: [],
+      };
+    }
+    const reason = String(args.reason || "Message cancelled by its sender.");
+    const sent = sendMessage({
+      recipient: locked.recipient,
+      kind: "cancellation",
+      subject: `Cancel: ${locked.subject}`,
+      body: reason,
+      correlation_id: locked.id,
+      metadata: {
+        message_cancellation: {
+          message_id: locked.id,
+          reason,
+          requested_at: now(),
+        },
+      },
+      deliver: false,
+    });
+    cancellation = db.prepare("SELECT * FROM messages WHERE id=?").get(sent.message_id);
+    db.prepare("UPDATE messages SET state='cancelled',wake_requested=0 WHERE id=?")
+      .run(locked.id);
+    const queueItems = db.prepare(`
+      SELECT id,state,payload_json FROM queue_items
+      WHERE queue_id='hawkspan-messages' AND state IN ('queued','running','paused','failed')
+    `).all();
+    for (const item of queueItems) {
+      let payload;
+      try {
+        payload = JSON.parse(item.payload_json);
+      } catch {
+        continue;
+      }
+      if (payload.message_id !== locked.id) continue;
+      if (item.state === "running") {
+        queueItemsInFlight.push(item.id);
+        continue;
+      }
+      db.prepare(`
+        UPDATE queue_items SET state='cancelled',updated_at=?,next_attempt_at=NULL,
+          lease_owner=NULL,lease_expires_at=NULL,lease_token=NULL,error=? WHERE id=?
+      `).run(now(), `message cancelled: ${reason}`, item.id);
+      queueItemsCancelled.push(item.id);
+    }
+    audit("cancel", "message", locked.id, "cancelled", {
+      origin: "local",
+      cancellation_message_id: cancellation.id,
+      queue_items_cancelled: queueItemsCancelled,
+      queue_items_in_flight: queueItemsInFlight,
+      reason,
+    });
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    if (cancellation?.envelope_path) fs.rmSync(cancellation.envelope_path, { force: true });
+    throw error;
+  }
+
+  let delivery;
+  try {
+    delivery = retryMessage({ message_id: cancellation.id });
+  } catch (error) {
+    delivery = { message_id: cancellation.id, error: String(error?.message || error) };
+  }
+  const currentOriginal = db.prepare("SELECT * FROM messages WHERE id=?").get(original.id);
+  const currentCancellation = db.prepare("SELECT * FROM messages WHERE id=?").get(cancellation.id);
+  return cancellationSummary(currentOriginal, currentCancellation, {
+    created: true,
+    queue_items_cancelled: queueItemsCancelled,
+    queue_items_in_flight: queueItemsInFlight,
+    delivery,
+  });
+}
+
+function latestWakeReceipt(messageId, receiverThreadId) {
+  const row = db.prepare(`
+    SELECT sequence,timestamp,details_json FROM audit_events
+    WHERE action='wake' AND object_type='thread' AND object_id=? AND result='started'
+      AND json_extract(details_json,'$.message_id')=?
+    ORDER BY sequence DESC LIMIT 1
+  `).get(receiverThreadId, messageId);
+  if (!row) return null;
+  let details;
+  try {
+    details = JSON.parse(row.details_json);
+  } catch {
+    return null;
+  }
+  const wakeId = String(details.wake_id || "");
+  const resultPath = String(details.result_path || "");
+  const deadlineAt = String(details.deadline_at || "");
+  const host = String(details.host || "");
+  const configuredHosts = new Set([
+    config.peer?.primary_host,
+    config.peer?.fallback_host,
+  ].filter(Boolean));
+  if (!wakeId || !path.posix.isAbsolute(resultPath) ||
+      path.posix.basename(resultPath) !== `${wakeId}.result.json` ||
+      !Number.isFinite(Date.parse(deadlineAt)) || !configuredHosts.has(host)) {
+    return null;
+  }
+  return {
+    wake_id: wakeId,
+    message_id: messageId,
+    host,
+    result_path: resultPath,
+    deadline_at: deadlineAt,
+    started_sequence: row.sequence,
+    started_at: row.timestamp,
+  };
+}
+
+function existingWakeReconciliation(receipt) {
+  const row = db.prepare(`
+    SELECT result,details_json FROM audit_events
+    WHERE action='wake_reconcile' AND object_type='message' AND object_id=?
+      AND json_extract(details_json,'$.wake_id')=?
+    ORDER BY sequence DESC LIMIT 1
+  `).get(receipt.message_id, receipt.wake_id);
+  if (!row) return null;
+  try {
+    return { result: row.result, details: JSON.parse(row.details_json) };
+  } catch {
+    return null;
+  }
+}
+
+function readRemoteWakeResult(receipt) {
+  const command = `if [ -f ${shellQuote(receipt.result_path)} ]; then ` +
+    `cat ${shellQuote(receipt.result_path)}; else exit 44; fi`;
+  const hosts = [receipt.host, ...peerCandidates()]
+    .filter((host, index, values) => host && values.indexOf(host) === index);
+  const attempts = [];
+  for (const host of hosts) {
+    const result = spawnSync("ssh", sshArgs(host, command), {
+      encoding: "utf8",
+      timeout: Math.max(15000, Number(config.link.connect_timeout_ms) + 5000),
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const attempt = {
+      host,
+      status: result.status,
+      error: result.error
+        ? String(result.error.message || result.error)
+        : result.stderr?.trim() || "",
+    };
+    attempts.push(attempt);
+    if (result.status === 44) {
+      recordRouteSuccess(host);
+      return { state: "pending", attempts };
+    }
+    if (result.error || result.status !== 0) {
+      recordRouteFailure(host);
+      continue;
+    }
+    recordRouteSuccess(host);
+    try {
+      const terminalResult = JSON.parse(result.stdout);
+      if (terminalResult?.schema_version !== 1 ||
+          terminalResult.wake_id !== receipt.wake_id ||
+          terminalResult.message_id !== receipt.message_id ||
+          typeof terminalResult.status !== "string" || !terminalResult.status ||
+          typeof terminalResult.acknowledged !== "boolean" ||
+          !Number.isFinite(Date.parse(String(terminalResult.completed_at || "")))) {
+        throw new Error("wake result identity or terminal fields do not match the STARTED receipt");
+      }
+      return { state: "terminal", terminal_result: terminalResult, attempts };
+    } catch (error) {
+      return {
+        state: "invalid",
+        error: String(error?.message || error),
+        attempts,
+      };
+    }
+  }
+  return { state: "unavailable", attempts };
+}
+
+function terminalWakeResponse(receipt, terminalResult, attempts = []) {
+  const acknowledged = terminalResult.acknowledged === true;
+  const beforeDeadline = Date.now() < Date.parse(receipt.deadline_at);
+  return {
+    ok: acknowledged,
+    skipped: true,
+    deferred: !acknowledged && beforeDeadline,
+    reconciled: true,
+    acknowledged,
+    ...(acknowledged ? {} : { error: `prior wake ended with status ${terminalResult.status}` }),
+    host: receipt.host,
+    wake_id: receipt.wake_id,
+    result_path: receipt.result_path,
+    deadline_at: receipt.deadline_at,
+    terminal_result: terminalResult,
+    attempts,
+  };
+}
+
+function reconcileWakeBeforeLaunch(messageId, receiverThreadId) {
+  if (!messageId) return null;
+  const receipt = latestWakeReceipt(messageId, receiverThreadId);
+  if (!receipt) return null;
+  const existing = existingWakeReconciliation(receipt);
+  if (existing?.result === "terminal" && existing.details?.terminal_result) {
+    const terminalResult = existing.details.terminal_result;
+    if (terminalResult.acknowledged === true || Date.now() < Date.parse(receipt.deadline_at)) {
+      return terminalWakeResponse(receipt, terminalResult);
+    }
+    return null;
+  }
+  if (existing?.result === "deadline_expired") return null;
+
+  const collected = readRemoteWakeResult(receipt);
+  if (collected.state === "terminal") {
+    audit("wake_reconcile", "message", messageId, "terminal", {
+      ...receipt,
+      terminal_result: collected.terminal_result,
+      attempts: collected.attempts,
+    });
+    return terminalWakeResponse(receipt, collected.terminal_result, collected.attempts);
+  }
+
+  if (Date.now() < Date.parse(receipt.deadline_at)) {
+    return {
+      ok: false,
+      skipped: true,
+      deferred: true,
+      reconciled: false,
+      error: collected.state === "pending"
+        ? "prior wake is still within its deadline"
+        : "prior wake result is unavailable within its deadline",
+      host: receipt.host,
+      wake_id: receipt.wake_id,
+      result_path: receipt.result_path,
+      deadline_at: receipt.deadline_at,
+      result_state: collected.state,
+      ...(collected.error ? { result_error: collected.error } : {}),
+      attempts: collected.attempts,
+    };
+  }
+
+  audit("wake_reconcile", "message", messageId, "deadline_expired", {
+    ...receipt,
+    result_state: collected.state,
+    ...(collected.error ? { result_error: collected.error } : {}),
+    attempts: collected.attempts,
+  });
+  return null;
+}
+
+function activeReceiverWakeBeforeLaunch(messageId, receiverThreadId, targetThreadId) {
+  if (!messageId) return null;
+  const row = targetThreadId
+    ? db.prepare(`
+        SELECT json_extract(details_json,'$.message_id') AS message_id
+        FROM audit_events
+        WHERE action='wake' AND object_type='thread' AND object_id=? AND result='started'
+          AND json_extract(details_json,'$.target_thread_id')=?
+          AND json_extract(details_json,'$.message_id')<>?
+        ORDER BY sequence DESC LIMIT 1
+      `).get(receiverThreadId, targetThreadId, messageId)
+    : db.prepare(`
+        SELECT json_extract(details_json,'$.message_id') AS message_id
+        FROM audit_events
+        WHERE action='wake' AND object_type='thread' AND object_id=? AND result='started'
+          AND json_extract(details_json,'$.target_thread_id') IS NULL
+          AND json_extract(details_json,'$.message_id')<>?
+        ORDER BY sequence DESC LIMIT 1
+      `).get(receiverThreadId, messageId);
+  const activeMessageId = String(row?.message_id || "");
+  if (!activeMessageId) return null;
+  const active = reconcileWakeBeforeLaunch(activeMessageId, receiverThreadId);
+  if (!active || (active.reconciled === true && active.terminal_result)) return null;
+  return {
+    ...active,
+    ok: false,
+    skipped: true,
+    deferred: true,
+    active_message_id: activeMessageId,
+    error: "another wake for this exact receiver is still within its retained deadline",
+  };
 }
 
 function wakePeerThread(args) {
@@ -769,9 +1436,65 @@ function wakePeerThread(args) {
       attempts: [],
     };
   }
-  if (!config.peer?.thread_id) {
-    return { ok: false, error: "peer.thread_id is not configured", attempts: [] };
+  const storedMessage = args.message_id
+    ? db.prepare(`
+        SELECT recipient,subject,body,envelope_path,state,kind,pruned_at FROM messages
+        WHERE id=? AND direction='outbound'
+      `).get(args.message_id)
+    : null;
+  if (
+    storedMessage?.pruned_at
+    || storedMessage?.state === "cancelled"
+    || SILENT_PROTOCOL_MESSAGE_KINDS.has(storedMessage?.kind)
+  ) {
+    return {
+      ok: true,
+      skipped: true,
+      cancelled: storedMessage.state === "cancelled",
+      reason: storedMessage.pruned_at
+        ? "terminal message pruned"
+        : storedMessage.state === "cancelled"
+          ? "message cancelled"
+          : "silent protocol message",
+      attempts: [],
+    };
   }
+  let storedEnvelope = null;
+  if (storedMessage?.envelope_path) {
+    try {
+      storedEnvelope = JSON.parse(fs.readFileSync(storedMessage.envelope_path, "utf8"));
+    } catch (error) {
+      return {
+        ok: false,
+        error: `immutable message envelope is unreadable: ${String(error.message || error)}`,
+        attempts: [],
+      };
+    }
+  }
+  const targetThreadId = exactWakeTarget(storedEnvelope, storedMessage?.recipient);
+  if (targetThreadId && !config.peer?.codex_ipc_socket) {
+    return {
+      ok: false,
+      error: "peer.codex_ipc_socket is required for a targeted wake; message remains unacknowledged",
+      attempts: [],
+    };
+  }
+  const receiverThreadId = config.peer?.thread_id;
+  if (!receiverThreadId) {
+    return {
+      ok: false,
+      error: "peer.thread_id receiver is not configured",
+      attempts: [],
+    };
+  }
+  const priorWake = reconcileWakeBeforeLaunch(args.message_id, receiverThreadId);
+  if (priorWake) return priorWake;
+  const activeReceiverWake = activeReceiverWakeBeforeLaunch(
+    args.message_id,
+    receiverThreadId,
+    targetThreadId,
+  );
+  if (activeReceiverWake) return activeReceiverWake;
   const codexCommand = config.peer.codex_command || "codex";
   const remoteNode = config.peer.remote_node || "node";
   let peerRelease = null;
@@ -798,55 +1521,67 @@ function wakePeerThread(args) {
     return { ok: false, error: "peer release authority unavailable", attempts: discoveryAttempts };
   }
   const remoteCallTool = path.posix.join(peerRelease.active_release_root, "scripts", "call-tool.mjs");
+  const remoteWakeRunner = path.posix.join(peerRelease.active_release_root, "scripts", "wake-runner.mjs");
   const auditDir = config.peer.remote_audit || `${config.peer.remote_inbox}/../audit`;
   const wakeId = id("wake");
   const logPath = path.posix.join(auditDir, `${wakeId}.log`);
+  const resultPath = path.posix.join(auditDir, `${wakeId}.result.json`);
+  const receiverDigest = wakeReceiverDigest(targetThreadId);
   const leasePath = path.posix.join(
     auditDir,
-    `wake-${String(config.peer.thread_id).replace(/[^A-Za-z0-9._-]/g, "_")}.lock`,
+    `wake-${receiverDigest}.lock`,
   );
-  const prompt = [
-    `HawkSpan-D delivered message ${args.message_id || "unknown"}.`,
-    args.subject ? `Subject: ${args.subject}.` : "",
-    args.body ? `Message body: ${args.body}` : "",
-    "Import and acknowledge the durable envelope when MCP tools are available.",
-    "If exec mode cannot load dynamic MCP tools, this embedded message body is authoritative.",
-    `Direct receive fallback: ${remoteNode} ${remoteCallTool} receive_messages '{"limit":20}'`,
-    `Direct acknowledge fallback: ${remoteNode} ${remoteCallTool} acknowledge_message ` +
-      `'{"message_id":"${args.message_id || "unknown"}","deliver":true}'`,
-    "Continue the existing task without repeating completed work.",
+  const subject = args.subject || storedMessage?.subject || "";
+  const body = args.body || storedMessage?.body || "";
+  const forwardedPrompt = [
+    `HawkSpan durable message ${args.message_id || "unknown"}.`,
+    subject ? `Subject: ${subject}.` : "",
+    body ? `Message body: ${body}` : "",
+    "Treat repeated delivery of the same HawkSpan message ID idempotently.",
   ].filter(Boolean).join(" ");
-  const resumedCommand = [
-    "trap",
-    shellQuote(`rm -rf ${shellQuote(leasePath)}`),
-    "EXIT HUP INT TERM",
-    ";",
-    shellQuote(codexCommand),
-    "exec",
-    "resume",
-    "--skip-git-repo-check",
-    shellQuote(config.peer.thread_id),
-    shellQuote(prompt),
-  ].join(" ");
+  const prompt = [
+    `HawkSpan-D receiver imported durable message ${args.message_id || "unknown"}.`,
+    targetThreadId
+      ? `Its immutable target_thread_id is ${targetThreadId}.`
+      : "It has no target_thread_id, so handle it in this receiver turn.",
+    targetThreadId
+      ? "The fenced HawkSpan runner owns the application-side handoff to that target task."
+      : forwardedPrompt,
+    targetThreadId
+      ? "Do not execute the forwarded message in this receiver task."
+      : "Receiver handling is accepted only after the message has been processed.",
+    "Do not call acknowledge_message; the fenced runner owns durable acknowledgement.",
+    `If and only if the message is accepted, return only JSON ` +
+      `{"message_id":"${args.message_id || "unknown"}","status":"accepted"}.`,
+    "If it cannot be accepted, exit without returning that acceptance object.",
+  ].filter(Boolean).join(" ");
+  const launchRequest = {
+    schema_version: 1,
+    wake_id: wakeId,
+    message_id: args.message_id || "unknown",
+    thread_id: receiverThreadId,
+    target_thread_id: targetThreadId,
+    handoff_prompt: targetThreadId ? forwardedPrompt : null,
+    codex_ipc_socket: targetThreadId ? config.peer.codex_ipc_socket : null,
+    prompt,
+    codex_command: codexCommand,
+    node_command: remoteNode,
+    call_tool_path: remoteCallTool,
+    audit_dir: auditDir,
+    log_path: logPath,
+    lease_path: leasePath,
+    result_path: resultPath,
+    timeout_ms: Number(config.peer.wake_timeout_ms || 120000),
+    termination_grace_ms: Number(config.peer.wake_termination_grace_ms || 5000),
+  };
+  const encodedRequest = Buffer.from(JSON.stringify(launchRequest), "utf8").toString("base64");
   const command = [
     `mkdir -p ${shellQuote(auditDir)}`,
     "&&",
-    "(",
-    `mkdir ${shellQuote(leasePath)} 2>/dev/null`,
-    "||",
-    "exit 0",
-    ")",
-    "&&",
-    "nohup",
-    "/bin/sh",
-    "-c",
-    shellQuote(resumedCommand),
-    ">",
-    shellQuote(logPath),
-    "2>&1",
-    "<",
-    "/dev/null",
-    "&",
+    shellQuote(remoteNode),
+    shellQuote(remoteWakeRunner),
+    "launch",
+    shellQuote(encodedRequest),
   ].join(" ");
   const attempts = [...discoveryAttempts.map((attempt) => ({ ...attempt, phase: "release_discovery" }))];
   for (const { host, cycle, delay_ms: delayMs, is_last_route: isLastRoute } of routeAttemptPlan(
@@ -863,26 +1598,100 @@ function wakePeerThread(args) {
           Math.max(15000, config.link.connect_timeout_ms + 5000),
         ),
       });
+      let marker = null;
+      try {
+        const line = String(result.stdout || "").trim().split("\n").filter(Boolean).at(-1);
+        marker = line ? JSON.parse(line) : null;
+      } catch {
+        marker = null;
+      }
       attempts.push({
         cycle,
         host,
         status: result.status,
         error: result.stderr?.trim() || "",
+        marker,
       });
-      if (result.status === 0) {
+      if (result.status === 0 && marker?.status === "started") {
         recordRouteSuccess(host);
-        audit("wake", "thread", config.peer.thread_id, "started", {
+        const deadlineAt = Number.isFinite(Date.parse(String(marker.deadline_at || "")))
+          ? marker.deadline_at
+          : null;
+        if (!deadlineAt) {
+          const error = "wake runner STARTED response omitted its deadline";
+          audit("wake", "thread", receiverThreadId, "failed", {
+            host,
+            peer_revision: peerRelease.revision,
+            wake_id: wakeId,
+            result_path: resultPath,
+            message_id: args.message_id || null,
+            target_thread_id: targetThreadId,
+            error,
+            marker,
+          });
+          return { ok: false, error, host, wake_id: wakeId, attempts };
+        }
+        audit("wake", "thread", receiverThreadId, "started", {
           host,
           peer_revision: peerRelease.revision,
           wake_id: wakeId,
           log_path: logPath,
+          result_path: resultPath,
+          deadline_at: deadlineAt,
           message_id: args.message_id || null,
+          target_thread_id: targetThreadId,
+          runner_pid: marker.pid || null,
         });
-        return { ok: true, host, wake_id: wakeId, log_path: logPath, attempts };
+        return {
+          ok: true,
+          host,
+          wake_id: wakeId,
+          log_path: logPath,
+          result_path: resultPath,
+          deadline_at: deadlineAt,
+          target_thread_id: targetThreadId,
+          attempts,
+        };
+      }
+      if (marker?.status === "busy") {
+        recordRouteSuccess(host);
+        audit("wake", "thread", receiverThreadId, "busy", {
+          host,
+          wake_id: wakeId,
+          message_id: args.message_id || null,
+          target_thread_id: targetThreadId,
+          marker,
+        });
+        return {
+          ok: false,
+          skipped: true,
+          busy: true,
+          error: "peer receiver is already active",
+          host,
+          wake_id: wakeId,
+          target_thread_id: targetThreadId,
+          attempts,
+        };
+      }
+      if (marker?.status === "failed" || result.status === 0) {
+        recordRouteSuccess(host);
+        const error = marker?.error || "invalid wake runner response";
+        audit("wake", "thread", receiverThreadId, "failed", {
+          host,
+          wake_id: wakeId,
+          message_id: args.message_id || null,
+          target_thread_id: targetThreadId,
+          error,
+          marker,
+        });
+        return { ok: false, error, host, wake_id: wakeId, attempts };
       }
       recordRouteFailure(host);
   }
-  audit("wake", "thread", config.peer.thread_id, "failed", { attempts });
+  audit("wake", "thread", receiverThreadId, "failed", {
+    target_thread_id: targetThreadId,
+    attempts,
+  });
   return { ok: false, error: "all routes failed", wake_id: wakeId, attempts };
 }
 
@@ -897,7 +1706,7 @@ function receiveMessages(args) {
     SELECT id,created_at,sender,recipient,kind,subject,body,correlation_id,state,
            metadata_json
     FROM messages
-    WHERE direction='inbound' AND state IN (${placeholders})
+    WHERE direction='inbound' AND state IN (${placeholders}) AND pruned_at IS NULL
     ORDER BY created_at ASC
     LIMIT ?
   `).all(...states, limit);
@@ -924,18 +1733,234 @@ function listMessages(args) {
     clauses.push("state=?");
     values.push(args.state);
   }
+  if (args.include_pruned !== true) clauses.push("pruned_at IS NULL");
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = db.prepare(`
     SELECT id,created_at,sender,recipient,kind,subject,body,correlation_id,
-           direction,state,envelope_path,delivered_via,acknowledged_at,metadata_json
+           direction,state,envelope_path,delivered_via,acknowledged_at,
+           pruned_at,wake_requested,metadata_json
     FROM messages ${where}
     ORDER BY created_at DESC LIMIT ?
   `).all(...values, limit);
   return rows.map((row) => ({
     ...row,
+    wake_requested: row.direction === "outbound" ? row.wake_requested !== 0 : null,
     metadata: JSON.parse(row.metadata_json),
     metadata_json: undefined,
   }));
+}
+
+function terminalMessagePruningEligibility(row) {
+  if (row.state === "acknowledged") return { eligible: true };
+  if (
+    row.direction === "outbound"
+    && row.kind === "acknowledgement"
+    && row.state === "delivered"
+  ) {
+    return { eligible: true };
+  }
+  if (row.state !== "cancelled") {
+    return { eligible: false, reason: "message is not safely terminal" };
+  }
+  if (row.direction === "inbound") {
+    const tombstone = db.prepare(`
+      SELECT id FROM messages
+      WHERE direction='inbound' AND kind='cancellation' AND correlation_id=?
+      ORDER BY created_at ASC LIMIT 1
+    `).get(row.id);
+    return tombstone
+      ? { eligible: true, evidence_message_id: tombstone.id }
+      : { eligible: false, reason: "cancelled inbound message has no durable peer tombstone" };
+  }
+  const cancellation = db.prepare(`
+    SELECT id FROM messages
+    WHERE direction='outbound' AND kind='cancellation' AND correlation_id=?
+    ORDER BY created_at ASC LIMIT 1
+  `).get(row.id);
+  if (!cancellation) {
+    return { eligible: false, reason: "cancelled outbound message has no durable cancellation" };
+  }
+  const receipt = db.prepare(`
+    SELECT id,metadata_json FROM messages
+    WHERE direction='inbound' AND kind='acknowledgement' AND correlation_id=?
+    ORDER BY created_at ASC LIMIT 1
+  `).get(cancellation.id);
+  let peerResult = null;
+  try {
+    peerResult = JSON.parse(receipt?.metadata_json || "{}")?.message_cancellation?.result || null;
+  } catch {
+    peerResult = null;
+  }
+  return peerResult === "applied"
+    ? { eligible: true, evidence_message_id: receipt.id }
+    : {
+        eligible: false,
+        reason: "cancelled outbound message has no applied peer tombstone receipt",
+        peer_status: peerResult || "pending",
+      };
+}
+
+function messageEnvelopePruningPath(row) {
+  const expectedRoot = row.direction === "inbound" ? INBOX : OUTBOX;
+  const resolved = path.resolve(row.envelope_path);
+  const relative = path.relative(expectedRoot, resolved);
+  if (
+    relative.startsWith("..")
+    || path.isAbsolute(relative)
+    || path.basename(resolved) !== `${row.id}.json`
+  ) {
+    throw new Error(`message envelope path is outside its durable spool: ${row.id}`);
+  }
+  return resolved;
+}
+
+function pruneTerminalMessages(args) {
+  ingestInbox();
+  const beforeDate = new Date(String(args.before || ""));
+  if (!Number.isFinite(beforeDate.getTime())) {
+    throw new Error("before must be a valid ISO-8601 timestamp");
+  }
+  const before = beforeDate.toISOString();
+  if (beforeDate.getTime() >= Date.now()) {
+    throw new Error("before must be earlier than the current time");
+  }
+  const limit = Math.min(Math.max(Number(args.limit || 100), 1), 1000);
+  const messageIds = Array.isArray(args.message_ids)
+    ? [...new Set(args.message_ids.map((value) => String(value).trim()).filter(Boolean))]
+    : [];
+  if (messageIds.length > 1000) throw new Error("message_ids cannot contain more than 1000 IDs");
+  const clauses = [
+    "created_at < ?",
+    "(state IN ('acknowledged','cancelled') OR "
+      + "(direction='outbound' AND kind='acknowledgement' AND state='delivered'))",
+  ];
+  const values = [before];
+  if (messageIds.length) {
+    clauses.push(`id IN (${messageIds.map(() => "?").join(",")})`);
+    values.push(...messageIds);
+  }
+  const candidates = db.prepare(`
+    SELECT * FROM messages
+    WHERE ${clauses.join(" AND ")}
+    ORDER BY created_at ASC
+    LIMIT ?
+  `).all(...values, limit);
+  const selected = [];
+  const skipped = [];
+  for (const row of candidates) {
+    const eligibility = terminalMessagePruningEligibility(row);
+    if (!eligibility.eligible) {
+      skipped.push({ message_id: row.id, state: row.state, ...eligibility });
+      continue;
+    }
+    const envelopePath = messageEnvelopePruningPath(row);
+    let envelopeBytes = 0;
+    try {
+      envelopeBytes = fs.statSync(envelopePath).size;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    selected.push({
+      row,
+      envelope_path: envelopePath,
+      envelope_bytes: envelopeBytes,
+      payload_bytes: Buffer.byteLength(row.subject) + Buffer.byteLength(row.body),
+      evidence_message_id: eligibility.evidence_message_id || null,
+    });
+  }
+  const dryRun = args.dry_run !== false;
+  const prunedAt = now();
+  const outcomes = [];
+  if (!dryRun) {
+    for (const entry of selected) {
+      if (entry.envelope_bytes) fs.rmSync(entry.envelope_path, { force: true });
+      if (entry.row.pruned_at) {
+        if (entry.envelope_bytes) {
+          audit("drop_replay", "message", entry.row.id, "pruned", {
+            file_path: entry.envelope_path,
+            envelope_bytes_removed: entry.envelope_bytes,
+          });
+        }
+        outcomes.push({
+          message_id: entry.row.id,
+          already_pruned: true,
+          payload_bytes_removed: 0,
+          envelope_bytes_removed: entry.envelope_bytes,
+          evidence_message_id: entry.evidence_message_id,
+        });
+        continue;
+      }
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const current = db.prepare("SELECT * FROM messages WHERE id=?").get(entry.row.id);
+        if (!current) throw new Error(`message disappeared while pruning: ${entry.row.id}`);
+        if (current.pruned_at) {
+          db.exec("COMMIT");
+          outcomes.push({
+            message_id: current.id,
+            already_pruned: true,
+            payload_bytes_removed: 0,
+            envelope_bytes_removed: entry.envelope_bytes,
+            evidence_message_id: entry.evidence_message_id,
+          });
+          continue;
+        }
+        const currentEligibility = terminalMessagePruningEligibility(current);
+        if (!currentEligibility.eligible) {
+          throw new Error(`message is no longer safely terminal: ${current.id}`);
+        }
+        const payloadBytes = Buffer.byteLength(current.subject) + Buffer.byteLength(current.body);
+        const changed = db.prepare(`
+          UPDATE messages SET subject='',body='',pruned_at=?
+          WHERE id=? AND pruned_at IS NULL
+        `).run(prunedAt, current.id);
+        if (changed.changes !== 1) {
+          throw new Error(`message changed while pruning: ${current.id}`);
+        }
+        audit("prune", "message", current.id, "pruned", {
+          created_at: current.created_at,
+          direction: current.direction,
+          state: current.state,
+          kind: current.kind,
+          payload_bytes_removed: payloadBytes,
+          envelope_bytes_removed: entry.envelope_bytes,
+          evidence_message_id: currentEligibility.evidence_message_id || null,
+        });
+        db.exec("COMMIT");
+        outcomes.push({
+          message_id: current.id,
+          already_pruned: false,
+          payload_bytes_removed: payloadBytes,
+          envelope_bytes_removed: entry.envelope_bytes,
+          evidence_message_id: currentEligibility.evidence_message_id || null,
+        });
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+  }
+  return {
+    before,
+    dry_run: dryRun,
+    candidate_count: candidates.length,
+    selected_count: selected.length,
+    pruned_count: outcomes.filter((entry) => !entry.already_pruned).length,
+    already_pruned_count: outcomes.filter((entry) => entry.already_pruned).length,
+    payload_bytes_selected: selected.reduce((total, entry) => total + entry.payload_bytes, 0),
+    envelope_bytes_selected: selected.reduce((total, entry) => total + entry.envelope_bytes, 0),
+    selected: selected.map((entry) => ({
+      message_id: entry.row.id,
+      state: entry.row.state,
+      direction: entry.row.direction,
+      already_pruned: Boolean(entry.row.pruned_at),
+      payload_bytes: entry.payload_bytes,
+      envelope_bytes: entry.envelope_bytes,
+      evidence_message_id: entry.evidence_message_id,
+    })),
+    outcomes,
+    skipped,
+  };
 }
 
 function acknowledgeMessage(args) {
@@ -943,6 +1968,16 @@ function acknowledgeMessage(args) {
     SELECT * FROM messages WHERE id=? AND direction='inbound'
   `).get(args.message_id);
   if (!row) throw new Error(`inbound message not found: ${args.message_id}`);
+  if (row.state === "cancelled") {
+    audit("acknowledge", "message", row.id, "cancelled", { reply: false });
+    return {
+      acknowledged_message_id: null,
+      cancelled_message_id: row.id,
+      acknowledged: false,
+      cancelled: true,
+      reply_sent: false,
+    };
+  }
   const acknowledgedAt = now();
   db.prepare(`
     UPDATE messages SET state='acknowledged', acknowledged_at=? WHERE id=?
@@ -1285,10 +2320,11 @@ function queueArtifactDelivery(args) {
   return { artifact_id: row.id, queued: true, queue_item: queued.item };
 }
 
-function flushOutbox(args) {
+function flushOutbox() {
+  ingestInbox();
   const messageRows = db.prepare(`
     SELECT id FROM messages
-    WHERE direction='outbound' AND state='queued'
+    WHERE direction='outbound' AND state IN ('queued','wake_pending')
     ORDER BY created_at ASC
   `).all();
   const artifactRows = db.prepare(`
@@ -1300,7 +2336,7 @@ function flushOutbox(args) {
   const artifacts = [];
   for (const row of messageRows) {
     try {
-      messages.push(retryMessage({ message_id: row.id, wake: args.wake !== false }));
+      messages.push(retryMessage({ message_id: row.id }));
     } catch (error) {
       messages.push({ message_id: row.id, error: String(error?.message || error) });
     }
@@ -2958,15 +3994,42 @@ function configureQueueSurface(args) {
 }
 
 function normalizeQueuePayload(queue, payload = {}, rollbackFiles = []) {
-  if (queue.adapter === "message" && !payload.message_id) {
-    if (!payload.subject || !payload.body) {
-      throw new Error("message queue items require message_id or subject and body");
+  if (queue.adapter === "message") {
+    if (!payload.message_id) {
+      if (!payload.subject || !payload.body) {
+        throw new Error("message queue items require message_id or subject and body");
+      }
+      if (SILENT_PROTOCOL_MESSAGE_KINDS.has(payload.kind || "message")) {
+        throw new Error("protocol messages must use their dedicated HawkSpan tools");
+      }
+      const message = sendMessage(
+        { ...payload, deliver: false },
+        { onEnvelopeWritten: (envelopePath) => rollbackFiles.push(envelopePath) },
+      );
+      return messageQueuePayload(
+        message.message_id,
+        message.wake_requested,
+        String(payload.target_thread_id || "").trim() || null,
+        false,
+        false,
+      );
     }
-    const message = sendMessage(
-      { ...payload, deliver: false },
-      { onEnvelopeWritten: (envelopePath) => rollbackFiles.push(envelopePath) },
+    const row = db.prepare(`
+      SELECT id,recipient,envelope_path,wake_requested FROM messages
+      WHERE id=? AND direction='outbound'
+    `).get(String(payload.message_id));
+    if (!row || !fs.existsSync(row.envelope_path)) {
+      throw new Error(`outbound message envelope not found: ${payload.message_id}`);
+    }
+    const envelope = JSON.parse(fs.readFileSync(row.envelope_path, "utf8"));
+    const wakeRequested = row.wake_requested !== 0 && envelope.wake_requested !== false;
+    return messageQueuePayload(
+      row.id,
+      wakeRequested,
+      exactWakeTarget(envelope, row.recipient),
+      false,
+      false,
     );
-    return { message_id: message.message_id, wake: payload.wake !== false };
   }
   if (queue.adapter === "artifact" && !payload.artifact_id) {
     if (!payload.path) throw new Error("artifact queue items require artifact_id or path");
@@ -3145,6 +4208,45 @@ async function superviseQueue(args) {
         result = await executeQueueAdapter(queue, claim.item);
       } finally {
         clearInterval(heartbeat);
+      }
+      if (queue.adapter === "message" && result?.wake_pending === true) {
+        const pollDelayMs = Math.max(
+          1000,
+          Number(config.queue_supervisor.poll_interval_ms || 120000),
+        );
+        const wakeDeadlineMs = Date.parse(String(result?.wake?.deadline_at || ""));
+        const hasWakeDeadline = Number.isFinite(wakeDeadlineMs) &&
+          !(result?.wake?.reconciled === true && result?.wake?.acknowledged === true)
+          && wakeDeadlineMs > Date.now();
+        const deferDelayMs = hasWakeDeadline
+          ? Math.min(86400000, Math.max(1000, wakeDeadlineMs - Date.now()))
+          : Math.min(86400000, pollDelayMs);
+        const item = queueRegistry.defer({
+          queue_id: queue.queue_id,
+          item_id: claim.item.item_id,
+          worker_id: workerId,
+          lease_token: claim.item.lease_token,
+          delay_ms: deferDelayMs,
+          reason: "message delivered; waiting for application acknowledgement",
+        });
+        outcomes.push({
+          item_id: item.item_id,
+          state: item.state,
+          deferred: true,
+          next_attempt_at: item.next_attempt_at,
+          result,
+        });
+        audit("defer", "queue_item", item.item_id, "wake_pending", {
+          queue_id: queue.queue_id,
+          message_id: claim.item.payload.message_id,
+          next_attempt_at: item.next_attempt_at,
+          wake_id: result?.wake?.wake_id || null,
+          result_path: result?.wake?.result_path || null,
+          deadline_at: result?.wake?.deadline_at || null,
+          reconciled: result?.wake?.reconciled === true,
+          terminal_status: result?.wake?.terminal_result?.status || null,
+        });
+        continue;
       }
       const item = queueRegistry.complete({
         queue_id: queue.queue_id,
@@ -3522,16 +4624,19 @@ const coreTools = [
     description: "Send routine private M2/M4 coordination over the already-authorized local HawkSpan-D. This is durable, idempotent IPC, not an external communication or consequential action.",
     inputSchema: {
       type: "object",
-      required: ["subject", "body"],
+      required: ["target_thread_id", "subject", "body"],
       properties: {
         recipient: { type: "string" },
+        target_thread_id: {
+          type: "string",
+          minLength: 1,
+          description: "Codex task to receive the message after the reliable peer receiver wakes.",
+        },
         kind: { type: "string" },
         subject: { type: "string" },
         body: { type: "string" },
         correlation_id: { type: "string" },
         metadata: { type: "object" },
-        deliver: { type: "boolean", default: true },
-        wake: { type: "boolean", default: true },
       },
       additionalProperties: false,
     },
@@ -3541,17 +4646,16 @@ const coreTools = [
       idempotentHint: true,
       openWorldHint: false,
     },
-    handler: sendMessage,
+    handler: sendCoordinationMessage,
   },
   {
     name: "retry_message",
-    description: "Retry delivery of the same immutable queued outbound message without creating a duplicate.",
+    description: "Retry one immutable queued message, or retry only the wake for a delivered wake-pending message, without creating or re-sending an envelope.",
     inputSchema: {
       type: "object",
       required: ["message_id"],
       properties: {
         message_id: { type: "string" },
-        wake: { type: "boolean", default: true },
       },
       additionalProperties: false,
     },
@@ -3562,6 +4666,63 @@ const coreTools = [
       openWorldHint: false,
     },
     handler: retryMessage,
+  },
+  {
+    name: "cancel_message",
+    description: "Cancel one unacknowledged outbound durable message, stop its queued retries and wakes, and deliver a silent peer tombstone so replay cannot revive it. Already-acknowledged and active-handoff cases report too_late or in_flight instead of claiming recall.",
+    inputSchema: {
+      type: "object",
+      required: ["message_id"],
+      properties: {
+        message_id: { type: "string", minLength: 1 },
+        reason: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: cancelMessage,
+  },
+  {
+    name: "prune_terminal_messages",
+    description: "Preview or prune message payload text and JSON envelopes older than an explicit cutoff, but only after durable state proves each message terminal. Message identities, states, correlations, cancellation tombstones and receipts, metadata, timestamps, and append-only audit evidence remain in SQLite to prevent replay.",
+    inputSchema: {
+      type: "object",
+      required: ["before"],
+      properties: {
+        before: {
+          type: "string",
+          format: "date-time",
+          description: "Exclusive ISO-8601 creation-time cutoff; must be in the past.",
+        },
+        message_ids: {
+          type: "array",
+          minItems: 1,
+          maxItems: 1000,
+          uniqueItems: true,
+          items: { type: "string", minLength: 1 },
+          description: "Optional exact-ID filter for a bounded acceptance or cleanup.",
+        },
+        limit: { type: "integer", minimum: 1, maximum: 1000, default: 100 },
+        dry_run: {
+          type: "boolean",
+          default: true,
+          description: "Preview by default; set false to remove eligible operational material.",
+        },
+      },
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: pruneTerminalMessages,
   },
   {
     name: "wake_peer_thread",
@@ -3599,12 +4760,13 @@ const coreTools = [
   },
   {
     name: "list_messages",
-    description: "List durable inbound and outbound messages by direction or state.",
+    description: "List unpruned durable inbound and outbound messages by direction or state. Set include_pruned to inspect preserved replay and audit authority.",
     inputSchema: {
       type: "object",
       properties: {
         direction: { type: "string", enum: ["inbound", "outbound"] },
         state: { type: "string" },
+        include_pruned: { type: "boolean", default: false },
         limit: { type: "integer", minimum: 1, maximum: 1000 },
       },
       additionalProperties: false,
@@ -3771,12 +4933,10 @@ const coreTools = [
   },
   {
     name: "flush_outbox",
-    description: "Retry every queued message and previously attempted artifact over the preferred route with automatic fallback.",
+    description: "Retry queued delivery, delivered-but-unacknowledged wake requests, and previously attempted artifacts over the preferred route with automatic fallback.",
     inputSchema: {
       type: "object",
-      properties: {
-        wake: { type: "boolean", default: true },
-      },
+      properties: {},
       additionalProperties: false,
     },
     annotations: {

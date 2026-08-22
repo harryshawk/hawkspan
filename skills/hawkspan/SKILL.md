@@ -10,15 +10,26 @@ Use this skill whenever work must cross between the owner's M2 and M4 Macs.
 ## Operating rules
 
 1. Call `link_status` before assuming the peer or preferred route is available.
-2. Use `send_message` for instructions, questions, acknowledgements, and status.
-   The durable inbox is authoritative. Peer wakeup resumes the configured task
-   so the owner does not have to relay the instruction.
+2. Use `send_message` with the exact `target_thread_id` for instructions,
+   questions, actionable acknowledgements, and status. Every sent coordination
+   message wakes that task. Use `acknowledge_message` for a silent machine-level
+   protocol receipt. The durable inbox is authoritative, so the owner does not
+   have to relay the instruction.
    Routine private M2/M4 messages, acknowledgements, retries, outbox flushing,
    task wakeups, peer-tool transport, and scoped trainer controls are
    pre-authorized local IPC. Never request a separate approval for the
    transport and never classify a message itself as process control.
    If delivery fails because the peer is offline, retain the immutable message
    and use `retry_message`; do not create a replacement message.
+   If an unacknowledged outbound message must be withdrawn, use
+   `cancel_message` with its exact durable message ID. Treat `peer_status` as
+   authoritative: `applied` confirms the peer tombstone, while `too_late` or
+   `in_flight` means recall was not proved. Repeating cancellation must reuse
+   the original cancellation identity.
+   Use `prune_terminal_messages` with an explicit past cutoff to preview or
+   remove only safely terminal envelope and subject/body material. Keep the
+   default preview unless cleanup is intended; durable replay identities,
+   cancellation evidence, metadata, queue items, and audit events are retained.
 3. Use `run_command` for broad routine control on either trusted Mac. Invoke it
    on the paired Mac through `peer_call_tool`. Routine file work, status,
    configuration, logs, packaging, and maintenance do not need an artificial
