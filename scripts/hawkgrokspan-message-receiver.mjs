@@ -432,7 +432,8 @@ function removeRecoverableLease(targetId, target) {
   }
   const current = readLease(targetId);
   if (lease && current &&
-      (current.nonce !== lease.nonce || Number(current.pid) !== Number(lease.pid))) {
+      (current.nonce !== lease.nonce ||
+       String(current.pid ?? "") !== String(lease.pid ?? ""))) {
     return false;
   }
   const quarantine = `${leaseRoot}.stale-${crypto.randomUUID()}`;
@@ -572,7 +573,8 @@ function quarantineStoppedSupervisor() {
   }
   const current = readSupervisorLease();
   if (lease && current &&
-      (current.nonce !== lease.nonce || Number(current.pid) !== Number(lease.pid))) {
+      (current.nonce !== lease.nonce ||
+       String(current.pid ?? "") !== String(lease.pid ?? ""))) {
     return false;
   }
   const quarantine = `${supervisorLeaseRoot}.stale-${crypto.randomUUID()}`;

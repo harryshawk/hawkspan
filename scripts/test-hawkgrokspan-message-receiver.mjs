@@ -385,6 +385,20 @@ waitFor(() => !fs.existsSync(staleRoot), "Grok stale-recovery lease cleanup");
 
 fs.mkdirSync(staleRoot, { mode: 0o700 });
 fs.writeFileSync(path.join(staleRoot, "lease.json"), JSON.stringify({
+  nonce: "interrupted-before-pid-publication",
+  initializing: true,
+  target_bot_id: "grok-review",
+  started_at_ms: 1,
+  revision: "f".repeat(40),
+  script_path: receiver,
+}));
+seed("msg-grok-missing-pid", { target: "grok-review" });
+assert.equal(request().targets[0].started, true);
+waitFor(() => stateOf("msg-grok-missing-pid") === "acknowledged", "missing-PID stale-lease recovery");
+waitFor(() => !fs.existsSync(staleRoot), "missing-PID stale lease cleanup");
+
+fs.mkdirSync(staleRoot, { mode: 0o700 });
+fs.writeFileSync(path.join(staleRoot, "lease.json"), JSON.stringify({
   pid: process.pid,
   nonce: "live-unrelated-process",
   target_bot_id: "grok-review",
