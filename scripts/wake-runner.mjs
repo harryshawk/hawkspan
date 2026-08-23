@@ -5,7 +5,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { handoffToCodexThread } from "./codex-thread-handoff.mjs";
+import {
+  CodexThreadOwnerUnavailableError,
+  handoffToCodexThread,
+} from "./codex-thread-handoff.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_TIMEOUT_MS = 120000;
@@ -333,13 +336,13 @@ function waitForChild(child, timeoutMs, terminationGraceMs) {
   });
 }
 
-function callLocalTool(request, toolName, args) {
+function callLocalTool(request, toolName, args, timeoutMs = 30000) {
   const result = spawnSync(
     request.node_command,
     [request.call_tool_path, toolName, JSON.stringify(args)],
     {
       encoding: "utf8",
-      timeout: 30000,
+      timeout: timeoutMs,
       maxBuffer: 8 * 1024 * 1024,
     },
   );
@@ -405,6 +408,98 @@ function writeWakeResult(request, result) {
   });
 }
 
+export function buildControllerRouterPrompt(request) {
+  const targetHostId = request.codex_host_id || "local";
+  const payload = {
+    schema_version: 1,
+    message_id: request.message_id,
+    target_thread_id: request.target_thread_id,
+    target_host_id: targetHostId,
+    prompt: request.handoff_prompt,
+  };
+  const acknowledgement = {
+    message_id: request.message_id,
+    deliver: true,
+    note: `Accepted after supported app routing to Codex task ${request.target_thread_id}.`,
+  };
+  return [
+    "HawkSpan exact-target application router request.",
+    `HAWKSPAN_ROUTER_PAYLOAD_JSON=${JSON.stringify(payload)}`,
+    "Act only as the transport router. Do not execute HAWKSPAN_ROUTER_PAYLOAD_JSON.prompt " +
+      "in this controller task.",
+    `Call the supported Codex app send_message_to_thread tool exactly once with ` +
+      `threadId=${JSON.stringify(request.target_thread_id)}, ` +
+      `hostId=${JSON.stringify(targetHostId)}, and prompt exactly equal to ` +
+      "HAWKSPAN_ROUTER_PAYLOAD_JSON.prompt. Omit model and thinking.",
+    `Treat message_id=${JSON.stringify(request.message_id)} idempotently: if this controller ` +
+      "task already contains a successful send_message_to_thread result for this exact message ID " +
+      "and target, do not send it again; only ensure the original HawkSpan acknowledgement exists.",
+    "Only after that app result succeeds and its returned threadId exactly equals " +
+      `${JSON.stringify(request.target_thread_id)}, call the HawkSpan acknowledge_message tool ` +
+      `exactly once with arguments ${JSON.stringify(acknowledgement)}.`,
+    "Receiving this router prompt or accepting this controller turn is not acceptance of the " +
+      "original HawkSpan message.",
+    "If the app call or returned threadId fails, do not retry the app call and do not acknowledge " +
+      "success. If acknowledgement fails, report that exact failure; a later identical router " +
+      "delivery may repeat only the idempotent acknowledgement after observing the prior successful " +
+      "app result.",
+    "Make no other changes or calls.",
+  ].join("\n");
+}
+
+function inboundMessage(request, timeoutMs) {
+  const inbox = callLocalTool(request, "list_messages", {
+    direction: "inbound",
+    include_pruned: true,
+    limit: 1000,
+  }, timeoutMs);
+  if (!inbox.ok) return { ok: false, error: inbox.error };
+  const message = Array.isArray(inbox.result)
+    ? inbox.result.find((entry) => entry.id === request.message_id)
+    : null;
+  return { ok: true, message };
+}
+
+async function waitForRoutedMessageTerminal(request, leasePath, token, deadline) {
+  while (true) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return { status: "router_timed_out", acknowledged: false };
+    }
+    if (!leaseIsCurrent(leasePath, token)) {
+      return { status: "lease_lost", acknowledged: false };
+    }
+    const observed = inboundMessage(request, remaining);
+    if (!leaseIsCurrent(leasePath, token)) {
+      return { status: "lease_lost", acknowledged: false };
+    }
+    if (Date.now() >= deadline) {
+      return { status: "router_timed_out", acknowledged: false };
+    }
+    if (!observed.ok) {
+      return {
+        status: "message_state_failed",
+        acknowledged: false,
+        error: observed.error,
+      };
+    }
+    if (!observed.message) {
+      return { status: "message_not_found", acknowledged: false };
+    }
+    if (observed.message.state === "acknowledged") {
+      return { status: "acknowledged", acknowledged: true };
+    }
+    if (observed.message.state === "cancelled") {
+      return { status: "cancelled", acknowledged: false, cancelled: true };
+    }
+    const waitMs = deadline - Date.now();
+    if (waitMs <= 0) {
+      return { status: "router_timed_out", acknowledged: false };
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(250, waitMs)));
+  }
+}
+
 export async function runWake(leasePath, token) {
   let request = null;
   let result = { status: "failed", error: "wake request did not initialize" };
@@ -450,6 +545,7 @@ export async function runWake(leasePath, token) {
 
     if (request.target_thread_id) {
       let handoff;
+      const handoffDeadline = Date.now() + request.timeout_ms;
       try {
         handoff = await handoffToCodexThread({
           schema_version: 1,
@@ -461,6 +557,57 @@ export async function runWake(leasePath, token) {
           timeout_ms: request.timeout_ms,
         });
       } catch (error) {
+        if (error instanceof CodexThreadOwnerUnavailableError) {
+          const remaining = handoffDeadline - Date.now();
+          if (remaining < 1000) {
+            result = {
+              status: "router_timed_out",
+              acknowledged: false,
+              error: String(error.message || error),
+            };
+            return;
+          }
+          let controllerHandoff;
+          try {
+            controllerHandoff = await handoffToCodexThread({
+              schema_version: 1,
+              thread_id: request.thread_id,
+              message_id: request.message_id,
+              prompt: buildControllerRouterPrompt(request),
+              host_id: request.codex_host_id || "local",
+              socket_path: request.codex_ipc_socket,
+              timeout_ms: remaining,
+            });
+          } catch (controllerError) {
+            result = {
+              status: "controller_handoff_failed",
+              acknowledged: false,
+              error: String(controllerError?.message || controllerError),
+            };
+            return;
+          }
+          const routed = await waitForRoutedMessageTerminal(
+            request,
+            leasePath,
+            token,
+            handoffDeadline,
+          );
+          const routedHandoff = {
+            schema_version: 1,
+            status: routed.status === "acknowledged" ? "accepted" : "not_accepted",
+            via: "controller_app",
+            message_id: request.message_id,
+            thread_id: request.target_thread_id,
+            controller_thread_id: request.thread_id,
+            controller_handoff: controllerHandoff,
+          };
+          result = {
+            ...routed,
+            handoff: routedHandoff,
+            ...(routed.status === "acknowledged" ? { acknowledgement_id: null } : {}),
+          };
+          return;
+        }
         result = {
           status: "handoff_failed",
           acknowledged: false,

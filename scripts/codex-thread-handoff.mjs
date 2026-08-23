@@ -10,6 +10,18 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_TIMEOUT_MS = 30000;
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
+export class CodexThreadOwnerUnavailableError extends Error {
+  constructor(threadId, detail = "") {
+    super([
+      `No Codex app owner found for task ${threadId}`,
+      detail ? `: ${detail}` : "",
+    ].join(""));
+    this.name = "CodexThreadOwnerUnavailableError";
+    this.code = "CODEX_THREAD_OWNER_UNAVAILABLE";
+    this.thread_id = threadId;
+  }
+}
+
 function boundedTimeout(value) {
   const numeric = Number(value);
   if (!Number.isSafeInteger(numeric)) return DEFAULT_TIMEOUT_MS;
@@ -53,6 +65,12 @@ function validateRequest(raw) {
   if (typeof process.getuid === "function" && socketStat.uid !== process.getuid()) {
     throw new Error("Codex handoff socket_path is not owned by the current user");
   }
+  const timeoutMs = boundedTimeout(raw.timeout_ms);
+  const maximumDeadline = Date.now() + timeoutMs;
+  const suppliedDeadline = Number(raw.deadline_ms);
+  const deadlineMs = Number.isSafeInteger(suppliedDeadline) && suppliedDeadline > 0
+    ? Math.min(suppliedDeadline, maximumDeadline)
+    : maximumDeadline;
   return {
     ...raw,
     thread_id: raw.thread_id.trim(),
@@ -62,27 +80,37 @@ function validateRequest(raw) {
       ? raw.host_id.trim()
       : "local",
     socket_path: socketPath,
-    timeout_ms: boundedTimeout(raw.timeout_ms),
+    timeout_ms: timeoutMs,
+    deadline_ms: deadlineMs,
   };
 }
 
 class CodexIpcClient {
-  constructor(socketPath, timeoutMs) {
+  constructor(socketPath, deadlineMs) {
     this.socketPath = socketPath;
-    this.timeoutMs = timeoutMs;
+    this.deadlineMs = deadlineMs;
     this.socket = null;
     this.buffer = Buffer.alloc(0);
     this.pending = new Map();
     this.clientId = "initializing-client";
   }
 
+  remainingTimeout(stage) {
+    const remaining = this.deadlineMs - Date.now();
+    if (remaining <= 0) {
+      throw new Error(`Codex handoff deadline expired before ${stage}`);
+    }
+    return remaining;
+  }
+
   async connect() {
     await new Promise((resolve, reject) => {
       const socket = net.createConnection(this.socketPath);
+      const connectTimeoutMs = Math.min(this.remainingTimeout("connection"), 5000);
       const timer = setTimeout(() => {
         socket.destroy();
         reject(new Error("Codex IPC connection timed out"));
-      }, Math.min(this.timeoutMs, 5000));
+      }, connectTimeoutMs);
       socket.once("connect", () => {
         clearTimeout(timer);
         this.socket = socket;
@@ -95,9 +123,10 @@ class CodexIpcClient {
       socket.on("data", (chunk) => this.onData(chunk));
       socket.on("close", () => this.rejectPending(new Error("Codex IPC connection closed")));
     });
+    const initializeTimeoutMs = Math.min(this.remainingTimeout("initialization"), 5000);
     const initialized = await this.request("initialize", {
       clientType: "hawkspan-receiver",
-    }, { version: 0, timeoutMs: Math.min(this.timeoutMs, 5000) });
+    }, { version: 0, timeoutMs: initializeTimeoutMs });
     if (initialized.resultType !== "success" ||
         typeof initialized.result?.clientId !== "string" || !initialized.result.clientId) {
       throw new Error(initialized.error || "Codex IPC initialization was rejected");
@@ -140,8 +169,13 @@ class CodexIpcClient {
     }
   }
 
-  request(method, params, { targetClientId = null, timeoutMs = this.timeoutMs, version = 0 } = {}) {
+  request(method, params, { targetClientId = null, timeoutMs = null, version = 0 } = {}) {
     if (!this.socket?.writable) return Promise.reject(new Error("Codex IPC is not connected"));
+    const remaining = this.remainingTimeout(method);
+    const requestedTimeout = Number.isSafeInteger(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : remaining;
+    const requestTimeoutMs = Math.min(requestedTimeout, remaining);
     const requestId = crypto.randomUUID();
     const request = {
       type: "request",
@@ -151,13 +185,13 @@ class CodexIpcClient {
       method,
       params,
       ...(targetClientId ? { targetClientId } : {}),
-      timeoutMs,
+      timeoutMs: requestTimeoutMs,
     };
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new Error(`${method} timed out`));
-      }, timeoutMs + 250);
+      }, Math.min(requestTimeoutMs + 250, remaining));
       this.pending.set(requestId, { resolve, reject, timer });
       this.socket.write(frame(request), (error) => {
         if (!error) return;
@@ -179,15 +213,31 @@ class CodexIpcClient {
 
 export async function handoffToCodexThread(rawRequest) {
   const request = validateRequest(rawRequest);
-  const client = new CodexIpcClient(request.socket_path, request.timeout_ms);
+  const client = new CodexIpcClient(request.socket_path, request.deadline_ms);
   try {
     await client.connect();
-    const owner = await client.request("thread-owner-discovery", {
-      hostId: request.host_id,
-      conversationId: request.thread_id,
-    }, { version: 1, timeoutMs: Math.min(request.timeout_ms, 5000) });
+    let owner;
+    try {
+      owner = await client.request("thread-owner-discovery", {
+        hostId: request.host_id,
+        conversationId: request.thread_id,
+      }, {
+        version: 1,
+        timeoutMs: Math.min(client.remainingTimeout("owner discovery"), 5000),
+      });
+    } catch (error) {
+      if (String(error?.message || error) === "thread-owner-discovery timed out") {
+        throw new CodexThreadOwnerUnavailableError(request.thread_id, "owner discovery timed out");
+      }
+      throw error;
+    }
     if (owner.resultType !== "success" || typeof owner.handledByClientId !== "string" ||
         !owner.handledByClientId) {
+      const ownerError = String(owner.error || "").trim().toLowerCase();
+      if (owner.resultType === "success" || ownerError === "no-client-found" ||
+          ownerError === "no client found") {
+        throw new CodexThreadOwnerUnavailableError(request.thread_id, owner.error || "no owner");
+      }
       throw new Error(owner.error || `No Codex app owner found for task ${request.thread_id}`);
     }
 
@@ -202,7 +252,7 @@ export async function handoffToCodexThread(rawRequest) {
     }, {
       targetClientId: owner.handledByClientId,
       version: 1,
-      timeoutMs: request.timeout_ms,
+      timeoutMs: client.remainingTimeout("thread handoff"),
     });
     if (handoff.resultType !== "success") {
       throw new Error(handoff.error || `Codex app rejected handoff to task ${request.thread_id}`);

@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { cleanupLease } from "./wake-runner.mjs";
+import { buildControllerRouterPrompt, cleanupLease } from "./wake-runner.mjs";
 
 const scripts = path.dirname(fileURLToPath(import.meta.url));
 const runner = path.join(scripts, "wake-runner.mjs");
@@ -19,6 +19,8 @@ const raceAckFinished = path.join(root, "race-ack-finished.json");
 const ipcSocket = path.join(root, "codex-ipc.sock");
 const fakeCodex = path.join(root, "fake-codex.mjs");
 const fakeCallTool = path.join(root, "fake-call-tool.mjs");
+const messageStatePaths = new Map();
+const routerEventPaths = new Map();
 fs.mkdirSync(audit, { recursive: true });
 
 fs.writeFileSync(fakeCodex, `#!/usr/bin/env node
@@ -64,12 +66,19 @@ const [name, raw = "{}"] = process.argv.slice(2);
 const args = JSON.parse(raw);
 fs.appendFileSync(process.env.HAWKSPAN_TEST_CALL_LOG, JSON.stringify({ name, args }) + "\\n");
 if (name === "list_messages") {
+  const delayMs = Number(process.env.HAWKSPAN_TEST_LIST_DELAY_MS || 0);
+  if (delayMs > 0) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+  }
+  const state = fs.existsSync(process.env.HAWKSPAN_TEST_MESSAGE_STATE_PATH)
+    ? fs.readFileSync(process.env.HAWKSPAN_TEST_MESSAGE_STATE_PATH, "utf8").trim()
+    : "received";
   process.stdout.write(JSON.stringify({
     isError: false,
     structuredContent: [{
       id: process.env.HAWKSPAN_TEST_MESSAGE_ID,
       direction: "inbound",
-      state: "received",
+      state,
     }],
   }));
 } else if (name === "acknowledge_message") {
@@ -109,6 +118,11 @@ function request(name, messageId, overrides = {}) {
 }
 
 function launch(wakeRequest, mode = "accept") {
+  const messageStatePath = path.join(root, `${wakeRequest.wake_id}.message-state`);
+  const routerEventPath = path.join(root, `${wakeRequest.wake_id}.router-events.jsonl`);
+  fs.writeFileSync(messageStatePath, "received\n");
+  messageStatePaths.set(wakeRequest.message_id, messageStatePath);
+  routerEventPaths.set(wakeRequest.message_id, routerEventPath);
   const encoded = Buffer.from(JSON.stringify(wakeRequest)).toString("base64");
   const result = spawnSync(process.execPath, [runner, "launch", encoded], {
     encoding: "utf8",
@@ -117,6 +131,8 @@ function launch(wakeRequest, mode = "accept") {
       ...process.env,
       HAWKSPAN_TEST_CODEX_MODE: mode,
       HAWKSPAN_TEST_MESSAGE_ID: wakeRequest.message_id,
+      HAWKSPAN_TEST_MESSAGE_STATE_PATH: messageStatePath,
+      HAWKSPAN_TEST_LIST_DELAY_MS: String(wakeRequest.test_list_delay_ms || 0),
       HAWKSPAN_TEST_CALL_LOG: calls,
       HAWKSPAN_TEST_ACK_DELAY_MS: mode === "ack-race" ? "900" : "0",
       HAWKSPAN_TEST_ACK_STARTED: raceAckStarted,
@@ -124,7 +140,7 @@ function launch(wakeRequest, mode = "accept") {
     },
   });
   const marker = JSON.parse(result.stdout.trim());
-  return { result, marker };
+  return { result, marker, messageStatePath, routerEventPath };
 }
 
 async function waitResult(wakeRequest, timeoutMs = 5000) {
@@ -281,6 +297,9 @@ assert.equal(successorResult.status, "acknowledged");
 assert.equal(successorResult.lease_released, true);
 
 const ipcRequests = [];
+const unavailableTargetThreadId = "00000000-0000-0000-0000-000000000004";
+const boundedPollTargetThreadId = "00000000-0000-0000-0000-000000000005";
+const controllerThreadId = "thread-target-router";
 const ipcServer = net.createServer((socket) => {
   let buffer = Buffer.alloc(0);
   socket.on("data", (chunk) => {
@@ -302,23 +321,81 @@ const ipcServer = net.createServer((socket) => {
           result: { clientId: "hawkspan-client" },
         };
       } else if (request.method === "thread-owner-discovery") {
+        if (request.params.conversationId === unavailableTargetThreadId) {
+          continue;
+        }
+        if (request.params.conversationId === boundedPollTargetThreadId) {
+          response = {
+            type: "response",
+            requestId: request.requestId,
+            resultType: "success",
+            method: request.method,
+            result: {},
+          };
+        } else {
         response = {
           type: "response",
           requestId: request.requestId,
           resultType: "success",
           method: request.method,
-          handledByClientId: "owner-client",
+          handledByClientId: request.params.conversationId === controllerThreadId
+            ? "controller-owner-client"
+            : "owner-client",
           result: {},
         };
+        }
       } else if (request.method === "thread-follower-start-turn") {
+        const isControllerHandoff = request.params.conversationId === controllerThreadId;
+        const handledByClientId = isControllerHandoff
+          ? "controller-owner-client"
+          : "owner-client";
         response = {
           type: "response",
           requestId: request.requestId,
           resultType: "success",
           method: request.method,
-          handledByClientId: "owner-client",
+          handledByClientId,
           result: { result: { turn: { id: "turn-test", status: "inProgress" } } },
         };
+        if (isControllerHandoff) {
+          const routerPrompt = request.params.turnStartParams.input[0].text;
+          const payloadLine = routerPrompt.split("\n")
+            .find((line) => line.startsWith("HAWKSPAN_ROUTER_PAYLOAD_JSON="));
+          const payload = payloadLine
+            ? JSON.parse(payloadLine.slice("HAWKSPAN_ROUTER_PAYLOAD_JSON=".length))
+            : null;
+          const statePath = messageStatePaths.get(payload?.message_id);
+          const eventPath = routerEventPaths.get(payload?.message_id);
+          if (![unavailableTargetThreadId, boundedPollTargetThreadId]
+            .includes(payload?.target_thread_id) ||
+              payload?.target_host_id !== "local" ||
+              typeof payload?.prompt !== "string" || !statePath || !eventPath) {
+            response = {
+              type: "response",
+              requestId: request.requestId,
+              resultType: "error",
+              method: request.method,
+              error: "invalid deterministic controller router prompt",
+            };
+          } else {
+            setTimeout(() => {
+              fs.appendFileSync(eventPath, `${JSON.stringify({
+                name: "send_message_to_thread",
+                args: {
+                  threadId: payload.target_thread_id,
+                  hostId: payload.target_host_id,
+                  prompt: payload.prompt,
+                },
+                result: { threadId: payload.target_thread_id },
+              })}\n`);
+              fs.appendFileSync(eventPath, `${JSON.stringify({
+                name: "acknowledge_message",
+                args: { message_id: payload.message_id, deliver: true },
+              })}\n`);
+              fs.writeFileSync(statePath, "acknowledged\n");
+            }, 50);
+          }
+        }
       } else {
         response = {
           type: "response",
@@ -364,6 +441,101 @@ assert.equal(handoff.targetClientId, "owner-client");
 assert.equal(handoff.params.conversationId, targetRequest.target_thread_id);
 assert.equal(handoff.params.turnStartParams.clientUserMessageId, targetRequest.message_id);
 assert.equal(handoff.params.turnStartParams.input[0].text, targetRequest.handoff_prompt);
+
+const runnerAcknowledgementsBeforeRouter = callNames()
+  .filter((name) => name === "acknowledge_message").length;
+const routedRequest = request("target-router", "message-target-router", {
+  target_thread_id: unavailableTargetThreadId,
+  handoff_prompt: "HawkSpan durable message message-target-router. Route this exact prompt once.",
+  codex_ipc_socket: ipcSocket,
+  timeout_ms: 7000,
+});
+assert.equal(routedRequest.thread_id, controllerThreadId);
+const routedLaunch = launch(routedRequest, "hang");
+assert.equal(routedLaunch.result.status, 0, routedLaunch.result.stderr);
+assert.equal(routedLaunch.marker.status, "started");
+const routedResult = await waitResult(routedRequest, 10000);
+assert.equal(routedResult.status, "acknowledged");
+assert.equal(routedResult.acknowledged, true);
+assert.equal(routedResult.handoff.status, "accepted");
+assert.equal(routedResult.handoff.via, "controller_app");
+assert.equal(routedResult.handoff.thread_id, routedRequest.target_thread_id);
+assert.equal(routedResult.handoff.controller_thread_id, routedRequest.thread_id);
+assert.equal(routedResult.lease_released, true);
+assert.equal(fs.readFileSync(routedLaunch.messageStatePath, "utf8").trim(), "acknowledged");
+assert.equal(callNames().filter((name) => name === "acknowledge_message").length,
+  runnerAcknowledgementsBeforeRouter);
+
+const routedDiscoveries = ipcRequests.filter((entry) =>
+  entry.method === "thread-owner-discovery" &&
+  [routedRequest.target_thread_id, routedRequest.thread_id].includes(entry.params.conversationId));
+assert.deepEqual(routedDiscoveries.map((entry) => entry.params.conversationId), [
+  routedRequest.target_thread_id,
+  routedRequest.thread_id,
+]);
+assert.equal(ipcRequests.some((entry) =>
+  entry.method === "thread-follower-start-turn" &&
+  entry.params.conversationId === routedRequest.target_thread_id), false);
+const controllerHandoff = ipcRequests.find((entry) =>
+  entry.method === "thread-follower-start-turn" &&
+  entry.params.conversationId === routedRequest.thread_id);
+assert(controllerHandoff);
+assert.equal(controllerHandoff.targetClientId, "controller-owner-client");
+assert.equal(controllerHandoff.params.turnStartParams.clientUserMessageId,
+  routedRequest.message_id);
+const expectedPayload = {
+  schema_version: 1,
+  message_id: routedRequest.message_id,
+  target_thread_id: routedRequest.target_thread_id,
+  target_host_id: "local",
+  prompt: routedRequest.handoff_prompt,
+};
+assert.equal(controllerHandoff.params.turnStartParams.input[0].text,
+  buildControllerRouterPrompt(routedRequest));
+assert(controllerHandoff.params.turnStartParams.input[0].text.includes(
+  `HAWKSPAN_ROUTER_PAYLOAD_JSON=${JSON.stringify(expectedPayload)}`));
+assert.equal(controllerHandoff.params.turnStartParams.input[0].text
+  .match(/send_message_to_thread/g)?.length, 2);
+assert.equal(controllerHandoff.params.turnStartParams.input[0].text
+  .match(/acknowledge_message/g)?.length, 1);
+const routerEvents = fs.readFileSync(routedLaunch.routerEventPath, "utf8").trim().split("\n")
+  .map((line) => JSON.parse(line));
+assert.deepEqual(routerEvents, [
+  {
+    name: "send_message_to_thread",
+    args: {
+      threadId: routedRequest.target_thread_id,
+      hostId: "local",
+      prompt: routedRequest.handoff_prompt,
+    },
+    result: { threadId: routedRequest.target_thread_id },
+  },
+  {
+    name: "acknowledge_message",
+    args: { message_id: routedRequest.message_id, deliver: true },
+  },
+]);
+
+const runnerAcknowledgementsBeforeBoundedPoll = callNames()
+  .filter((name) => name === "acknowledge_message").length;
+const boundedPollRequest = request("target-router-bounded", "message-target-router-bounded", {
+  target_thread_id: boundedPollTargetThreadId,
+  handoff_prompt: "HawkSpan durable message message-target-router-bounded. Route once.",
+  codex_ipc_socket: ipcSocket,
+  timeout_ms: 1000,
+  test_list_delay_ms: 1500,
+});
+const boundedPollStartedAt = Date.now();
+const boundedPollLaunch = launch(boundedPollRequest, "hang");
+assert.equal(boundedPollLaunch.result.status, 0, boundedPollLaunch.result.stderr);
+assert.equal(boundedPollLaunch.marker.status, "started");
+const boundedPollResult = await waitResult(boundedPollRequest, 4000);
+assert.equal(boundedPollResult.status, "router_timed_out");
+assert.equal(boundedPollResult.acknowledged, false);
+assert.equal(boundedPollResult.lease_released, true);
+assert(Date.now() - boundedPollStartedAt < 2500);
+assert.equal(callNames().filter((name) => name === "acknowledge_message").length,
+  runnerAcknowledgementsBeforeBoundedPoll);
 await new Promise((resolve) => ipcServer.close(resolve));
 
 fs.rmSync(root, { recursive: true, force: true });
