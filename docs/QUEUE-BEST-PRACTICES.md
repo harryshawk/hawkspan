@@ -53,8 +53,10 @@ add queue architecture beyond the requested two-Mac workflows.
    retryable, but lacks a separate quarantine/redrive queue.
 3. **Global resource budget:** concurrency is bounded per queue, not across all
    queues. Many active queues can collectively overcommit a host.
-4. **Retention and aggregate telemetry:** terminal records are intentionally
-   preserved. There is no retention/purge policy, arrival/completion rate,
+4. **Retention and aggregate telemetry:** terminal queue records are
+   intentionally preserved. Safely terminal message payload/envelope material
+   has a separate cutoff-bounded pruning tool that retains replay and audit
+   authority; there is no queue-record purge policy, arrival/completion rate,
    oldest-item-age alarm, or saturation alarm.
 
 These become relevant only if HawkSpan's operating scope later expands to many

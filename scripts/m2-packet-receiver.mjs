@@ -163,6 +163,7 @@ function refreshProvenanceRegistry() {
 function sendReceipt(receiptPath, receipt) {
   const args = {
     recipient: "m4-codex",
+    target_thread_id: config.peer?.thread_id,
     kind: "artifact-receipt",
     subject: `configured artifact destination receipt verified: ${path.basename(receipt.destination)}`,
     body: [
@@ -184,8 +185,6 @@ function sendReceipt(receiptPath, receipt) {
       expansion_secured: true,
       m4_source_deletion_authorized: false,
     },
-    deliver: true,
-    wake: true,
   };
   const result = spawnSync(process.execPath, [
     callTool,

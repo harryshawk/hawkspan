@@ -49,6 +49,9 @@ The detailed Personal plugin procedure and acceptance check are in
 Advantages:
 
 - Codex automatically discovers the `hawkspan` MCP server from `.mcp.json`;
+- the cached plugin entrypoint resolves `installed-revision.json` and starts the
+  authority-declared MCP server, so the cache pathname never becomes a second
+  runtime authority;
 - HawkSpan tools appear as structured Codex tools with their existing schemas
   and authorization checks;
 - bundled HawkSpan skills and operating guidance are available in new Codex

@@ -22,17 +22,53 @@ The background agent retries queued work. A temporary disconnect, sleep,
 screen lock, or stopped SSH service therefore delays delivery without losing
 the instruction or creating a duplicate.
 
-Peer wakeups are not sent for acknowledgement envelopes. A per-task remote
-lease serializes other wakeups so repeated delivery cannot create concurrent
-`codex exec resume` processes for one task.
+Peer wakeups are not sent for machine-protocol acknowledgement or cancellation
+envelopes. Each caller-sent coordination message names one exact target task
+and persists immutable wake intent in both SQLite and its envelope. Retries
+always preserve and attempt that wake; callers cannot suppress it.
+A successfully delivered wake-requested message enters `wake_pending`, and its
+durable queue item is deferred until the sender ingests the application
+acknowledgement. Wake-only retries never rsync or recreate that envelope.
+A sender can cancel an unacknowledged outbound message by creating one correlated
+silent cancellation envelope, transitioning the original message to
+`cancelled`, and cancelling every pending generic or automatic queue reference
+to that message in the same SQLite transaction. Retry, flush, queue-worker, and
+wake-runner paths all treat `cancelled` as terminal. The cancellation envelope
+is also a peer tombstone: if it arrives before a delayed original, the original
+is imported directly as `cancelled`. A previously acknowledged original returns
+`too_late`; a live receiver lease returns `in_flight` and remains authoritative
+so HawkSpan never reports an unproved recall. Repeated requests reuse the first
+cancellation envelope and its correlated receipt.
+A token-fenced per-task remote lease serializes wakeups. The bounded runner
+reports `STARTED`, `BUSY`, or `FAILED`, terminates a hung process group after its
+deadline, and only its current token can remove the lease.
+
+Terminal-message pruning is deliberately payload-only. Given an explicit past
+cutoff, `prune_terminal_messages` previews by default and can remove JSON
+envelopes plus subject/body text only for acknowledged messages, delivered
+machine acknowledgements (which intentionally receive no reply), inbound
+messages with a durable cancellation tombstone, or outbound cancellations with
+an `applied` peer receipt. It never removes message rows, identities, states,
+correlations, cancellation metadata, timestamps, queue items, or append-only
+audit events. Pruned rows remain the replay authority; a late duplicate envelope
+is discarded, and `list_messages` hides pruned rows unless explicitly requested.
 
 ## Codex coordination
 
-A delivered message is imported from the durable inbox by the peer task. The
-configured `codex exec resume` wakeup lets an idle task continue without the owner
-relaying the instruction. The peer acknowledges the immutable message ID,
-performs authorized work, and replies with the original ID as the correlation
-boundary.
+A delivered message is imported before `codex exec resume` wakes the configured
+reliable receiver task. An optional immutable `target_thread_id` identifies a
+working Codex task. The fenced receiver runner forwards the durable message ID,
+subject, and body to that exact task through the Codex desktop app's same-user
+inter-thread messaging path. The sender supplies the peer's explicit absolute
+endpoint in `peer.codex_ipc_socket`; no home-directory default or socket scan is
+used. The remote runner verifies a same-user Unix socket and a successful Codex
+initialize handshake before handoff. Without a target the receiver task handles
+the message itself. The receiver returns exact structured
+acceptance only after the target handoff is accepted or its own handling
+completes. The fenced runner then writes the application acknowledgement.
+Process exit, rejected handoff, malformed or mismatched output, signal, timeout,
+and routing failure do not acknowledge, so the immutable message remains
+available for retry.
 
 ## Trusted remote operations
 

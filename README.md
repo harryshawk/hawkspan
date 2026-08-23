@@ -20,7 +20,8 @@ HawkSpan provides:
 - primary and fallback private routes;
 - broad audited command execution on either trusted Mac, including through the
   peer tool bridge;
-- immutable retry of queued messages after either Mac is temporarily offline;
+- immutable retry of queued messages after either Mac is temporarily offline,
+  plus wake-only retry after delivery until application acknowledgement;
 - a two-minute background launch agent that drains the durable outbox after a
   peer or route returns;
 - SimpleTuner queue, dataset, process, and log inspection;
@@ -197,9 +198,43 @@ After that evidence is ingested back into the run output, the normal package
 control creates a separate `validated` packet. Only receipt confirmation for
 that validated packet completes the original training job and queue item.
 
-The immutable message body is embedded in the peer wake prompt. The prompt also
-provides a direct `call-tool.mjs` fallback for Codex exec environments that do
-not load dynamic MCP tools.
+The immutable message body is embedded in the peer wake prompt. A bounded
+receiver runner imports the envelope outside the Codex sandbox and wakes one
+reliable configured receiver. When the envelope carries `target_thread_id`, the
+fenced runner forwards it through the Codex desktop app's same-user inter-thread
+messaging path instead of depending on a headless model tool call. The sending
+node must provide the peer's exact absolute app endpoint as
+`peer.codex_ipc_socket`; HawkSpan does not infer it from a home directory or scan
+for sockets. The remote runner verifies that the endpoint is a same-user Unix
+socket and completes the Codex initialize handshake before acknowledging;
+otherwise it handles the message itself. Exact structured acceptance is valid
+only after the target handoff succeeds or receiver handling completes, and only
+then does the runner write the application acknowledgement. A token-fenced
+lease, timeout, and TERM/KILL escalation prevent a hung receiver from retaining
+the task writer indefinitely.
+Every caller-sent coordination message includes an exact `target_thread_id` and
+immutable wake intent. Pure machine-protocol acknowledgement envelopes remain
+silent, as do the internal tombstones created by `cancel_message`. Cancelling an
+unacknowledged outbound message durably stops its queued retries and future
+wakes; the peer tombstone prevents a delayed or replayed original envelope from
+reviving it. A peer that already acknowledged the original reports `too_late`,
+and a peer with an active receiver lease reports `in_flight` rather than
+claiming recall. Repeating the same cancellation reuses its original durable
+cancellation identity.
+Safely terminal messages can be pruned with an explicit past cutoff. The tool
+previews by default and removes only the terminal JSON envelope and subject/body
+payload when execution is requested. Durable IDs, states, correlations,
+cancellation tombstones and receipts, metadata, timestamps, queue records, and
+audit events remain intact, so delayed replay stays suppressed. Pruned rows are
+hidden from the normal message list and remain inspectable with
+`include_pruned`.
+When several messages should be read before a reply, say so in their
+message bodies (for example, “Sending 4 messages; wait for #4”) instead of
+suppressing delivery or wake.
+A delivered wake-requested message remains durably `wake_pending` until its
+acknowledgement arrives. Retries reuse the same remote envelope and issue only
+the wake, so a busy receiver or sender restart cannot strand the message or
+duplicate its delivery.
 
 Background artifact intake reuses an already verified manifest/database match
 instead of hashing every large artifact again on every two-minute pass. This

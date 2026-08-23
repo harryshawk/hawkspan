@@ -62,6 +62,9 @@ fs.writeFileSync(registry, `${JSON.stringify({
 fs.mkdirSync(stateRoot, { recursive: true });
 const configPath = path.join(stateRoot, "config.json");
 fs.writeFileSync(configPath, `${JSON.stringify({
+  peer: {
+    thread_id: "00000000-0000-0000-0000-000000000009",
+  },
   packet_receiver: {
     staging_root: staging,
     destination_root: destination,
