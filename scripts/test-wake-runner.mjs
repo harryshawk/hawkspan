@@ -21,6 +21,7 @@ const fakeCodex = path.join(root, "fake-codex.mjs");
 const fakeCallTool = path.join(root, "fake-call-tool.mjs");
 const messageStatePaths = new Map();
 const routerEventPaths = new Map();
+const correlatedReplyStatePaths = new Map();
 fs.mkdirSync(audit, { recursive: true });
 
 fs.writeFileSync(fakeCodex, `#!/usr/bin/env node
@@ -73,14 +74,122 @@ if (name === "list_messages") {
   const state = fs.existsSync(process.env.HAWKSPAN_TEST_MESSAGE_STATE_PATH)
     ? fs.readFileSync(process.env.HAWKSPAN_TEST_MESSAGE_STATE_PATH, "utf8").trim()
     : "received";
-  process.stdout.write(JSON.stringify({
-    isError: false,
-    structuredContent: [{
-      id: process.env.HAWKSPAN_TEST_MESSAGE_ID,
-      direction: "inbound",
-      state,
-    }],
-  }));
+  const rows = [{
+    id: process.env.HAWKSPAN_TEST_MESSAGE_ID,
+    created_at: new Date(Date.now() - 1000).toISOString(),
+    sender: "peer",
+    recipient: "configured-receiver-label",
+    kind: "message",
+    correlation_id: null,
+    direction: "inbound",
+    state,
+  }];
+  const correlatedReplyPath = process.env.HAWKSPAN_TEST_CORRELATED_REPLY_STATE_PATH;
+  if (correlatedReplyPath && fs.existsSync(correlatedReplyPath)) {
+    const reply = JSON.parse(fs.readFileSync(correlatedReplyPath, "utf8"));
+    rows.push(
+      {
+        id: "reply-wrong-correlation-" + process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        created_at: reply.created_at,
+        sender: "local",
+        recipient: "peer",
+        kind: "message",
+        correlation_id: "another-message",
+        direction: "outbound",
+        state: "acknowledged",
+        acknowledged_at: reply.acknowledged_at,
+        wake_requested: true,
+      },
+      ...["acknowledgement", "cancellation"].map((kind) => ({
+        id: "reply-" + kind + "-" + process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        created_at: reply.created_at,
+        sender: "local",
+        recipient: "peer",
+        kind,
+        correlation_id: process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        direction: "outbound",
+        state: "acknowledged",
+        acknowledged_at: reply.acknowledged_at,
+        wake_requested: true,
+      })),
+      {
+        id: "reply-silent-" + process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        created_at: reply.created_at,
+        sender: "local-node",
+        recipient: "peer",
+        kind: "message",
+        correlation_id: process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        direction: "outbound",
+        state: "acknowledged",
+        acknowledged_at: reply.acknowledged_at,
+        wake_requested: false,
+      },
+      {
+        id: "reply-wrong-recipient-" + process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        created_at: reply.created_at,
+        sender: "local-node",
+        recipient: "another-peer",
+        kind: "message",
+        correlation_id: process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        direction: "outbound",
+        state: "acknowledged",
+        acknowledged_at: reply.acknowledged_at,
+        wake_requested: true,
+      },
+      {
+        id: "reply-before-controller-" + process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        created_at: new Date(Date.parse(reply.created_at) - 60000).toISOString(),
+        sender: "local-node",
+        recipient: "peer",
+        kind: "message",
+        correlation_id: process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        direction: "outbound",
+        state: "acknowledged",
+        acknowledged_at: reply.acknowledged_at,
+        wake_requested: true,
+      },
+      {
+        id: "reply-missing-ack-time-" + process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        created_at: reply.created_at,
+        sender: "local-node",
+        recipient: "peer",
+        kind: "message",
+        correlation_id: process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        direction: "outbound",
+        state: "acknowledged",
+        acknowledged_at: null,
+        wake_requested: true,
+      },
+      {
+        id: "reply-early-ack-time-" + process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        created_at: reply.created_at,
+        sender: "local-node",
+        recipient: "peer",
+        kind: "message",
+        correlation_id: process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        direction: "outbound",
+        state: "acknowledged",
+        acknowledged_at: new Date(Date.parse(reply.created_at) - 1).toISOString(),
+        wake_requested: true,
+      },
+      {
+        id: "reply-" + process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        created_at: reply.created_at,
+        sender: "local-node",
+        recipient: "peer",
+        kind: "message",
+        correlation_id: process.env.HAWKSPAN_TEST_MESSAGE_ID,
+        direction: "outbound",
+        state: reply.state,
+        acknowledged_at: reply.acknowledged_at,
+        wake_requested: true,
+      },
+    );
+  }
+  const selected = rows.filter((row) =>
+    (!args.direction || row.direction === args.direction) &&
+    (!args.state || row.state === args.state));
+  process.stdout.write(JSON.stringify({ isError: false, structuredContent: selected }));
 } else if (name === "acknowledge_message") {
   const delayMs = Number(process.env.HAWKSPAN_TEST_ACK_DELAY_MS || 0);
   if (delayMs > 0) {
@@ -88,6 +197,7 @@ if (name === "list_messages") {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
     fs.writeFileSync(process.env.HAWKSPAN_TEST_ACK_FINISHED, JSON.stringify({ at: Date.now() }));
   }
+  fs.writeFileSync(process.env.HAWKSPAN_TEST_MESSAGE_STATE_PATH, "acknowledged\\n");
   process.stdout.write(JSON.stringify({
     isError: false,
     structuredContent: { message_id: "ack-test", acknowledged_message_id: args.message_id },
@@ -118,11 +228,18 @@ function request(name, messageId, overrides = {}) {
 }
 
 function launch(wakeRequest, mode = "accept") {
-  const messageStatePath = path.join(root, `${wakeRequest.wake_id}.message-state`);
+  const messageStatePath = wakeRequest.test_message_state_path ||
+    path.join(root, `${wakeRequest.wake_id}.message-state`);
   const routerEventPath = path.join(root, `${wakeRequest.wake_id}.router-events.jsonl`);
-  fs.writeFileSync(messageStatePath, "received\n");
+  if (!fs.existsSync(messageStatePath)) fs.writeFileSync(messageStatePath, "received\n");
   messageStatePaths.set(wakeRequest.message_id, messageStatePath);
   routerEventPaths.set(wakeRequest.message_id, routerEventPath);
+  const correlatedReplyStatePath = wakeRequest.test_correlated_reply
+    ? path.join(root, `${wakeRequest.wake_id}.correlated-reply.json`)
+    : "";
+  if (correlatedReplyStatePath) {
+    correlatedReplyStatePaths.set(wakeRequest.message_id, correlatedReplyStatePath);
+  }
   const encoded = Buffer.from(JSON.stringify(wakeRequest)).toString("base64");
   const result = spawnSync(process.execPath, [runner, "launch", encoded], {
     encoding: "utf8",
@@ -132,6 +249,7 @@ function launch(wakeRequest, mode = "accept") {
       HAWKSPAN_TEST_CODEX_MODE: mode,
       HAWKSPAN_TEST_MESSAGE_ID: wakeRequest.message_id,
       HAWKSPAN_TEST_MESSAGE_STATE_PATH: messageStatePath,
+      HAWKSPAN_TEST_CORRELATED_REPLY_STATE_PATH: correlatedReplyStatePath,
       HAWKSPAN_TEST_LIST_DELAY_MS: String(wakeRequest.test_list_delay_ms || 0),
       HAWKSPAN_TEST_CALL_LOG: calls,
       HAWKSPAN_TEST_ACK_DELAY_MS: mode === "ack-race" ? "900" : "0",
@@ -140,7 +258,7 @@ function launch(wakeRequest, mode = "accept") {
     },
   });
   const marker = JSON.parse(result.stdout.trim());
-  return { result, marker, messageStatePath, routerEventPath };
+  return { result, marker, messageStatePath, routerEventPath, correlatedReplyStatePath };
 }
 
 async function waitResult(wakeRequest, timeoutMs = 5000) {
@@ -158,6 +276,13 @@ function callNames() {
   if (!fs.existsSync(calls)) return [];
   return fs.readFileSync(calls, "utf8").trim().split("\n").filter(Boolean)
     .map((line) => JSON.parse(line).name);
+}
+
+function toolCalls(name) {
+  if (!fs.existsSync(calls)) return [];
+  return fs.readFileSync(calls, "utf8").trim().split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.name === name);
 }
 
 const acceptedRequest = request("accepted", "message-accepted");
@@ -366,6 +491,7 @@ const ipcServer = net.createServer((socket) => {
             : null;
           const statePath = messageStatePaths.get(payload?.message_id);
           const eventPath = routerEventPaths.get(payload?.message_id);
+          const correlatedReplyPath = correlatedReplyStatePaths.get(payload?.message_id);
           if (![unavailableTargetThreadId, boundedPollTargetThreadId]
             .includes(payload?.target_thread_id) ||
               payload?.target_host_id !== "local" ||
@@ -391,8 +517,18 @@ const ipcServer = net.createServer((socket) => {
               fs.appendFileSync(eventPath, `${JSON.stringify({
                 name: "acknowledge_message",
                 args: { message_id: payload.message_id, deliver: true },
+                error: correlatedReplyPath ? "Transport closed" : null,
               })}\n`);
-              fs.writeFileSync(statePath, "acknowledged\n");
+              if (correlatedReplyPath) {
+                const acknowledgedAt = new Date().toISOString();
+                fs.writeFileSync(correlatedReplyPath, JSON.stringify({
+                  state: "acknowledged",
+                  created_at: acknowledgedAt,
+                  acknowledged_at: acknowledgedAt,
+                }));
+              } else {
+                fs.writeFileSync(statePath, "acknowledged\n");
+              }
             }, 50);
           }
         }
@@ -449,6 +585,7 @@ const routedRequest = request("target-router", "message-target-router", {
   handoff_prompt: "HawkSpan durable message message-target-router. Route this exact prompt once.",
   codex_ipc_socket: ipcSocket,
   timeout_ms: 7000,
+  test_correlated_reply: true,
 });
 assert.equal(routedRequest.thread_id, controllerThreadId);
 const routedLaunch = launch(routedRequest, "hang");
@@ -461,10 +598,27 @@ assert.equal(routedResult.handoff.status, "accepted");
 assert.equal(routedResult.handoff.via, "controller_app");
 assert.equal(routedResult.handoff.thread_id, routedRequest.target_thread_id);
 assert.equal(routedResult.handoff.controller_thread_id, routedRequest.thread_id);
+assert.equal(routedResult.reconciliation.evidence, "acknowledged_correlated_reply");
+assert.equal(routedResult.reconciliation.message_id,
+  `reply-${routedRequest.message_id}`);
+assert.equal(routedResult.acknowledgement_id, "ack-test");
 assert.equal(routedResult.lease_released, true);
 assert.equal(fs.readFileSync(routedLaunch.messageStatePath, "utf8").trim(), "acknowledged");
 assert.equal(callNames().filter((name) => name === "acknowledge_message").length,
-  runnerAcknowledgementsBeforeRouter);
+  runnerAcknowledgementsBeforeRouter + 1);
+const routedRunnerAcknowledgement = toolCalls("acknowledge_message").at(-1);
+assert.deepEqual(routedRunnerAcknowledgement.args, {
+  message_id: routedRequest.message_id,
+  deliver: true,
+  note: `Accepted after handoff to Codex task ${routedRequest.target_thread_id}.`,
+});
+const routedEvidenceQueries = toolCalls("list_messages")
+  .filter((entry) => entry.args.direction === "outbound");
+assert(routedEvidenceQueries.length >= 1);
+assert(routedEvidenceQueries.every((entry) =>
+  entry.args.state === "acknowledged" &&
+  entry.args.include_pruned === true &&
+  entry.args.limit === 1000));
 
 const routedDiscoveries = ipcRequests.filter((entry) =>
   entry.method === "thread-owner-discovery" &&
@@ -513,8 +667,27 @@ assert.deepEqual(routerEvents, [
   {
     name: "acknowledge_message",
     args: { message_id: routedRequest.message_id, deliver: true },
+    error: "Transport closed",
   },
 ]);
+
+const ipcCountBeforeReplay = ipcRequests.length;
+const acknowledgementCountBeforeReplay = toolCalls("acknowledge_message").length;
+const replayRequest = request("target-router-replay", routedRequest.message_id, {
+  target_thread_id: routedRequest.target_thread_id,
+  handoff_prompt: routedRequest.handoff_prompt,
+  codex_ipc_socket: ipcSocket,
+  test_message_state_path: routedLaunch.messageStatePath,
+});
+const replayLaunch = launch(replayRequest, "hang");
+assert.equal(replayLaunch.result.status, 0, replayLaunch.result.stderr);
+assert.equal(replayLaunch.marker.status, "started");
+const replayResult = await waitResult(replayRequest);
+assert.equal(replayResult.status, "already_acknowledged");
+assert.equal(replayResult.acknowledged, true);
+assert.equal(replayResult.lease_released, true);
+assert.equal(ipcRequests.length, ipcCountBeforeReplay);
+assert.equal(toolCalls("acknowledge_message").length, acknowledgementCountBeforeReplay);
 
 const runnerAcknowledgementsBeforeBoundedPoll = callNames()
   .filter((name) => name === "acknowledge_message").length;

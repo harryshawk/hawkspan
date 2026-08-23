@@ -366,15 +366,20 @@ function callLocalTool(request, toolName, args, timeoutMs = 30000) {
   }
 }
 
-function acknowledgeUnderLeaseGuard(request, leasePath, token) {
+function acknowledgeUnderLeaseGuard(request, leasePath, token, deadline = null) {
   const guardPath = `${leasePath}.guard`;
   const guardToken = crypto.randomBytes(16).toString("hex");
-  if (!acquireGuard(guardPath, guardToken)) {
+  const guardWaitMs = Number.isFinite(deadline) ? 0 : 2000;
+  if (!acquireGuard(guardPath, guardToken, guardWaitMs)) {
     return { ok: false, status: "lease_guard_unavailable" };
   }
   try {
     if (!leaseIsCurrent(leasePath, token)) {
       return { ok: false, status: "lease_lost" };
+    }
+    const timeoutMs = Number.isFinite(deadline) ? deadline - Date.now() : 30000;
+    if (timeoutMs <= 0) {
+      return { ok: false, status: "router_timed_out" };
     }
     const acknowledgement = callLocalTool(request, "acknowledge_message", {
       message_id: request.message_id,
@@ -382,12 +387,23 @@ function acknowledgeUnderLeaseGuard(request, leasePath, token) {
       note: request.target_thread_id
         ? `Accepted after handoff to Codex task ${request.target_thread_id}.`
         : "Accepted by the bounded HawkSpan receiver.",
-    });
+    }, timeoutMs);
     if (!acknowledgement.ok) {
       return {
         ok: false,
         status: "acknowledgement_failed",
         error: acknowledgement.error,
+      };
+    }
+    if (acknowledgement.result?.cancelled === true ||
+        acknowledgement.result?.acknowledged === false) {
+      return { ok: false, status: "cancelled", cancelled: true };
+    }
+    if (acknowledgement.result?.acknowledged_message_id !== request.message_id) {
+      return {
+        ok: false,
+        status: "invalid_acknowledgement",
+        error: "acknowledgement result did not match the durable message ID",
       };
     }
     return { ok: true, acknowledgement };
@@ -460,7 +476,38 @@ function inboundMessage(request, timeoutMs) {
   return { ok: true, message };
 }
 
-async function waitForRoutedMessageTerminal(request, leasePath, token, deadline) {
+function acknowledgedCorrelatedReply(request, original, notBefore, timeoutMs) {
+  const outbox = callLocalTool(request, "list_messages", {
+    direction: "outbound",
+    state: "acknowledged",
+    include_pruned: true,
+    limit: 1000,
+  }, timeoutMs);
+  if (!outbox.ok) return { ok: false, error: outbox.error };
+  const message = Array.isArray(outbox.result)
+    ? outbox.result.find((entry) => {
+        const createdAt = Date.parse(String(entry.created_at || ""));
+        const acknowledgedAt = Date.parse(String(entry.acknowledged_at || ""));
+        return entry.direction === "outbound" &&
+          entry.state === "acknowledged" &&
+          entry.wake_requested === true &&
+          !new Set(["acknowledgement", "cancellation"]).has(entry.kind) &&
+          entry.correlation_id === request.message_id &&
+          entry.recipient === original.sender &&
+          Number.isFinite(createdAt) && createdAt >= notBefore &&
+          Number.isFinite(acknowledgedAt) && acknowledgedAt >= createdAt;
+      })
+    : null;
+  return { ok: true, message };
+}
+
+async function waitForRoutedMessageTerminal(
+  request,
+  leasePath,
+  token,
+  deadline,
+  controllerAcceptedAt,
+) {
   while (true) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
@@ -491,6 +538,61 @@ async function waitForRoutedMessageTerminal(request, leasePath, token, deadline)
     }
     if (observed.message.state === "cancelled") {
       return { status: "cancelled", acknowledged: false, cancelled: true };
+    }
+    if (observed.message.state === "received") {
+      const evidenceRemaining = deadline - Date.now();
+      if (evidenceRemaining <= 0) {
+        return { status: "router_timed_out", acknowledged: false };
+      }
+      const correlated = acknowledgedCorrelatedReply(
+        request,
+        observed.message,
+        controllerAcceptedAt,
+        evidenceRemaining,
+      );
+      if (!leaseIsCurrent(leasePath, token)) {
+        return { status: "lease_lost", acknowledged: false };
+      }
+      if (Date.now() >= deadline) {
+        return { status: "router_timed_out", acknowledged: false };
+      }
+      if (!correlated.ok) {
+        return {
+          status: "message_state_failed",
+          acknowledged: false,
+          error: correlated.error,
+        };
+      }
+      if (correlated.message) {
+        const guardedAcknowledgement = acknowledgeUnderLeaseGuard(
+          request,
+          leasePath,
+          token,
+          deadline,
+        );
+        if (!guardedAcknowledgement.ok) {
+          return {
+            status: guardedAcknowledgement.status,
+            acknowledged: false,
+            ...(guardedAcknowledgement.cancelled ? { cancelled: true } : {}),
+            ...(guardedAcknowledgement.error
+              ? { error: guardedAcknowledgement.error }
+              : {}),
+          };
+        }
+        return {
+          status: "acknowledged",
+          acknowledged: true,
+          acknowledgement_id:
+            guardedAcknowledgement.acknowledgement.result?.message_id || null,
+          reconciliation: {
+            evidence: "acknowledged_correlated_reply",
+            message_id: correlated.message.id,
+            created_at: correlated.message.created_at,
+            acknowledged_at: correlated.message.acknowledged_at,
+          },
+        };
+      }
     }
     const waitMs = deadline - Date.now();
     if (waitMs <= 0) {
@@ -568,6 +670,7 @@ export async function runWake(leasePath, token) {
             return;
           }
           let controllerHandoff;
+          let controllerAcceptedAt;
           try {
             controllerHandoff = await handoffToCodexThread({
               schema_version: 1,
@@ -578,6 +681,7 @@ export async function runWake(leasePath, token) {
               socket_path: request.codex_ipc_socket,
               timeout_ms: remaining,
             });
+            controllerAcceptedAt = Date.now();
           } catch (controllerError) {
             result = {
               status: "controller_handoff_failed",
@@ -591,6 +695,7 @@ export async function runWake(leasePath, token) {
             leasePath,
             token,
             handoffDeadline,
+            controllerAcceptedAt,
           );
           const routedHandoff = {
             schema_version: 1,
@@ -604,7 +709,9 @@ export async function runWake(leasePath, token) {
           result = {
             ...routed,
             handoff: routedHandoff,
-            ...(routed.status === "acknowledged" ? { acknowledgement_id: null } : {}),
+            ...(routed.status === "acknowledged"
+              ? { acknowledgement_id: routed.acknowledgement_id ?? null }
+              : {}),
           };
           return;
         }
