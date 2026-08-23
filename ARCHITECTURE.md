@@ -3,6 +3,14 @@
 Each Mac has the same plugin, a machine-specific configuration, a SQLite
 spool, and a two-minute launch agent.
 
+HawkGrokSpan is a second deployment of the same source, not a third member of
+this peer pair. It uses isolated `~/.hawkgrokspan` state and connects only M2
+and one trusted Grok VM. Its `message-files` profile filters both MCP discovery
+and dispatch to thirteen link, message, acknowledgement, and verified-artifact
+tools. It has no command, job, queue, plugin, trainer, or wake surface. Release
+activation uses a separate stable link and an isolated rendered-launchd
+directory, so it cannot rewrite the live M2/M4 HawkSpan service definitions.
+
 ## Transport
 
 - Preferred: Thunderbolt Bridge (`192.0.2.10` ↔ `192.0.2.11`)
@@ -34,19 +42,28 @@ relaying the instruction. The peer acknowledges the immutable message ID,
 performs authorized work, and replies with the original ID as the correlation
 boundary.
 
+Each node targets a persistent CLI-created receiver task on the other Mac, not
+an interactive task left open in Codex Desktop. Remote wake is fail-closed
+unless the configuration records an exact task UUID, an absolute Codex
+executable or reviewed store-selection wrapper, an absolute dedicated receiver
+directory, and the `workspace-write` sandbox. HawkSpan clears unrelated Codex
+writable roots on every resume and supplies the dedicated directory with `-C`.
+
 ## Trusted remote operations
 
-Either task can call `run_command` locally or invoke it on the peer through
-`peer_call_tool`. This is the broad control path for routine file work,
-configuration, logs, packaging, process inspection, and general coordination.
-Every invocation records the command, working directory, timing, result,
-authorization reference, and output sizes in the local audit database.
+`run_command` is a full shell as the local HawkSpan user. Local and peer use is
+available only when the configured directional tool list and broad-command
+feature allow it. In controller/worker mode the worker-to-controller direction
+defaults closed and requires an explicit `allow_peer_commands` setting. The
+receiver enforces its inbound list independently of the sender's outbound
+list. Every allowed invocation records the command, working directory, timing,
+result, authorization reference, and output sizes in the local audit database.
 
-Routine operations execute directly. Training starts, deletion, and other
-consequential operations are submitted with `consequential: true` and a durable
-job whose authorization evidence records the owner's approval. This keeps the
-boundary simple: broad control between two trusted Macs, with an explicit gate
-only where the owner requested one.
+The `consequential` field classifies the audit entry; it is not a second
+authorization ceremony. Trainer lifecycle operations are narrower: they
+require the existing durable job to contain recorded owner authorization.
+Deletion, publishing, or work broader than the active owner instruction still
+requires an explicit owner instruction.
 
 ## SimpleTuner control
 
@@ -99,6 +116,13 @@ artifact is terminally marked `source_changed` or `source_missing`; the current
 file must be registered as a new immutable artifact. Receivers cache verified
 manifest/database matches and do not re-hash multi-gigabyte files on every
 background cycle.
+
+HawkGrokSpan additionally requires outgoing files to resolve under configured
+exchange roots, rejects symlink escape, sanitizes remote filenames, and rejects
+non-regular, oversized, path-escaping, or malformed inbound manifests and
+payloads. Its SSH transport requires a dedicated identity, `IdentitiesOnly`,
+strict checking against a dedicated `known_hosts`, and no global-known-hosts
+fallback. Remote verification selects either `shasum` or Linux `sha256sum`.
 
 ## Draw Things validation bridge
 

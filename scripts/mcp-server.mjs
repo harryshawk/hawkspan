@@ -12,6 +12,7 @@ import { createApplicationPluginFramework } from "./application-plugins.mjs";
 import { applyHawkspanEnv, readHawkspanEnv } from "./hawkspan-env.mjs";
 import { runReadinessMonitor } from "./hawkspan-readiness-monitor.mjs";
 import { startLocalControlSurface } from "./local-control-surface.mjs";
+import { ingestMessageInbox, MESSAGE_TARGET_ID } from "./message-inbox.mjs";
 import { createQueueRegistry } from "./queue-registry.mjs";
 import { operationAttemptFits, routeAttemptPlan } from "./route-attempt-plan.mjs";
 import {
@@ -35,6 +36,9 @@ const OUTBOX = path.join(STATE_ROOT, "outbox");
 const ARTIFACTS = path.join(STATE_ROOT, "artifacts");
 const AUDIT = path.join(STATE_ROOT, "audit");
 const SCRIPT_ROOT = path.dirname(fileURLToPath(import.meta.url));
+const SERVER_VERSION = JSON.parse(
+  fs.readFileSync(path.join(SCRIPT_ROOT, "..", ".codex-plugin", "plugin.json"), "utf8"),
+).version;
 const LORA_AUTOMATION_SCRIPT = path.join(SCRIPT_ROOT, "lora-automation.mjs");
 
 for (const dir of [STATE_ROOT, INBOX, OUTBOX, ARTIFACTS, AUDIT]) {
@@ -114,6 +118,23 @@ const defaultConfig = {
 };
 
 const EXACT_TOOL_NAME = /^[a-z][a-z0-9_]{0,127}$/;
+const CODEX_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SURFACE_PROFILES = new Set(["full", "message-files"]);
+const MESSAGE_FILE_TOOLS = new Set([
+  "link_status",
+  "send_message",
+  "retry_message",
+  "receive_messages",
+  "list_messages",
+  "acknowledge_message",
+  "register_artifact",
+  "verify_artifact",
+  "send_artifact",
+  "queue_artifact_delivery",
+  "list_artifacts",
+  "receive_artifacts",
+  "flush_outbox",
+]);
 
 function assertExactToolNames(value, label) {
   if (value === "current") return;
@@ -135,7 +156,122 @@ function assertDirectionalBooleans(value, label) {
   }
 }
 
-function assertPeerCommandConfiguration(configuration) {
+function assertLocalMessageReceiver(configuration) {
+  const receiver = configuration.message_receiver;
+  if (receiver === undefined || receiver === null) return;
+  if (typeof receiver !== "object" || Array.isArray(receiver) ||
+      Object.keys(receiver).some((key) => ![
+        "enabled", "default_target", "targets", "reconcile_interval_seconds",
+        "start_on_mcp_server", "retry_backoff_seconds",
+      ].includes(key))) {
+    throw new Error("message_receiver contains an unsupported field");
+  }
+  if (typeof receiver.enabled !== "boolean") {
+    throw new Error("message_receiver.enabled must be a boolean");
+  }
+  if (!receiver.enabled) return;
+  if (typeof receiver.start_on_mcp_server !== "boolean") {
+    throw new Error("message_receiver.start_on_mcp_server must be a boolean");
+  }
+  if (!Number.isSafeInteger(Number(receiver.reconcile_interval_seconds)) ||
+      Number(receiver.reconcile_interval_seconds) < 5 ||
+      Number(receiver.reconcile_interval_seconds) > 600) {
+    throw new Error("message_receiver.reconcile_interval_seconds must be 5 to 600 seconds");
+  }
+  if (receiver.retry_backoff_seconds !== undefined &&
+      (!Array.isArray(receiver.retry_backoff_seconds) ||
+       receiver.retry_backoff_seconds.length < 1 || receiver.retry_backoff_seconds.length > 8 ||
+       receiver.retry_backoff_seconds.some((value, index, values) =>
+         !Number.isSafeInteger(Number(value)) || Number(value) < 5 || Number(value) > 3600 ||
+         (index > 0 && Number(value) < Number(values[index - 1]))))) {
+    throw new Error("message_receiver.retry_backoff_seconds must be 1 to 8 nondecreasing integers from 5 to 3600");
+  }
+  if (!MESSAGE_TARGET_ID.test(receiver.default_target || "") ||
+      !receiver.targets || typeof receiver.targets !== "object" || Array.isArray(receiver.targets) ||
+      !Object.hasOwn(receiver.targets, receiver.default_target)) {
+    throw new Error("message_receiver.default_target must name a configured target");
+  }
+  const sessionKeys = new Set();
+  const workdirs = new Set();
+  for (const [targetId, target] of Object.entries(receiver.targets)) {
+    if (!MESSAGE_TARGET_ID.test(targetId) || !target || typeof target !== "object" ||
+        Array.isArray(target)) {
+      throw new Error("message_receiver target IDs and definitions are invalid");
+    }
+    const allowedKeys = new Set([
+      "adapter", "command", "workdir", "session_id", "sandbox",
+      "maximum_runtime_seconds", "maximum_turns",
+    ]);
+    if (Object.keys(target).some((key) => !allowedKeys.has(key)) ||
+        !["codex", "grok"].includes(target.adapter)) {
+      throw new Error(`message_receiver target ${targetId} has an invalid adapter or field`);
+    }
+    if (typeof target.command !== "string" || !path.isAbsolute(target.command) ||
+        !/^\/[A-Za-z0-9_./ -]+$/.test(target.command) ||
+        path.normalize(target.command) !== target.command) {
+      throw new Error(`message_receiver target ${targetId} command must be a normalized absolute path`);
+    }
+    const commandStat = fs.lstatSync(target.command);
+    if (!commandStat.isFile() || commandStat.isSymbolicLink() ||
+        (commandStat.mode & 0o111) === 0 || (commandStat.mode & 0o022) !== 0 ||
+        (typeof process.getuid === "function" && commandStat.uid !== 0 &&
+         commandStat.uid !== process.getuid())) {
+      throw new Error(`message_receiver target ${targetId} command is not a trusted executable`);
+    }
+    if (typeof target.workdir !== "string" || !path.isAbsolute(target.workdir) ||
+        path.normalize(target.workdir) !== target.workdir ||
+        path.normalize(target.workdir).split(path.sep).filter(Boolean).length < 3) {
+      throw new Error(`message_receiver target ${targetId} workdir must be a dedicated absolute directory`);
+    }
+    const workdirStat = fs.lstatSync(target.workdir);
+    if (!workdirStat.isDirectory() || workdirStat.isSymbolicLink() ||
+        (workdirStat.mode & 0o022) !== 0 ||
+        (typeof process.getuid === "function" && workdirStat.uid !== process.getuid())) {
+      throw new Error(`message_receiver target ${targetId} workdir must be an owner-only real directory`);
+    }
+    if (!CODEX_THREAD_ID.test(target.session_id || "") ||
+        /^0{8}-0{4}-0{4}-0{4}-0{12}$/i.test(target.session_id)) {
+      throw new Error(`message_receiver target ${targetId} session_id must be an exact persisted UUID`);
+    }
+    const sessionKey = `${target.adapter}:${target.session_id.toLowerCase()}`;
+    if (sessionKeys.has(sessionKey)) {
+      throw new Error(`message_receiver target ${targetId} duplicates an existing adapter session`);
+    }
+    if (workdirs.has(target.workdir)) {
+      throw new Error(`message_receiver target ${targetId} duplicates an existing workdir`);
+    }
+    sessionKeys.add(sessionKey);
+    workdirs.add(target.workdir);
+    if ((target.adapter === "codex" && target.sandbox !== "workspace-write") ||
+        (target.adapter === "grok" && !new Set(["off", "workspace", "hawkgrokspan"]).has(target.sandbox))) {
+      throw new Error(`message_receiver target ${targetId} sandbox does not match its adapter`);
+    }
+    const runtime = Number(target.maximum_runtime_seconds);
+    if (!Number.isSafeInteger(runtime) || runtime < 30 || runtime > 1800) {
+      throw new Error(`message_receiver target ${targetId} maximum runtime must be 30 to 1800 seconds`);
+    }
+    if (target.adapter === "grok") {
+      const turns = Number(target.maximum_turns);
+      if (!Number.isSafeInteger(turns) || turns < 2 || turns > 30) {
+        throw new Error(`message_receiver target ${targetId} maximum turns must be 2 to 30`);
+      }
+    } else if (target.maximum_turns !== undefined) {
+      throw new Error(`message_receiver target ${targetId} maximum_turns is only valid for Grok`);
+    }
+  }
+}
+
+function assertPeerConfiguration(configuration) {
+  const surfaceProfile = configuration.surface_profile || "full";
+  if (!SURFACE_PROFILES.has(surfaceProfile)) {
+    throw new Error("surface_profile must be full or message-files");
+  }
+  const artifactRoots = configuration.transfer?.allowed_artifact_roots;
+  if (artifactRoots !== undefined &&
+      (!Array.isArray(artifactRoots) || artifactRoots.length === 0 ||
+       artifactRoots.some((root) => typeof root !== "string" || !path.isAbsolute(root)))) {
+    throw new Error("transfer.allowed_artifact_roots must be a nonempty array of absolute paths");
+  }
   const roleProfile = configuration.role_profile;
   if (roleProfile !== undefined && roleProfile !== null &&
       !["symmetric", "controller-worker"].includes(roleProfile)) {
@@ -177,6 +313,152 @@ function assertPeerCommandConfiguration(configuration) {
       throw new Error("peer.allowed_tools must be an array of exact tool names");
     }
   }
+  const peer = configuration.peer;
+  if (peer?.transport !== undefined) {
+    const transport = peer.transport;
+    if (!transport || typeof transport !== "object" || Array.isArray(transport) ||
+        transport.kind !== "tailscale-nc" ||
+        Object.keys(transport).some((key) =>
+          key !== "kind" && key !== "command" && key !== "socket")) {
+      throw new Error("peer.transport must be a tailscale-nc transport object");
+    }
+    if (typeof transport.command !== "string" || !path.isAbsolute(transport.command) ||
+        !/^\/[A-Za-z0-9_./-]+$/.test(transport.command) ||
+        path.normalize(transport.command) !== transport.command) {
+      throw new Error("peer.transport.command must be a normalized absolute path without shell metacharacters");
+    }
+    const stat = fs.lstatSync(transport.command);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error("peer.transport.command must be a regular non-symbolic-link file");
+    }
+    if (typeof process.getuid === "function" && stat.uid !== 0 && stat.uid !== process.getuid()) {
+      throw new Error("peer.transport.command must be owned by root or the current user");
+    }
+    if ((stat.mode & 0o022) !== 0 || (stat.mode & 0o111) === 0) {
+      throw new Error("peer.transport.command must be executable and not group- or other-writable");
+    }
+    if (transport.socket !== undefined &&
+        (typeof transport.socket !== "string" || !path.isAbsolute(transport.socket) ||
+         !/^\/[A-Za-z0-9_./-]+$/.test(transport.socket) ||
+         path.normalize(transport.socket) !== transport.socket)) {
+      throw new Error("peer.transport.socket must be a normalized absolute path without shell metacharacters");
+    }
+  }
+  if (surfaceProfile === "message-files") {
+    assertLocalMessageReceiver(configuration);
+    if (configuration.message_receiver?.enabled !== true) {
+      throw new Error("message-files surface requires the local message receiver");
+    }
+    if (configuration.application_plugins?.enabled !== false) {
+      throw new Error("message-files surface requires application_plugins.enabled=false");
+    }
+    if (configuration.local_control?.enabled !== false) {
+      throw new Error("message-files surface requires local_control.enabled=false");
+    }
+    if (configuration.queue_supervisor?.enabled !== false) {
+      throw new Error("message-files surface requires queue_supervisor.enabled=false");
+    }
+    if (configuration.training?.allow_start !== false ||
+        configuration.training?.allow_stop !== false ||
+        configuration.training?.allow_package !== false) {
+      throw new Error("message-files surface requires every training operation disabled");
+    }
+    const configuredPeerTools = configuration.features?.allowed_peer_tools;
+    if (!configuredPeerTools || !Array.isArray(configuredPeerTools.inbound) ||
+        configuredPeerTools.inbound.length !== 0 || !Array.isArray(configuredPeerTools.outbound) ||
+        configuredPeerTools.outbound.length !== 0) {
+      throw new Error("message-files surface requires empty inbound and outbound peer-tool lists");
+    }
+    if (configuration.features?.allow_peer_commands !== false ||
+        configuration.features?.enable_broad_run_command !== false) {
+      throw new Error("message-files surface requires peer and broad commands disabled");
+    }
+    if (!artifactRoots) {
+      throw new Error("message-files surface requires transfer.allowed_artifact_roots");
+    }
+    if (!peer) throw new Error("message-files surface requires a configured peer");
+    if (peer.allow_remote_wake !== false) {
+      throw new Error("message-files surface requires peer.allow_remote_wake=false");
+    }
+    for (const [key, label] of [
+      ["ssh_identity", "peer.ssh_identity"],
+      ["known_hosts", "peer.known_hosts"],
+    ]) {
+      if (typeof peer[key] !== "string" || !path.isAbsolute(peer[key])) {
+        throw new Error(`${label} must be an absolute path for message-files`);
+      }
+      if (!/^\/[A-Za-z0-9_./-]+$/.test(peer[key]) || path.normalize(peer[key]) !== peer[key]) {
+        throw new Error(`${label} must use a normalized path without shell metacharacters`);
+      }
+      const stat = fs.lstatSync(peer[key]);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        throw new Error(`${label} must be a regular non-symbolic-link file`);
+      }
+      if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+        throw new Error(`${label} must be owned by the current user`);
+      }
+    }
+    if ((fs.statSync(peer.ssh_identity).mode & 0o077) !== 0) {
+      throw new Error("peer.ssh_identity must not be accessible by group or other users");
+    }
+    if (typeof peer.user !== "string" || !/^[A-Za-z_][A-Za-z0-9._-]{0,63}$/.test(peer.user)) {
+      throw new Error("peer.user is invalid for message-files");
+    }
+    const hosts = [
+      peer.primary_enabled === false ? null : peer.primary_host,
+      peer.fallback_enabled === false ? null : peer.fallback_host,
+    ].filter(Boolean);
+    if (hosts.length === 0 || hosts.some((host) =>
+      typeof host !== "string" || !/^[A-Za-z0-9][A-Za-z0-9.:%_-]{0,252}$/.test(host))) {
+      throw new Error("message-files requires at least one valid peer host");
+    }
+    for (const key of ["remote_inbox", "remote_artifacts", "remote_audit"]) {
+      if (typeof peer[key] !== "string" || !path.posix.isAbsolute(peer[key]) ||
+          !/^\/[A-Za-z0-9_./-]+$/.test(peer[key]) || path.posix.normalize(peer[key]) !== peer[key]) {
+        throw new Error(`peer.${key} must be an absolute POSIX path for message-files`);
+      }
+    }
+    if (typeof peer.remote_state_dir !== "string" || !path.posix.isAbsolute(peer.remote_state_dir) ||
+        !/^\/[A-Za-z0-9_./-]+$/.test(peer.remote_state_dir) ||
+        path.posix.normalize(peer.remote_state_dir) !== peer.remote_state_dir) {
+      throw new Error("peer.remote_state_dir must be an absolute POSIX path for message-files");
+    }
+    for (const [key, child] of [
+      ["remote_inbox", "inbox"],
+      ["remote_artifacts", "artifacts"],
+      ["remote_audit", "audit"],
+    ]) {
+      if (peer[key] !== path.posix.join(peer.remote_state_dir, child)) {
+        throw new Error(`peer.${key} must be the ${child} directory directly under peer.remote_state_dir`);
+      }
+    }
+    for (const root of artifactRoots) {
+      const stat = fs.lstatSync(root);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error("transfer.allowed_artifact_roots entries must be non-symbolic-link directories");
+      }
+    }
+  }
+  if (!peer) return;
+  if (peer.allow_remote_wake !== undefined && typeof peer.allow_remote_wake !== "boolean") {
+    throw new Error("peer.allow_remote_wake must be a boolean");
+  }
+  if (peer.allow_remote_wake !== true) return;
+  if (typeof peer.thread_id !== "string" || !CODEX_THREAD_ID.test(peer.thread_id)) {
+    throw new Error("peer.thread_id must be an exact Codex task UUID when remote wake is enabled");
+  }
+  if (typeof peer.codex_command !== "string" || !path.isAbsolute(peer.codex_command)) {
+    throw new Error("peer.codex_command must be an absolute executable path when remote wake is enabled");
+  }
+  if (typeof peer.codex_workdir !== "string" || !path.isAbsolute(peer.codex_workdir)) {
+    throw new Error("peer.codex_workdir must be an absolute dedicated receiver directory when remote wake is enabled");
+  }
+  if (path.normalize(peer.codex_workdir).split(path.sep).filter(Boolean).length < 3) {
+    throw new Error("peer.codex_workdir must not be a filesystem, volume, or user-home root");
+  }
+  if (peer.codex_sandbox !== "workspace-write") {
+    throw new Error("peer.codex_sandbox must be workspace-write when remote wake is enabled");
+  }
 }
 
 function readConfig() {
@@ -204,7 +486,16 @@ function readConfig() {
 }
 
 const config = readConfig();
-assertPeerCommandConfiguration(config);
+assertPeerConfiguration(config);
+const isMessageFilesSurface = config.surface_profile === "message-files";
+const boundReceiverTarget = process.env.HAWKGROKSPAN_TARGET_BOT_ID || null;
+if (boundReceiverTarget &&
+    (config.surface_profile !== "message-files" ||
+     config.message_receiver?.enabled !== true ||
+     !MESSAGE_TARGET_ID.test(boundReceiverTarget) ||
+     !Object.hasOwn(config.message_receiver.targets || {}, boundReceiverTarget))) {
+  throw new Error("HAWKGROKSPAN_TARGET_BOT_ID must name a configured local receiver target");
+}
 if (fs.existsSync(installedRevisionPath(STATE_ROOT))) {
   const authority = readReleaseAuthority(STATE_ROOT);
   assertExecutingRelease(authority, path.dirname(SCRIPT_ROOT));
@@ -295,6 +586,26 @@ execWithRetry(`
     details_json TEXT NOT NULL
   );
 `);
+
+if (config.surface_profile === "message-files" &&
+    config.message_receiver?.enabled === true &&
+    config.message_receiver.start_on_mcp_server === true) {
+  const receiverBootstrap = spawnSync(process.execPath, [
+    path.join(SCRIPT_ROOT, "hawkgrokspan-message-receiver.mjs"),
+    "--state-root", STATE_ROOT,
+    "--ensure-supervisor",
+  ], {
+    encoding: "utf8",
+    timeout: 5000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (receiverBootstrap.error || receiverBootstrap.status !== 0) {
+    throw new Error(
+      `local message receiver supervisor failed: ${receiverBootstrap.error?.message ||
+        receiverBootstrap.stderr?.trim() || "unknown error"}`,
+    );
+  }
+}
 
 const queueRegistry = createQueueRegistry(db, {
   retryDelaysMs: config.queue_supervisor.worker_restart_delays_ms,
@@ -415,52 +726,7 @@ function writeEnvelope(envelope) {
 }
 
 function ingestInbox() {
-  let imported = 0;
-  for (const name of fs.readdirSync(INBOX)) {
-    if (!name.endsWith(".json")) continue;
-    const filePath = path.join(INBOX, name);
-    let envelope;
-    try {
-      envelope = JSON.parse(fs.readFileSync(filePath, "utf8"));
-      if (!envelope.id || !envelope.sender || !envelope.recipient) {
-        throw new Error("missing required envelope fields");
-      }
-      const exists = db.prepare("SELECT 1 FROM messages WHERE id=?").get(envelope.id);
-      if (exists) continue;
-      db.prepare(`
-        INSERT INTO messages
-          (id,created_at,sender,recipient,kind,subject,body,correlation_id,
-           direction,state,envelope_path,delivered_via,metadata_json)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-      `).run(
-        envelope.id,
-        envelope.created_at || now(),
-        envelope.sender,
-        envelope.recipient,
-        envelope.kind || "message",
-        envelope.subject || "",
-        envelope.body || "",
-        envelope.correlation_id || null,
-        "inbound",
-        envelope.kind === "acknowledgement" ? "acknowledged" : "received",
-        filePath,
-        envelope.delivered_via || null,
-        json(envelope.metadata),
-      );
-      if (envelope.kind === "acknowledgement" && envelope.correlation_id) {
-        db.prepare(`
-          UPDATE messages
-          SET state='acknowledged', acknowledged_at=?
-          WHERE id=? AND direction='outbound'
-        `).run(envelope.created_at || now(), envelope.correlation_id);
-      }
-      audit("ingest", "message", envelope.id, "received", { file_path: filePath });
-      imported += 1;
-    } catch (error) {
-      audit("ingest", "message", name, "rejected", { error: String(error) });
-    }
-  }
-  return imported;
+  return ingestMessageInbox({ inbox: INBOX, db, audit, now, json });
 }
 
 const routeRetryAfter = new Map();
@@ -483,19 +749,45 @@ function recordRouteSuccess(host) {
   routeRetryAfter.delete(host);
 }
 
-function sshArgs(host, remoteCommand) {
+function sshClientArgs() {
   const args = [];
+  // HGS supplies every security-relevant SSH setting explicitly. Ignore host
+  // and user SSH config so an unrelated or malformed machine-wide include
+  // cannot disable the private message/file link.
+  if (config.surface_profile === "message-files") args.push("-F", "/dev/null");
   if (config.peer.ssh_identity) args.push("-i", config.peer.ssh_identity);
   const connectSeconds = Math.max(1, Math.ceil(config.link.connect_timeout_ms / 1000));
   args.push(
     "-o", "BatchMode=yes",
+    ...(config.peer.ssh_identity ? ["-o", "IdentitiesOnly=yes"] : []),
+    ...(config.peer.known_hosts
+      ? [
+          "-o", "StrictHostKeyChecking=yes",
+          "-o", `UserKnownHostsFile=${config.peer.known_hosts}`,
+          "-o", "GlobalKnownHostsFile=/dev/null",
+        ]
+      : []),
+    ...(config.peer.transport?.kind === "tailscale-nc"
+      ? [
+          "-o",
+          `ProxyCommand=${config.peer.transport.command}` +
+            `${config.peer.transport.socket ? ` --socket=${config.peer.transport.socket}` : ""}` +
+            " nc %h %p",
+        ]
+      : []),
     "-o", `ConnectTimeout=${connectSeconds}`,
     "-o", `ServerAliveInterval=${config.link.server_alive_interval_seconds}`,
     "-o", `ServerAliveCountMax=${config.link.server_alive_count_max}`,
-    `${config.peer.user}@${host}`,
-    remoteCommand,
   );
   return args;
+}
+
+function sshArgs(host, remoteCommand) {
+  return [
+    ...sshClientArgs(),
+    `${config.peer.user}@${host}`,
+    remoteCommand,
+  ];
 }
 
 function ensureRemoteDirectory(host, remoteDir, timeout) {
@@ -609,14 +901,7 @@ function rsyncFile(localPath, remoteDir, remoteName = null) {
         recordRouteFailure(host);
         continue;
       }
-      const sshCommand = [
-        "ssh",
-        ...(config.peer.ssh_identity ? ["-i", config.peer.ssh_identity] : []),
-        "-o", "BatchMode=yes",
-        "-o", `ConnectTimeout=${Math.max(1, Math.ceil(config.link.connect_timeout_ms / 1000))}`,
-        "-o", `ServerAliveInterval=${config.link.server_alive_interval_seconds}`,
-        "-o", `ServerAliveCountMax=${config.link.server_alive_count_max}`,
-      ].join(" ");
+      const sshCommand = ["ssh", ...sshClientArgs()].map(shellQuote).join(" ");
       const resumeArgs = supportsAppendVerify()
         ? ["--partial", "--append-verify"]
         : ["--partial"];
@@ -655,7 +940,8 @@ function retryMessage(args) {
     SELECT * FROM messages WHERE id=? AND direction='outbound'
   `).get(args.message_id);
   if (!row) throw new Error(`outbound message not found: ${args.message_id}`);
-  if (row.state === "delivered" || row.state === "acknowledged") {
+  if (row.state === "acknowledged" ||
+      (row.state === "delivered" && config.surface_profile !== "message-files")) {
     return {
       message_id: row.id,
       envelope_path: row.envelope_path,
@@ -666,6 +952,12 @@ function retryMessage(args) {
   if (!fs.existsSync(row.envelope_path)) {
     throw new Error(`immutable envelope is missing: ${row.envelope_path}`);
   }
+  let persistedEnvelope;
+  try {
+    persistedEnvelope = JSON.parse(fs.readFileSync(row.envelope_path, "utf8"));
+  } catch (error) {
+    throw new Error(`immutable envelope is unreadable: ${error.message}`);
+  }
   if (!config.peer?.remote_inbox) throw new Error("peer.remote_inbox is not configured");
   const delivery = rsyncFile(row.envelope_path, config.peer.remote_inbox);
   if (delivery.ok) {
@@ -673,12 +965,24 @@ function retryMessage(args) {
       .run(delivery.host, row.id);
   }
   let wake = null;
-  if (delivery.ok && row.kind !== "acknowledgement" && args.wake !== false) {
-    wake = wakePeerThread({
-      message_id: row.id,
-      subject: row.subject,
-      body: row.body,
-    });
+  // Quiet-send is gone: wake:false / notify_receiver=false must not skip notify.
+  // const shouldNotify = config.surface_profile === "message-files"
+  //   ? persistedEnvelope.notify_receiver !== false
+  //   : args.wake !== false;
+  const shouldNotify = true;
+  if (delivery.ok && row.kind !== "acknowledgement" && shouldNotify) {
+    wake = config.surface_profile === "message-files"
+      ? {
+          ok: true,
+          mode: "delivery-triggered-local-receiver",
+          target_bot_id: persistedEnvelope.target_bot_id || null,
+          completion_boundary: "durable acknowledgement",
+        }
+      : wakePeerThread({
+          message_id: row.id,
+          subject: row.subject,
+          body: row.body,
+        });
   }
   audit("retry", "message", row.id, delivery.ok ? "delivered" : "queued", {
     delivery,
@@ -693,6 +997,31 @@ function retryMessage(args) {
 }
 
 function sendMessage(args, { onEnvelopeWritten = null } = {}) {
+  if (typeof args.subject !== "string" || args.subject.length === 0 || args.subject.length > 4096) {
+    throw new Error("message subject must be 1 to 4096 characters");
+  }
+  if (typeof args.body !== "string" || Buffer.byteLength(args.body) > 512 * 1024) {
+    throw new Error("message body must be a string no larger than 512 KiB");
+  }
+  if (args.target_bot_id !== undefined && !isMessageFilesSurface) {
+    throw new Error("target_bot_id is available only on the HawkGrokSpan message-files surface");
+  }
+  if (args.target_bot_id !== undefined && !MESSAGE_TARGET_ID.test(args.target_bot_id)) {
+    throw new Error("target_bot_id is invalid");
+  }
+  if (isMessageFilesSurface && args.metadata &&
+      (Object.hasOwn(args.metadata, "target_bot_id") ||
+       Object.hasOwn(args.metadata, "notify_receiver"))) {
+    throw new Error("target_bot_id and notify_receiver are reserved envelope fields");
+  }
+  const envelopeMetadata = { ...(args.metadata || {}) };
+  // Messages always notify. wake:false must not write notify_receiver=false.
+  // const notifyReceiver = args.wake !== false;
+  const notifyReceiver = true;
+  if (isMessageFilesSurface) {
+    if (args.target_bot_id) envelopeMetadata.target_bot_id = args.target_bot_id;
+    envelopeMetadata.notify_receiver = notifyReceiver;
+  }
   const messageId = id("msg");
   const envelope = {
     schema_version: 1,
@@ -704,8 +1033,12 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
     subject: args.subject,
     body: args.body,
     correlation_id: args.correlation_id || null,
-    metadata: args.metadata || {},
+    metadata: envelopeMetadata,
   };
+  if (isMessageFilesSurface) {
+    envelope.target_bot_id = args.target_bot_id || null;
+    envelope.notify_receiver = notifyReceiver;
+  }
   const envelopePath = writeEnvelope(envelope);
   onEnvelopeWritten?.(envelopePath);
   try {
@@ -741,12 +1074,19 @@ function sendMessage(args, { onEnvelopeWritten = null } = {}) {
     }
   }
   let wake = null;
-  if (delivery?.ok && envelope.kind !== "acknowledgement" && args.wake !== false) {
-    wake = wakePeerThread({
-      message_id: messageId,
-      subject: envelope.subject,
-      body: envelope.body,
-    });
+  if (delivery?.ok && envelope.kind !== "acknowledgement" && notifyReceiver) {
+    wake = isMessageFilesSurface
+      ? {
+          ok: true,
+          mode: "delivery-triggered-local-receiver",
+          target_bot_id: envelope.target_bot_id,
+          completion_boundary: "durable acknowledgement",
+        }
+      : wakePeerThread({
+          message_id: messageId,
+          subject: envelope.subject,
+          body: envelope.body,
+        });
   }
   audit("send", "message", messageId, delivery?.ok ? "delivered" : "queued", {
     delivery,
@@ -773,6 +1113,8 @@ function wakePeerThread(args) {
     return { ok: false, error: "peer.thread_id is not configured", attempts: [] };
   }
   const codexCommand = config.peer.codex_command || "codex";
+  const codexWorkdir = config.peer.codex_workdir;
+  const codexSandbox = config.peer.codex_sandbox;
   const remoteNode = config.peer.remote_node || "node";
   let peerRelease = null;
   const discoveryAttempts = [];
@@ -801,6 +1143,7 @@ function wakePeerThread(args) {
   const auditDir = config.peer.remote_audit || `${config.peer.remote_inbox}/../audit`;
   const wakeId = id("wake");
   const logPath = path.posix.join(auditDir, `${wakeId}.log`);
+  const statusPath = path.posix.join(auditDir, `${wakeId}.status`);
   const leasePath = path.posix.join(
     auditDir,
     `wake-${String(config.peer.thread_id).replace(/[^A-Za-z0-9._-]/g, "_")}.lock`,
@@ -823,10 +1166,22 @@ function wakePeerThread(args) {
     ";",
     shellQuote(codexCommand),
     "exec",
+    "-c",
+    shellQuote("sandbox_workspace_write.writable_roots=[]"),
+    "-s",
+    shellQuote(codexSandbox),
+    "-C",
+    shellQuote(codexWorkdir),
     "resume",
     "--skip-git-repo-check",
     shellQuote(config.peer.thread_id),
     shellQuote(prompt),
+    ";",
+    "wake_status=$?",
+    ";",
+    `printf '%s\\n' "$wake_status" > ${shellQuote(statusPath)}`,
+    ";",
+    "exit \"$wake_status\"",
   ].join(" ");
   const command = [
     `mkdir -p ${shellQuote(auditDir)}`,
@@ -834,9 +1189,12 @@ function wakePeerThread(args) {
     "(",
     `mkdir ${shellQuote(leasePath)} 2>/dev/null`,
     "||",
-    "exit 0",
+    "{ printf '%s\\n' WAKE_ALREADY_IN_PROGRESS >&2; exit 75; }",
     ")",
     "&&",
+    `rm -f ${shellQuote(statusPath)}`,
+    "&&",
+    "(",
     "nohup",
     "/bin/sh",
     "-c",
@@ -847,6 +1205,41 @@ function wakePeerThread(args) {
     "<",
     "/dev/null",
     "&",
+    "wake_pid=$!",
+    ";",
+    "wake_check=0",
+    ";",
+    "while [ \"$wake_check\" -lt 5 ]; do",
+    `if [ -f ${shellQuote(statusPath)} ]; then`,
+    `wake_status=$(cat ${shellQuote(statusPath)})`,
+    ";",
+    "if [ \"$wake_status\" -eq 0 ]; then exit 0; fi",
+    ";",
+    "printf 'WAKE_RESUME_FAILED:%s\\n' \"$wake_status\" >&2",
+    ";",
+    "exit 70",
+    ";",
+    "fi",
+    ";",
+    "if ! kill -0 \"$wake_pid\" 2>/dev/null; then",
+    "wait \"$wake_pid\"",
+    ";",
+    "wake_status=$?",
+    ";",
+    "printf 'WAKE_RESUME_FAILED:%s\\n' \"$wake_status\" >&2",
+    ";",
+    "exit 70",
+    ";",
+    "fi",
+    ";",
+    "sleep 1",
+    ";",
+    "wake_check=$((wake_check + 1))",
+    ";",
+    "done",
+    ";",
+    "exit 0",
+    ")",
   ].join(" ");
   const attempts = [...discoveryAttempts.map((attempt) => ({ ...attempt, phase: "release_discovery" }))];
   for (const { host, cycle, delay_ms: delayMs, is_last_route: isLastRoute } of routeAttemptPlan(
@@ -869,6 +1262,27 @@ function wakePeerThread(args) {
         status: result.status,
         error: result.stderr?.trim() || "",
       });
+      if (result.stderr?.includes("WAKE_ALREADY_IN_PROGRESS")) {
+        const error = "peer wake is already in progress";
+        audit("wake", "thread", config.peer.thread_id, "failed", {
+          attempts, wake_id: wakeId, log_path: logPath, error,
+        });
+        return { ok: false, error, wake_id: wakeId, log_path: logPath, attempts };
+      }
+      if (result.stderr?.includes("WAKE_RESUME_FAILED:")) {
+        const error = "peer Codex task resume failed during startup";
+        audit("wake", "thread", config.peer.thread_id, "failed", {
+          attempts, wake_id: wakeId, log_path: logPath, status_path: statusPath, error,
+        });
+        return {
+          ok: false,
+          error,
+          wake_id: wakeId,
+          log_path: logPath,
+          status_path: statusPath,
+          attempts,
+        };
+      }
       if (result.status === 0) {
         recordRouteSuccess(host);
         audit("wake", "thread", config.peer.thread_id, "started", {
@@ -876,9 +1290,19 @@ function wakePeerThread(args) {
           peer_revision: peerRelease.revision,
           wake_id: wakeId,
           log_path: logPath,
+          status_path: statusPath,
+          startup_grace_seconds: 5,
           message_id: args.message_id || null,
         });
-        return { ok: true, host, wake_id: wakeId, log_path: logPath, attempts };
+        return {
+          ok: true,
+          host,
+          wake_id: wakeId,
+          log_path: logPath,
+          status_path: statusPath,
+          verification: "resume remained active through the startup grace period",
+          attempts,
+        };
       }
       recordRouteFailure(host);
   }
@@ -889,18 +1313,30 @@ function wakePeerThread(args) {
 function receiveMessages(args) {
   const imported = ingestInbox();
   const limit = Math.min(Math.max(Number(args.limit || 50), 1), 500);
+  if (boundReceiverTarget && args.target_bot_id && args.target_bot_id !== boundReceiverTarget) {
+    throw new Error("receiver-bound MCP process cannot read another target_bot_id");
+  }
+  const targetBotId = boundReceiverTarget || args.target_bot_id || null;
   const states = args.include_acknowledged
     ? ["received", "acknowledged"]
     : ["received"];
   const placeholders = states.map(() => "?").join(",");
+  const targetClause = targetBotId
+    ? "AND COALESCE(json_extract(metadata_json, '$.target_bot_id'), ?) = ?"
+    : "";
+  const values = [...states];
+  if (targetBotId) {
+    values.push(config.message_receiver?.default_target || null, targetBotId);
+  }
   const rows = db.prepare(`
     SELECT id,created_at,sender,recipient,kind,subject,body,correlation_id,state,
            metadata_json
     FROM messages
     WHERE direction='inbound' AND state IN (${placeholders})
+      ${targetClause}
     ORDER BY created_at ASC
     LIMIT ?
-  `).all(...states, limit);
+  `).all(...values, limit);
   return {
     imported,
     messages: rows.map((row) => ({
@@ -914,6 +1350,10 @@ function receiveMessages(args) {
 function listMessages(args) {
   ingestInbox();
   const limit = Math.min(Math.max(Number(args.limit || 100), 1), 1000);
+  if (boundReceiverTarget && args.target_bot_id && args.target_bot_id !== boundReceiverTarget) {
+    throw new Error("receiver-bound MCP process cannot list another target_bot_id");
+  }
+  const targetBotId = boundReceiverTarget || args.target_bot_id || null;
   const clauses = [];
   const values = [];
   if (args.direction) {
@@ -923,6 +1363,10 @@ function listMessages(args) {
   if (args.state) {
     clauses.push("state=?");
     values.push(args.state);
+  }
+  if (targetBotId) {
+    clauses.push("COALESCE(json_extract(metadata_json, '$.target_bot_id'), ?)=?");
+    values.push(config.message_receiver?.default_target || null, targetBotId);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = db.prepare(`
@@ -943,6 +1387,13 @@ function acknowledgeMessage(args) {
     SELECT * FROM messages WHERE id=? AND direction='inbound'
   `).get(args.message_id);
   if (!row) throw new Error(`inbound message not found: ${args.message_id}`);
+  if (boundReceiverTarget) {
+    const metadata = JSON.parse(row.metadata_json || "{}");
+    const rowTarget = metadata.target_bot_id || config.message_receiver.default_target;
+    if (rowTarget !== boundReceiverTarget) {
+      throw new Error("receiver-bound MCP process cannot acknowledge another target_bot_id");
+    }
+  }
   const acknowledgedAt = now();
   db.prepare(`
     UPDATE messages SET state='acknowledged', acknowledged_at=? WHERE id=?
@@ -969,6 +1420,7 @@ function acknowledgeMessage(args) {
     correlation_id: row.id,
     metadata: { acknowledged_message_id: row.id, acknowledged_at: acknowledgedAt },
     deliver: args.deliver,
+    wake: false,
   });
   audit("acknowledge", "message", row.id, "acknowledged", {
     acknowledgement_id: acknowledgement.message_id,
@@ -1134,9 +1586,20 @@ function jobCountSummary() {
 }
 
 function registerArtifact(args) {
-  const filePath = path.resolve(args.path);
+  const filePath = fs.realpathSync(path.resolve(args.path));
   const stat = fs.statSync(filePath);
   if (!stat.isFile()) throw new Error("artifact path must be a regular file");
+  const allowedRoots = config.transfer?.allowed_artifact_roots || [];
+  if (allowedRoots.length) {
+    const insideAllowedRoot = allowedRoots.some((configuredRoot) => {
+      const root = fs.realpathSync(configuredRoot);
+      const relative = path.relative(root, filePath);
+      return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
+    });
+    if (!insideAllowedRoot) {
+      throw new Error("artifact path is outside transfer.allowed_artifact_roots");
+    }
+  }
   const artifactId = id("artifact");
   const digest = sha256(filePath);
   db.prepare(`
@@ -1213,13 +1676,21 @@ function sendArtifact(args) {
     audit("send", "artifact", row.id, "source_changed", { delivery });
     return { artifact_id: row.id, delivery };
   }
-  const remoteFileName = `${row.id}-${path.basename(row.path)}`;
+  const safeBaseName = path.basename(row.path).replace(/[^A-Za-z0-9._-]/g, "_");
+  const remoteFileName = `${row.id}-${safeBaseName}`;
   const delivery = rsyncFile(row.path, config.peer.remote_artifacts, remoteFileName);
   if (delivery.ok) {
     const remotePath = path.posix.join(config.peer.remote_artifacts, remoteFileName);
+    const remoteDigestCommand = [
+      "if command -v shasum >/dev/null 2>&1; then",
+      `shasum -a 256 ${shellQuote(remotePath)}`,
+      "; elif command -v sha256sum >/dev/null 2>&1; then",
+      `sha256sum ${shellQuote(remotePath)}`,
+      "; else printf '%s\\n' 'no SHA-256 utility available' >&2; exit 127; fi",
+    ].join(" ");
     const verified = spawnSync(
       "ssh",
-      sshArgs(delivery.host, `shasum -a 256 ${shellQuote(remotePath)}`),
+      sshArgs(delivery.host, remoteDigestCommand),
       { encoding: "utf8", timeout: config.link.operation_attempt_timeout_ms },
     );
     const remoteSha256 = verified.status === 0
@@ -1353,10 +1824,31 @@ function receiveArtifacts() {
     if (!name.endsWith(".artifact.json")) continue;
     const manifestPath = path.join(ARTIFACTS, name);
     try {
+      const manifestStat = fs.lstatSync(manifestPath);
+      if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.size > 1024 * 1024) {
+        throw new Error("artifact manifest must be a regular file no larger than 1 MiB");
+      }
       const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      if (typeof manifest.artifact_id !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(manifest.artifact_id)) {
+        throw new Error("artifact manifest ID is invalid");
+      }
+      if (typeof manifest.file_name !== "string" ||
+          path.basename(manifest.file_name) !== manifest.file_name ||
+          !/^[A-Za-z0-9._-]+$/.test(manifest.file_name)) {
+        throw new Error("artifact manifest file_name is invalid");
+      }
+      if (!Number.isSafeInteger(manifest.size_bytes) || manifest.size_bytes < 0 ||
+          typeof manifest.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(manifest.sha256)) {
+        throw new Error("artifact manifest size or SHA-256 is invalid");
+      }
       const filePath = path.join(ARTIFACTS, manifest.file_name);
       if (!fs.existsSync(filePath)) throw new Error(`artifact file is missing: ${manifest.file_name}`);
-      const stat = fs.statSync(filePath);
+      const fileStat = fs.lstatSync(filePath);
+      if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
+        throw new Error("artifact payload must be a regular non-symbolic-link file");
+      }
+      const stat = fileStat;
       const existing = db.prepare(
         "SELECT size_bytes,sha256,state FROM artifacts WHERE id=?"
       ).get(manifest.artifact_id);
@@ -1934,7 +2426,33 @@ function linkStatus() {
     ...jobCountSummary(),
     artifacts: db.prepare("SELECT count(*) AS count FROM artifacts").get().count,
   };
-  const readiness = runReadinessMonitor(config, { once: true });
+  const readiness = config.surface_profile === "message-files"
+    ? {
+        routes: peerCandidates().map((host, index) => {
+          const result = spawnSync("ssh", sshArgs(host, "true"), {
+            encoding: "utf8",
+            timeout: config.link.operation_attempt_timeout_ms,
+          });
+          const ok = result.status === 0;
+          return {
+            role: index === 0 ? "primary" : "fallback",
+            label: index === 0 ? (config.peer.primary_label || "Primary") : (config.peer.fallback_label || "Fallback"),
+            host,
+            local_host: null,
+            network_reachable: ok,
+            transport_ready: ok,
+            ready: ok,
+            failed_layer: ok ? null : "restricted_ssh_login",
+            layers: [{
+              name: "restricted_ssh_login",
+              ok,
+              state: ok ? "ok" : "failed",
+              evidence: ok ? "forced-command transport authenticated" : (result.stderr?.trim() || "restricted SSH transport failed"),
+            }],
+          };
+        }),
+      }
+    : runReadinessMonitor(config, { once: true });
   const routes = readiness.routes.map((route) => {
     const failed = route.layers.find((entry) => !entry.ok);
     return {
@@ -3519,7 +4037,7 @@ const coreTools = [
   },
   {
     name: "send_message",
-    description: "Send routine private M2/M4 coordination over the already-authorized local HawkSpan-D. This is durable, idempotent IPC, not an external communication or consequential action.",
+    description: "Send routine private coordination to the configured paired node as a durable, idempotent envelope.",
     inputSchema: {
       type: "object",
       required: ["subject", "body"],
@@ -3529,6 +4047,13 @@ const coreTools = [
         subject: { type: "string" },
         body: { type: "string" },
         correlation_id: { type: "string" },
+        ...(isMessageFilesSurface ? {
+          target_bot_id: {
+            type: "string",
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            description: "HawkGrokSpan local bot/session route; omitted messages use the peer's configured default target.",
+          },
+        } : {}),
         metadata: { type: "object" },
         deliver: { type: "boolean", default: true },
         wake: { type: "boolean", default: true },
@@ -3591,6 +4116,12 @@ const coreTools = [
       properties: {
         limit: { type: "integer", minimum: 1, maximum: 500 },
         include_acknowledged: { type: "boolean", default: false },
+        ...(isMessageFilesSurface ? {
+          target_bot_id: {
+            type: "string",
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          },
+        } : {}),
       },
       additionalProperties: false,
     },
@@ -3606,6 +4137,12 @@ const coreTools = [
         direction: { type: "string", enum: ["inbound", "outbound"] },
         state: { type: "string" },
         limit: { type: "integer", minimum: 1, maximum: 1000 },
+        ...(isMessageFilesSurface ? {
+          target_bot_id: {
+            type: "string",
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          },
+        } : {}),
       },
       additionalProperties: false,
     },
@@ -4092,6 +4629,11 @@ const presetTools = [
 
 const tools = [...coreTools, ...presetTools, ...pluginFramework.tools];
 toolMap = new Map(tools.map((tool) => [tool.name, tool]));
+const surfaceProfile = config.surface_profile || "full";
+const exposedTools = surfaceProfile === "message-files"
+  ? tools.filter((tool) => MESSAGE_FILE_TOOLS.has(tool.name))
+  : tools;
+const exposedToolMap = new Map(exposedTools.map((tool) => [tool.name, tool]));
 for (const tool of pluginFramework.tools) {
   if (tool.allowedOrigins?.has("peer")) peerToolAllowlist.add(tool.name);
 }
@@ -4101,7 +4643,7 @@ const localControl = await startLocalControlSurface(
     : {
         ...config.local_control,
         allowed_tools: (config.local_control?.allowed_tools || [])
-          .filter((name) => toolMap.has(name)),
+          .filter((name) => exposedToolMap.has(name)),
       },
   callToolInternal,
 );
@@ -4124,7 +4666,10 @@ async function handle(request) {
     success(requestId, {
       protocolVersion: request.params?.protocolVersion || "2025-06-18",
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: "hawkspan", version: "0.1.0" },
+      serverInfo: {
+        name: surfaceProfile === "message-files" ? "hawkgrokspan" : "hawkspan",
+        version: SERVER_VERSION,
+      },
     });
     return;
   }
@@ -4134,12 +4679,12 @@ async function handle(request) {
   }
   if (request.method === "tools/list") {
     success(requestId, {
-      tools: tools.map(({ handler, allowedOrigins, applicationPlugin, ...definition }) => definition),
+      tools: exposedTools.map(({ handler, allowedOrigins, applicationPlugin, ...definition }) => definition),
     });
     return;
   }
   if (request.method === "tools/call") {
-    const tool = toolMap.get(request.params?.name);
+    const tool = exposedToolMap.get(request.params?.name);
     if (!tool) {
       failure(requestId, -32602, `unknown tool: ${request.params?.name}`);
       return;

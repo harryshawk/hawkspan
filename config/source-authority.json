@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "release_version": "0.3.9",
+  "release_version": "0.4.0",
   "canonical_repository": "https://github.com/harryshawk/hawkspan.git",
   "production_branch": "main",
   "staging_repository": "https://github.com/harryshawk/hawkspan-clean-staging.git",

@@ -1,5 +1,26 @@
 # Release Flow
 
+## 2026-08-16 - HawkSpan 0.4.0 HawkGrokSpan candidate
+
+- Request: Preserve the accepted M2/M4 peer deployment and add a separate
+  same-codebase M2/Grok-VM link for messages and verified files only.
+- Source branch: `docs/codex-task-access-recovery`, descended from public
+  HawkSpan 0.3.9.
+- Scope: Add the server-enforced `message-files` surface, bounded outgoing
+  artifact roots, exclusive pinned-host SSH, Linux SHA-256 compatibility,
+  isolated configuration examples, Grok MCP handoff guidance, and real
+  two-server exchange and denial tests.
+- Staging repository and branch: `harryshawk/hawkspan-clean-staging`,
+  `hawkspan-v0.4.0-staging`.
+- M2/M4 invariant: 0.3.9 remains the live accepted pair and is not partially
+  upgraded as part of HawkGrokSpan setup.
+- HawkGrokSpan invariant: M2 may be staged from the exact candidate, but the
+  new link is not accepted until the Grok VM installs the identical revision
+  and real bidirectional messages, acknowledgements, files, digests, and an
+  outside-root denial pass.
+- Production update: pending complete candidate gate, Grok handoff, real-pair
+  acceptance, and explicit owner approval; do not merge or tag 0.4.0 yet.
+
 ## 2026-08-15 - HawkSpan 0.3.9 peer-command boundary enforcement
 
 - Request: Make the configured symmetric or controller-worker relationship a

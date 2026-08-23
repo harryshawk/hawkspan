@@ -120,6 +120,10 @@ const launchdServices = Object.freeze([
   "org.hawkspan.packet-receiver",
 ]);
 
+const hawkGrokSpanLaunchdServices = Object.freeze([
+  "org.hawkgrokspan.message-receiver",
+]);
+
 function xmlEscape(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -133,10 +137,14 @@ export function renderLaunchdPlistBodies(authority, {
   stateRoot,
   nodePath = process.execPath,
   launchAgentsRoot,
+  surfaceProfile = "full",
 } = {}) {
   if (!stateRoot || !launchAgentsRoot) throw new Error("stateRoot and launchAgentsRoot are required");
   const renderedBodies = [];
-  for (const label of launchdServices) {
+  const services = surfaceProfile === "message-files"
+    ? hawkGrokSpanLaunchdServices
+    : launchdServices;
+  for (const label of services) {
     const templatePath = path.join(authority.active_release_root, "launchd", `${label}.plist.template`);
     if (!fs.existsSync(templatePath)) throw new Error(`launchd template is missing: ${templatePath}`);
     const rendered = fs.readFileSync(templatePath, "utf8")
@@ -160,30 +168,35 @@ export function renderLaunchdPlists(authority, options = {}) {
 
 export function validateLiveReleaseConfiguration(authority, { envValues, config, launchdBodies = [] }) {
   const expected = derivedReleasePaths(authority);
+  const isMessageFilesSurface = config.surface_profile === "message-files";
   const mismatches = [];
   const compare = (location, observed, wanted) => {
     if (observed !== wanted) mismatches.push({ location, observed: observed ?? null, expected: wanted });
   };
   compare("hawkspan.env:HAWKSPAN_ACTIVE_RELEASE_ROOT", envValues.HAWKSPAN_ACTIVE_RELEASE_ROOT, expected.active_release_root);
   compare("hawkspan.env:HAWKSPAN_REPOSITORY_DIR", envValues.HAWKSPAN_REPOSITORY_DIR, expected.repository_dir);
-  compare("hawkspan.env:HAWKSPAN_LOCAL_TRAINER_START_SCRIPT", envValues.HAWKSPAN_LOCAL_TRAINER_START_SCRIPT, expected.trainer_start);
-  compare("hawkspan.env:HAWKSPAN_LOCAL_TRAINER_STOP_SCRIPT", envValues.HAWKSPAN_LOCAL_TRAINER_STOP_SCRIPT, expected.trainer_stop);
-  compare("hawkspan.env:HAWKSPAN_LOCAL_TRAINER_PACKAGE_SCRIPT", envValues.HAWKSPAN_LOCAL_TRAINER_PACKAGE_SCRIPT, expected.trainer_package);
+  if (!isMessageFilesSurface) {
+    compare("hawkspan.env:HAWKSPAN_LOCAL_TRAINER_START_SCRIPT", envValues.HAWKSPAN_LOCAL_TRAINER_START_SCRIPT, expected.trainer_start);
+    compare("hawkspan.env:HAWKSPAN_LOCAL_TRAINER_STOP_SCRIPT", envValues.HAWKSPAN_LOCAL_TRAINER_STOP_SCRIPT, expected.trainer_stop);
+    compare("hawkspan.env:HAWKSPAN_LOCAL_TRAINER_PACKAGE_SCRIPT", envValues.HAWKSPAN_LOCAL_TRAINER_PACKAGE_SCRIPT, expected.trainer_package);
+  }
   if (Object.hasOwn(config, "plugin_root")) {
     mismatches.push({ location: "config.json:plugin_root", observed: config.plugin_root, expected: "absent" });
   }
-  compare("config.json:training.start_script", config.training?.start_script, expected.trainer_start);
-  compare("config.json:training.stop_script", config.training?.stop_script, expected.trainer_stop);
-  compare("config.json:training.package_script", config.training?.package_script, expected.trainer_package);
-  compare("config.json:training.runner_script", config.training?.runner_script, expected.trainer_runner);
-  compare("config.json:training.automation_script", config.training?.automation_script, expected.trainer_automation);
-  compare("config.json:training.packet_builder", config.training?.packet_builder, expected.packet_builder);
-  if (!path.isAbsolute(config.training?.node_path || "")) {
-    mismatches.push({
-      location: "config.json:training.node_path",
-      observed: config.training?.node_path ?? null,
-      expected: "absolute executable path",
-    });
+  if (!isMessageFilesSurface) {
+    compare("config.json:training.start_script", config.training?.start_script, expected.trainer_start);
+    compare("config.json:training.stop_script", config.training?.stop_script, expected.trainer_stop);
+    compare("config.json:training.package_script", config.training?.package_script, expected.trainer_package);
+    compare("config.json:training.runner_script", config.training?.runner_script, expected.trainer_runner);
+    compare("config.json:training.automation_script", config.training?.automation_script, expected.trainer_automation);
+    compare("config.json:training.packet_builder", config.training?.packet_builder, expected.packet_builder);
+    if (!path.isAbsolute(config.training?.node_path || "")) {
+      mismatches.push({
+        location: "config.json:training.node_path",
+        observed: config.training?.node_path ?? null,
+        expected: "absolute executable path",
+      });
+    }
   }
   for (const name of ["HAWKSPAN_REMOTE_PLUGIN_ROOT", "HAWKSPAN_REMOTE_CALL_TOOL", "HAWKSPAN_REMOTE_REPOSITORY_DIR"]) {
     if (Object.hasOwn(envValues, name)) mismatches.push({ location: `hawkspan.env:${name}`, observed: envValues[name], expected: "absent" });

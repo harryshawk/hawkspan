@@ -73,6 +73,10 @@ for (const label of launchdLabels) {
     path.join(releaseRoot, "launchd", `${label}.plist.template`),
   );
 }
+fs.copyFileSync(
+  path.join(sourceRoot, "launchd", "org.hawkgrokspan.message-receiver.plist.template"),
+  path.join(releaseRoot, "launchd", "org.hawkgrokspan.message-receiver.plist.template"),
+);
 createReleaseProvenance(releaseRoot, {
   revision: testRevision,
   tree: testTree,
@@ -256,6 +260,67 @@ const mismatches = validateLiveReleaseConfiguration(authority, {
   config: { ...config, plugin_root: "/wrong/release" },
 });
 assert.ok(mismatches.some((entry) => entry.location === "config.json:plugin_root"));
+
+const isolatedStateRoot = path.join(temporaryRoot, "isolated", ".hawkgrokspan");
+const isolatedLaunchAgentsRoot = path.join(isolatedStateRoot, "rendered-launchd");
+const isolatedStableRoot = path.join(homeRoot, ".local", "share", "hawkgrokspan", "current");
+fs.mkdirSync(isolatedStateRoot, { recursive: true });
+fs.writeFileSync(path.join(isolatedStateRoot, "config.json"), `${JSON.stringify({
+  surface_profile: "message-files",
+  node_role: "controller",
+  peer: { user: "peer" },
+  queue_supervisor: { enabled: false },
+  training: {},
+}, null, 2)}\n`, { mode: 0o600 });
+const isolatedActivation = spawnSync(process.execPath, [
+  path.join(sourceRoot, "scripts", "activate-release.mjs"),
+  "--release-root", releaseRoot,
+  "--revision", testRevision,
+], {
+  encoding: "utf8",
+  env: {
+    ...process.env,
+    HOME: homeRoot,
+    HAWKSPAN_STATE_DIR: isolatedStateRoot,
+    HAWKSPAN_STABLE_RELEASE_ROOT: isolatedStableRoot,
+    HAWKSPAN_LAUNCH_AGENTS_DIR: isolatedLaunchAgentsRoot,
+  },
+});
+assert.equal(isolatedActivation.status, 0, isolatedActivation.stderr);
+const isolatedAuthority = readReleaseAuthority(isolatedStateRoot);
+assert.equal(isolatedAuthority.stable_release_root, isolatedStableRoot);
+assert.equal(fs.realpathSync(isolatedStableRoot), resolvedReleaseRoot);
+assert.equal(
+  readHawkspanEnv(path.join(isolatedStateRoot, "hawkspan.env")).HAWKSPAN_QUEUE_SUPERVISOR_ENABLED,
+  "false",
+);
+assert.equal(fs.readlinkSync(authority.stable_release_root), stableTargetBeforePublishFailure);
+assert.equal(
+  fs.existsSync(path.join(isolatedLaunchAgentsRoot, "org.hawkgrokspan.message-receiver.plist")),
+  true,
+);
+for (const label of launchdLabels) {
+  assert.equal(fs.existsSync(path.join(isolatedLaunchAgentsRoot, `${label}.plist`)), false);
+}
+assert.deepEqual(JSON.parse(fs.readFileSync(path.join(isolatedStateRoot, "config.json"), "utf8")).training, {});
+
+const isolatedConfig = JSON.parse(fs.readFileSync(path.join(isolatedStateRoot, "config.json"), "utf8"));
+isolatedConfig.message_receiver = { enabled: true };
+fs.writeFileSync(path.join(isolatedStateRoot, "config.json"), `${JSON.stringify(isolatedConfig, null, 2)}\n`);
+const isolatedLeaseRoot = path.join(isolatedStateRoot, "audit", "message-receiver-supervisor.lock");
+fs.mkdirSync(isolatedLeaseRoot, { recursive: true, mode: 0o700 });
+fs.writeFileSync(path.join(isolatedLeaseRoot, "lease.json"), `${JSON.stringify({
+  pid: process.pid,
+  revision: "c".repeat(40),
+  script_path: path.join(resolvedReleaseRoot, "scripts", "hawkgrokspan-message-receiver.mjs"),
+})}\n`);
+const mixedHgsAudit = auditLocalRelease({
+  stateRoot: isolatedStateRoot,
+  launchAgentsRoot: isolatedLaunchAgentsRoot,
+  checkProcesses: false,
+});
+assert.equal(mixedHgsAudit.valid, false);
+assert.ok(mixedHgsAudit.mismatches.some(({ location }) => location.endsWith(":revision")));
 
 fs.rmSync(temporaryRoot, { recursive: true, force: true });
 process.stdout.write("release authority tests passed\n");

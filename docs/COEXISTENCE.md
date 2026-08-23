@@ -19,3 +19,9 @@ only HawkSpan-owned files and its own launch service.
 
 Core install and uninstall automation is deferred. Until it is added and
 tested, do not claim that D can remove an installed core service automatically.
+
+HawkGrokSpan is the supported second-instance pattern for the owner's trusted
+Grok VM. It shares the reviewed source code but uses `~/.hawkgrokspan`, a
+distinct MCP registration, a dedicated SSH identity and `known_hosts`, and a
+messages/files-only surface. It must not read or write the existing M2/M4
+HawkSpan state or credentials. See [HAWKGROKSPAN.md](HAWKGROKSPAN.md).

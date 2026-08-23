@@ -6,6 +6,8 @@
     "user": "controlleruser",
     "thread_id": "replace-with-peer-task-id",
     "codex_command": "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "codex_workdir": "/Users/controlleruser/Documents/Codex/HawkSpan-Wake-Receiver",
+    "codex_sandbox": "workspace-write",
     "allow_remote_wake": true,
     "remote_node": "/opt/homebrew/bin/node",
     "primary_host": "192.0.2.10",

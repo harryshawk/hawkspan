@@ -1,0 +1,9 @@
+# Merge this table into the `.grok/config.toml` loaded by the dedicated HGS
+# receiver workspace after replacing every absolute placeholder. Do not put
+# credentials in this file.
+[mcp_servers.hawkgrokspan]
+command = "/ABSOLUTE/PERSISTENT/NODE/BIN/node"
+args = ["/home/GROK_VM_USER/.local/share/hawkgrokspan/current/scripts/mcp-server.mjs"]
+env = { HAWKSPAN_STATE_DIR = "/home/GROK_VM_USER/.hawkgrokspan", HAWKSPAN_CONFIG = "/home/GROK_VM_USER/.hawkgrokspan/config.json", HAWKSPAN_LOCAL_CONTROL_DISABLED = "1" }
+startup_timeout_sec = 30
+tool_timeout_sec = 300

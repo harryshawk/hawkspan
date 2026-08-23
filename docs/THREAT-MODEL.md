@@ -22,8 +22,22 @@ or a security boundary against a malicious administrator.
 - loopback-only HTML binding, per-process request token, and HTML allowlist;
 - peer tool allowlisting and BatchMode SSH;
 - durable lifecycle records and interrupted-run recovery;
+- dedicated workspace-bounded Codex wake receivers that are not held open by
+  the desktop app;
 - immutable artifact registration and SHA-256 verification;
 - namespace, state, service, and installation isolation.
+
+For HawkGrokSpan, the Grok VM is trusted to exchange messages and selected
+files but is not trusted with the M2/M4 control surface. The server therefore
+removes command, peer-tool, job, queue, application-plugin, trainer, and wake
+operations from discovery and dispatch; requires bounded artifact roots; and
+requires an exclusive pinned-host SSH configuration. Prompt instructions and
+an MCP client's displayed tool list are not treated as the enforcement layer.
+Each HawkGrokSpan SSH public key must also be installed as a forced-command key
+using `hawkgrokspan-ssh-gateway.mjs`; a normal login-capable `authorized_keys`
+entry would bypass the MCP boundary and is prohibited. The gateway independently
+rejects interactive shells, command execution, sending files from the receiver,
+path escape, forwarding, PTY allocation, and unrecognized rsync options.
 
 ## Residual risks
 
@@ -37,5 +51,10 @@ partially completed.
 
 Install only reviewed plugins, keep allowlists narrow, use dedicated accounts
 and SSH identities where practical, pin host keys, protect configuration and
-state permissions, and reconcile external application state before retrying
-interrupted work.
+state permissions, keep wake receivers in dedicated directories with unrelated
+writable roots removed, and reconcile external application state before
+retrying interrupted work.
+
+Grok's own built-in tools remain outside HawkGrokSpan's control. The restricted
+profile limits only what the VM can reach through HawkGrokSpan, so the VM and
+its Grok sandbox remain separate trust decisions.
