@@ -454,10 +454,11 @@ function removeRecoverableLease(targetId, target) {
     if (lease.initializing === true && ageMs <= 10000) return false;
     const claimedAgeMs = Date.now() - Number(lease.claimed_at_ms || 0);
     if (Number(lease.claimed_at_ms) > 0 && claimedAgeMs <= 5000) return false;
+    // A live worker owns this session until its bounded runtime expires. Process
+    // inspection can briefly fail or report an incomplete argv on Linux; that
+    // must not be treated as permission to drop the lease and start siblings.
+    if (ageMs <= (target.maximumRuntimeSeconds + 60) * 1000) return false;
     const verified = matchesLeaseProcess(lease, { mode: "worker", targetId });
-    const currentRelease = path.resolve(String(lease.script_path || "")) === scriptPath &&
-      lease.revision === receiverRevision;
-    if (verified && currentRelease && ageMs <= (target.maximumRuntimeSeconds + 60) * 1000) return false;
     if (verified) {
       try { process.kill(-Number(lease.pid), "SIGTERM"); } catch {
         try { process.kill(Number(lease.pid), "SIGTERM"); } catch {}
