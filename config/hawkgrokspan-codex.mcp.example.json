@@ -1,9 +1,8 @@
 {
   "mcpServers": {
     "hawkgrokspan": {
-      "command": "/usr/bin/env",
+      "command": "/ABSOLUTE/PERSISTENT/NODE",
       "args": [
-        "node",
         "/Users/OWNER/.local/share/hawkgrokspan/current/scripts/mcp-server.mjs"
       ],
       "env": {

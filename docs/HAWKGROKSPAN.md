@@ -69,7 +69,8 @@ received `routing_failure` is a terminal status notice: HGS records it once and
 never wakes a bot or sends a reply to that notice.
 
 Each configured target has its own owner-controlled working directory, exact
-CLI executable, matching sandbox, maximum runtime, and fenced process lease.
+CLI executable, exact persisted session, maximum runtime, and fenced process
+lease.
 One slow bot therefore cannot block another bot. The receiver coalesces messages
 that arrive while a target is active, checks again before ending, and treats the
 durable message acknowledgement as completion. Starting a CLI process is not
@@ -89,9 +90,8 @@ runtime. A reused or unrelated PID is never signalled and cannot wedge the
 lease. The old supervisor checks release authority every second and retires when
 activation changes revisions; launchd restarts the exact stable-link revision.
 The managed service also publishes a one-second, exact-revision heartbeat in
-the isolated HGS audit directory. Grok Build starts its MCP server inside a
-sandbox that may not permit process enumeration; MCP startup uses the fresh
-heartbeat to recognize the existing receiver instead of spawning duplicates.
+the isolated HGS audit directory. MCP startup uses the fresh heartbeat to
+recognize the existing receiver instead of spawning duplicates.
 The heartbeat expires after five seconds and is not treated as live after a
 service crash or revision change.
 This supervisor is local notification plumbing, not remotely invocable command
@@ -208,10 +208,10 @@ tailscale --socket="$HOME/HawkGrokSpan/TailscaleState/tailscaled.sock" \
   serve --bg --tcp=22 tcp://127.0.0.1:22
 ```
 
-The Grok workspace sandbox may report a root-owned `/usr/bin/tailscale` as an
-unrelated owner. Copy that already-reviewed binary to the owner-only workspace,
-verify both SHA-256 values match, and point only `peer.transport.command` at the
-owned regular executable:
+Set `peer.transport.command` to the exact persistent Tailscale executable used
+by this VM and record the userspace socket. If an update replaces that binary,
+recheck the path and version before restarting HGS. An owner-controlled copy is
+also valid when the environment does not keep `/usr/bin/tailscale` persistent:
 
 ```sh
 mkdir -p "$HOME/HawkGrokSpan/bin"
@@ -280,7 +280,9 @@ session-name creation or discovery is not an accepted substitute.
 
 Install HGS as a separate Codex plugin, not as an alternate configuration of
 the normal HawkSpan plugin. Its MCP entry must use the stable HGS release and
-isolated state shown in `config/hawkgrokspan-codex.mcp.example.json`. Install a
+isolated state shown in `config/hawkgrokspan-codex.mcp.example.json`. The full
+procedure is in [`INSTALL-HGS-CODEX-PLUGIN.md`](INSTALL-HGS-CODEX-PLUGIN.md).
+Install a
 `delegate-to-grok` skill with this bounded workflow so any Codex task can use
 the same registered worker without knowing SSH, Tailscale, or session details:
 
@@ -289,7 +291,9 @@ the same registered worker without knowing SSH, Tailscale, or session details:
    deliverable and acceptance condition;
 3. register and send only requested input files from the HGS exchange root,
    preserving artifact IDs and SHA-256 values;
-4. send the assignment to the registered `grok-primary` target;
+4. omit `recipient` so HGS uses the configured peer node, set `target_bot_id`
+   to the registered `grok-primary` target, and name the requesting endpoint's
+   return target in the assignment;
 5. treat delivery as mailbox receipt, not completion; wait for durable
    acknowledgement and a result message;
 6. import and independently verify returned files before applying them;
@@ -298,8 +302,8 @@ the same registered worker without knowing SSH, Tailscale, or session details:
    from inference.
 
 The workflow permits messages and verified files only. It does not grant a
-Codex task remote shell, deployment, credential transfer, normal HawkSpan
-control, or permission to broaden the Grok sandbox. Operational replies are
+Codex task remote shell, deployment, credential transfer, or normal HawkSpan
+control. Operational replies are
 addressed to the requesting Codex endpoint; the human owner is contacted only
 for a new decision, authorization, login/2FA, or physical action.
 
@@ -309,6 +313,10 @@ reliability. Raising this bound does not broaden tool permissions, but it must
 remain finite and be rechecked after a Grok CLI update.
 
 ### Adding a direct second Codex node
+
+Follow [`INSTALL-HGS-SECOND-CODEX.md`](INSTALL-HGS-SECOND-CODEX.md). It uses
+the same HGS source with separate state and a separate Grok session; it is not
+a fork of the product.
 
 The current HGS configuration has one transport peer per state directory. To
 give a second Mac direct Grok access without relaying through M2, create a second
@@ -402,43 +410,29 @@ messages, and files unchanged; it only postpones bot processing.
    stable release path and an exact persistent Node executable, never an
    extracted handoff, old package path, or PATH-dependent `/usr/bin/env node`.
    Merge it into the Grok configuration actually loaded by the dedicated
-   receiver workspace. Create
-   `.grok/sandbox.toml` in the dedicated workspace with
-   the following profile so the sandboxed Grok session can write only HGS state
-   and returned artifacts inside the configured exchange root:
+   receiver workspace.
 
-   ```toml
-   [profiles.hawkgrokspan]
-   extends = "workspace"
-   read_write = [
-     "/home/GROK_VM_USER/.hawkgrokspan",
-     "/home/GROK_VM_USER/HawkGrokSpan/Exchange"
-   ]
-   ```
-
-   Set each Grok receiver target's `sandbox` to `hawkgrokspan`. The built-in
-   `workspace` profile cannot open the HGS SQLite state outside the workspace,
-   while `off` grants substantially broader machine access and is not accepted.
-   Because no person is present to answer a headless tool prompt, the installed
+   HGS is designed for a small, high-trust node network. Create and resume the
+   dedicated Grok receiver session with sandbox `off`; the receiver omits a
+   conflicting `--sandbox` flag for such a session. The HGS functional boundary
+   comes from the receiver's exact tool list, not an additional low-trust OS
+   sandbox. Because no person is present to answer a headless tool prompt, the
    receiver passes exact per-tool allow rules for the same thirteen HGS
    message/file tools. For coding/file assignments it also derives exact
    `Write(ROOT/**)` and `Edit(ROOT/**)` rules only from the configured
    `transfer.allowed_artifact_roots`, plus `Bash(node ROOT/*)` for a single-file
    Node self-test in that root. The receiver prompt requires Write/Edit for file
-   creation and forbids terminal redirection or command chaining. Unmatched
-   writes and terminal commands remain denied. It does not enable Grok's broad
-   always-approve mode.
+   creation and forbids terminal redirection or command chaining. HGS command,
+   peer-control, trainer, deployment, and credential tools are not offered to
+   the receiver.
    Without these narrow rules, Grok cancels the first `receive_messages` call
    and a delivered message remains unread.
 8. Install the official Grok CLI and authenticate with the documented headless
-   device-code flow. Only after the stable MCP path, sandbox profile, state
-   directory, and owned Tailscale command are correct, create the dedicated
-   persisted Grok session
-   under `--sandbox hawkgrokspan`. Confirm that exact session lists all thirteen
-   HGS tools, then write its UUID into the receiver target. Grok binds a session
-   to its creation profile and may retain MCP startup failure state; a session
-   created under `workspace`, `off`, or before the MCP prerequisites were fixed
-   is not an accepted receiver session.
+   device-code flow. After the stable MCP path, state directory, and Tailscale
+   command are correct, create the dedicated persisted Grok session with
+   sandbox `off`. Confirm that exact session lists all thirteen HGS tools, then
+   write its UUID into the receiver target with `sandbox: "off"`. Grok binds a
+   session to its creation profile, so those values must match.
    Record its exact real executable, version, digest, and resumable UUID. Recheck
    all four after a Grok CLI update.
 9. Start the exact installed HGS receiver on both nodes. On macOS, install the

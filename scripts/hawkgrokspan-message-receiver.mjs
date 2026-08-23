@@ -153,8 +153,8 @@ function validateTarget(targetId) {
   if (target.adapter === "codex" && target.sandbox !== "workspace-write") {
     fail(`Codex target ${targetId} requires the workspace-write sandbox`);
   }
-  if (target.adapter === "grok" && !new Set(["workspace", "hawkgrokspan"]).has(target.sandbox)) {
-    fail(`Grok target ${targetId} requires the workspace or hawkgrokspan sandbox`);
+  if (target.adapter === "grok" && !new Set(["off", "workspace", "hawkgrokspan"]).has(target.sandbox)) {
+    fail(`Grok target ${targetId} sandbox is invalid`);
   }
   const maximumRuntimeSeconds = Number(target.maximum_runtime_seconds);
   if (!Number.isSafeInteger(maximumRuntimeSeconds) || maximumRuntimeSeconds < 30 ||
@@ -932,12 +932,13 @@ function commandFor(prompt) {
     "--allow", `Edit(${root}/**)`,
     "--allow", `Bash(node ${root}/*)`,
   ]);
+  const sandboxArgs = target.sandbox === "off" ? [] : ["--sandbox", target.sandbox];
   return [target.command, [
     "-p", prompt,
     "--resume", target.session_id,
     "--cwd", target.workdir,
     "--output-format", "json",
-    "--sandbox", target.sandbox,
+    ...sandboxArgs,
     "--max-turns", String(target.maximumTurns),
     "--tools", tools.join(","),
     ...toolPermissions,

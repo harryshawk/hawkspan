@@ -243,7 +243,7 @@ function assertLocalMessageReceiver(configuration) {
     sessionKeys.add(sessionKey);
     workdirs.add(target.workdir);
     if ((target.adapter === "codex" && target.sandbox !== "workspace-write") ||
-        (target.adapter === "grok" && !new Set(["workspace", "hawkgrokspan"]).has(target.sandbox))) {
+        (target.adapter === "grok" && !new Set(["off", "workspace", "hawkgrokspan"]).has(target.sandbox))) {
       throw new Error(`message_receiver target ${targetId} sandbox does not match its adapter`);
     }
     const runtime = Number(target.maximum_runtime_seconds);

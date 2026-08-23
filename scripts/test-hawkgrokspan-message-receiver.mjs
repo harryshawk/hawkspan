@@ -95,7 +95,7 @@ const config = {
         command: mockAgent,
         workdir: grokWorkdir,
         session_id: "20000000-0000-0000-0000-000000000002",
-        sandbox: "workspace",
+        sandbox: "off",
         maximum_runtime_seconds: 30,
         maximum_turns: 8,
       },
@@ -286,6 +286,8 @@ assert.deepEqual(codexInvocation.argv.slice(0, 7), [
 ]);
 assert.ok(codexInvocation.argv.includes("10000000-0000-0000-0000-000000000001"));
 assert.ok(grokInvocation.argv.includes("--resume"));
+assert.equal(grokInvocation.argv.includes("--sandbox"), false,
+  "trusted Grok session created with sandbox off must resume without a conflicting sandbox flag");
 assert.ok(grokInvocation.argv.includes("MCPTool(hawkgrokspan__receive_messages)"));
 assert.ok(grokInvocation.argv.includes(`Write(${artifacts}/**)`));
 assert.ok(grokInvocation.argv.includes(`Edit(${artifacts}/**)`));

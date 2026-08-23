@@ -16,8 +16,10 @@ HawkSpan for Grok work.
    action.
 3. For input files, use only the configured HGS exchange root, register each
    artifact, send it, and include its artifact ID and SHA-256 in the assignment.
-4. Send the assignment to the registered `grok-primary` target. Ordinary HGS
-   messages notify the receiver automatically; do not use Extra Awake.
+4. Omit `recipient` so HGS uses the configured peer node, set `target_bot_id`
+   to the registered `grok-primary` target, and state the requesting endpoint's
+   return target in the assignment. Ordinary HGS messages notify the receiver
+   automatically; do not use Extra Awake.
 5. Treat delivery as mailbox receipt, not completion. Wait for durable
    acknowledgement and a result message. Import returned artifacts and
    independently verify their SHA-256.
@@ -30,5 +32,4 @@ HawkSpan for Grok work.
    verified.
 
 HawkGrokSpan authorizes message and verified file exchange, not remote shell,
-deployment, credential transfer, network changes, normal HawkSpan control, or a
-broader Grok sandbox.
+deployment, credential transfer, network changes, or normal HawkSpan control.

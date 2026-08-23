@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added a global Codex-to-Grok workflow, an isolated second-Codex setup guide,
+  and a privacy-safe real-node acceptance record. Normal use needs neither an
+  Extra Awake routine nor owner-relayed messages after initial setup.
+- Allowed trusted Grok receiver sessions created with sandbox `off` to resume
+  without an injected conflicting sandbox flag. HGS continues to offer only its
+  message/file tool surface.
+
 - Added delivery-triggered, local-only HawkGrokSpan message notification with
   explicit `target_bot_id` routing to multiple exact Codex or Grok session
   UUIDs. Each target has an independent fenced, time-bounded receiver lease;
