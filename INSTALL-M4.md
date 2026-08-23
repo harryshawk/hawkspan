@@ -1,5 +1,8 @@
 # Install HawkSpan-D on the M4
 
+> This installs normal HawkSpan. For an isolated M4-to-Grok HGS peer, use
+> [`docs/INSTALL-HGS-SECOND-CODEX.md`](docs/INSTALL-HGS-SECOND-CODEX.md).
+
 This installation must not interrupt an active SimpleTuner process.
 
 ## 1. Install the M2 public key

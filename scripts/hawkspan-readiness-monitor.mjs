@@ -87,6 +87,14 @@ function sshArgs(config, host, remoteCommand) {
   const aliveCount = Number(config.link?.server_alive_count_max || 3);
   args.push(
     "-o", "BatchMode=yes",
+    ...(config.peer?.transport?.kind === "tailscale-nc"
+      ? [
+          "-o",
+          `ProxyCommand=${config.peer.transport.command}` +
+            `${config.peer.transport.socket ? ` --socket=${config.peer.transport.socket}` : ""}` +
+            " nc %h %p",
+        ]
+      : []),
     "-o", `ConnectTimeout=${connectSeconds}`,
     "-o", `ServerAliveInterval=${aliveInterval}`,
     "-o", `ServerAliveCountMax=${aliveCount}`,

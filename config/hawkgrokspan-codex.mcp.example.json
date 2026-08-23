@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "hawkgrokspan": {
+      "command": "/ABSOLUTE/PERSISTENT/NODE",
+      "args": [
+        "/Users/OWNER/.local/share/hawkgrokspan/current/scripts/mcp-server.mjs"
+      ],
+      "env": {
+        "HAWKSPAN_STATE_DIR": "/Users/OWNER/.hawkgrokspan",
+        "HAWKSPAN_CONFIG": "/Users/OWNER/.hawkgrokspan/config.json",
+        "HAWKSPAN_LOCAL_CONTROL_DISABLED": "1"
+      }
+    }
+  }
+}

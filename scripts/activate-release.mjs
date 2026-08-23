@@ -41,6 +41,13 @@ for (const [name, value] of Object.entries(HAWKSPAN_OPERATIONAL_ENV_DEFAULTS)) {
   if (!Object.hasOwn(envValues, name)) envValues[name] = value;
 }
 const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
+const isHawkGrokSpan = config.surface_profile === "message-files";
+// An explicit JSON switch is owner configuration, not a weaker suggestion than
+// the generated operational default. Preserve it when materializing the env
+// authority so restricted profiles cannot be silently broadened on activation.
+if (typeof config.queue_supervisor?.enabled === "boolean") {
+  envValues.HAWKSPAN_QUEUE_SUPERVISOR_ENABLED = String(config.queue_supervisor.enabled);
+}
 for (const name of ["remote_plugin_root", "remote_call_tool"]) {
   if (Object.hasOwn(config.peer || {}, name)) {
     throw new Error(`static peer release path is unsupported: config.json peer.${name}`);
@@ -50,7 +57,10 @@ for (const name of ["remote_plugin_root", "remote_call_tool"]) {
 const authority = prepareReleaseAuthority(stateRoot, {
   revision,
   activeReleaseRoot: releaseRoot,
-  stableReleaseRoot: path.join(os.homedir(), ".local", "share", "hawkspan", "current"),
+  stableReleaseRoot: path.resolve(
+    process.env.HAWKSPAN_STABLE_RELEASE_ROOT ||
+      path.join(os.homedir(), ".local", "share", "hawkspan", "current"),
+  ),
 });
 const derived = derivedReleasePaths(authority);
 const nodePath = path.resolve(process.env.HAWKSPAN_NODE || process.execPath);
@@ -62,17 +72,19 @@ envValues.HAWKSPAN_LOCAL_TRAINER_PACKAGE_SCRIPT = derived.trainer_package;
 const envBody = serializeHawkspanEnv(envValues);
 
 delete config.plugin_root;
-config.training = {
-  ...(config.training || {}),
-  node_path: nodePath,
-  start_script: derived.trainer_start,
-  stop_script: derived.trainer_stop,
-  package_script: derived.trainer_package,
-  runner_script: derived.trainer_runner,
-  automation_script: derived.trainer_automation,
-  packet_builder: derived.packet_builder,
-};
-if (config.node_role === "controller") {
+if (!isHawkGrokSpan) {
+  config.training = {
+    ...(config.training || {}),
+    node_path: nodePath,
+    start_script: derived.trainer_start,
+    stop_script: derived.trainer_stop,
+    package_script: derived.trainer_package,
+    runner_script: derived.trainer_runner,
+    automation_script: derived.trainer_automation,
+    packet_builder: derived.packet_builder,
+  };
+}
+if (!isHawkGrokSpan && config.node_role === "controller") {
   config.packet_receiver = {
     staging_root: path.join(stateRoot, "artifacts"),
     destination_root: path.join(stateRoot, "received-packets"),
@@ -88,6 +100,7 @@ const renderedLaunchd = renderLaunchdPlistBodies(authority, {
   stateRoot,
   nodePath,
   launchAgentsRoot: process.env.HAWKSPAN_LAUNCH_AGENTS_DIR || path.join(os.homedir(), "Library", "LaunchAgents"),
+  surfaceProfile: config.surface_profile || "full",
 });
 
 const publishTargets = [

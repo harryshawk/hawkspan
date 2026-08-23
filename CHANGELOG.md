@@ -1,5 +1,88 @@
 # Changelog
 
+## Unreleased
+
+- Added a global Codex-to-Grok workflow, an isolated second-Codex setup guide,
+  and a privacy-safe real-node acceptance record. Normal use needs neither an
+  Extra Awake routine nor owner-relayed messages after initial setup.
+- Allowed trusted Grok receiver sessions created with sandbox `off` to resume
+  without an injected conflicting sandbox flag. HGS continues to offer only its
+  message/file tool surface.
+
+- Added delivery-triggered, local-only HawkGrokSpan message notification with
+  explicit `target_bot_id` routing to multiple exact Codex or Grok session
+  UUIDs. Each target has an independent fenced, time-bounded receiver lease;
+  durable acknowledgement, not process launch, remains completion.
+- Added a release-fenced local reconciliation supervisor that starts on inbox
+  delivery and HGS MCP startup, imports acknowledgement envelopes without bot
+  launch, and retries unacknowledged work after adapter failure, goal conflict,
+  or timeout without requiring another owner-relayed message.
+- Added a separate managed macOS HGS receiver service, exact revision/script
+  leases, PID-reuse-safe recovery, bounded retry backoff, terminal sender-visible
+  routing failures, and a five-second containment deadline after TERM/KILL.
+- Made the durable imported message row authoritative, rejecting replacement
+  files that try to change a message's bot route, notification intent, or body.
+- Documented the official Grok CLI path, headless device authentication, and the
+  requirement for a new persisted CLI session rather than a Grok Bot agent UUID.
+- Persisted the message notification choice in each immutable envelope so
+  retries cannot silently re-enable notification. Acknowledgements never
+  launch a bot, old untargeted messages use the configured default target, and
+  remote wake/program control remains disabled.
+- Canonicalized receive-only rsync directory targets so legitimate message and
+  artifact-manifest deliveries with a trailing slash remain inside the boundary.
+- Allowed the receive-only SSH gateway to accept rsync's safe `--append`
+  receiver option, which appears during real resumable delivery.
+- Allowed the receive-only SSH gateway to accept rsync's safe `--dirs` option,
+  which the macOS client adds during real message and artifact delivery.
+- Added the same-codebase HawkGrokSpan profile for an isolated M2/Grok-VM
+  message and verified-file link. The server exposes only thirteen link,
+  message, acknowledgement, and artifact tools; direct calls to commands,
+  peer tools, jobs, queues, plugins, and trainers fail closed.
+- Required dedicated SSH identity and pinned `known_hosts` files for the
+  HawkGrokSpan profile, bounded outgoing artifact roots against normal and
+  symlink path escape, and accepted either `shasum` or Linux `sha256sum` for
+  remote verification.
+- Restricted each HawkGrokSpan SSH key to a receive-only forced-command gateway
+  that denies interactive shells, arbitrary commands, forwarding, sender-mode
+  rsync, unrecognized options, and path escape.
+- Made release activation preserve an explicit queue-supervisor switch when it
+  materializes `hawkspan.env`, preventing a generated default from overriding
+  the restricted profile's reviewed `false` value.
+- Added real two-server envelope, acknowledgement, artifact, malformed-startup,
+  tool-surface, strict-transport, and file-boundary tests plus a Grok VM handoff
+  guide and configuration templates.
+- Added a custom stable-release-root activation boundary so a HawkGrokSpan
+  endpoint can use the same exact source without rewriting the live HawkSpan
+  service link or launchd definitions.
+- Made MCP identity report the installed plugin version and removed M2/M4-only
+  wording from the generic durable message tool used by HawkGrokSpan.
+
+- Documented safe recovery when an existing Codex task remains read-only after
+  Full Access is selected: continue in a new Full Access task, reverify the
+  unchanged plugin packet, and do not substitute Computer Use, peer commands,
+  permission changes, or HawkSpan service/IPC workarounds for the reviewed
+  local installer.
+- Documented wakeup deployment requirements and acceptance: both real peer task
+  IDs, remote-wake enablement on both nodes, the peer Codex command's access to
+  the same Codex home and SQLite store as the desktop task, idle-task testing,
+  and authoritative remote-log verification instead of trusting asynchronous
+  launcher success.
+- Documented the desktop writer-lease failure and the supported deployment
+  pattern: persistent CLI-created wake-receiver tasks that are not left open in
+  Codex Desktop, opposite receiver IDs recorded on both peers, and
+  resume wrappers pinned to dedicated workspace directories with unrelated
+  writable roots removed for external Codex stores.
+- Made that wake boundary executable policy: startup now rejects remote wake
+  without an exact receiver UUID, absolute executable and dedicated workdir,
+  and `workspace-write`; generated resumes clear unrelated writable roots.
+- Recorded that restoring the durable message/wakeup path is a blocking repair;
+  unrelated readiness checks must remain deferred until bidirectional wakeup
+  acceptance passes.
+- Documented the network-sandbox readiness false negative: `ping: sendto:
+  Operation not permitted` from a restricted Codex shell is not link-failure
+  evidence, and acceptance must use the exact installed monitor with normal
+  host network access.
+
 ## 0.3.9 - 2026-08-15
 
 - Enforced configured inbound and outbound peer-tool allowlists and peer

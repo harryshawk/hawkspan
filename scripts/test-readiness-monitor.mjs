@@ -13,6 +13,11 @@ const config = {
     fallback_label: "Ethernet",
     fallback_local_host: "192.0.2.12",
     fallback_host: "192.0.2.13",
+    transport: {
+      kind: "tailscale-nc",
+      command: "/usr/bin/tailscale",
+      socket: "/run/user/501/hawkgrokspan-tailscaled.sock",
+    },
   },
   readiness: {
     ssh_login_timeout_ms: 7000,
@@ -40,6 +45,9 @@ const sshArgs = __test.sshArgs(config, "192.0.2.11", "true");
 assert(sshArgs.includes("ConnectTimeout=9"));
 assert(sshArgs.includes("ServerAliveInterval=11"));
 assert(sshArgs.includes("ServerAliveCountMax=4"));
+assert(sshArgs.includes(
+  "ProxyCommand=/usr/bin/tailscale --socket=/run/user/501/hawkgrokspan-tailscaled.sock nc %h %p",
+));
 assert.equal(__test.sshOperationTimeout(config), 54000);
 
 process.stdout.write("hawkspan readiness monitor tests passed\n");
